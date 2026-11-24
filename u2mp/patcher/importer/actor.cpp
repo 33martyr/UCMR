@@ -163,11 +163,13 @@ std::optional<std::string> tex_kind(const std::string &shrt) {
     if (ends("_c") || ends("_clr") || ends("-c") || ends("_color")) return "-color";
     if (ends("_n") || ends("_nmt") || ends("-n") || ends("_normal") || ends("-normals")) return "-normal";
     if (ends("_s") || ends("_spc") || ends("-s") || ends("_spec") || ends("-spec-mask")) return "-spec-mask";
+    if (ends("_e") || ends("-e") || ends("_emissive") || ends("-emissive")) return "-incand";
     if (ends("-trans") || ends("_trans") || ends("-alpha") || ends("_alpha") || ends("-opacity") || ends("_opacity")) return "-trans";
     std::string low = base;
     std::transform(low.begin(), low.end(), low.begin(), [](unsigned char c) { return char(std::tolower(c)); });
     if (low.find("incand") != std::string::npos) return "-incand";
     if (low.find("occupancy") != std::string::npos || low.find("frost") != std::string::npos || low.find("snow") != std::string::npos) return "-frost";
+    if (low.find("hero_evil_") != std::string::npos) return "-color";
     return std::nullopt;
 }
 std::set<std::string> split_set(const std::string &s, const std::string &seps) {
@@ -611,6 +613,7 @@ void convert_actor_pak(const fs::path &ps3_path, const fs::path &tmpl_path, cons
         const TMat *tm;
         std::vector<TMat::Param> params;
         std::vector<Bind> binds;
+        std::vector<std::string> feats;
     };
     std::vector<MatRec> mat_recs;
     for (const std::string &mn : used_mats) {
@@ -704,7 +707,7 @@ void convert_actor_pak(const fs::path &ps3_path, const fs::path &tmpl_path, cons
                     n == "g_ambientocclusiontint" || (skin_mat && n.rfind("g_colorbrightness", 0) == 0))
                     v = 1.0;
                 else if (n.rfind("g_uvoffset", 0) == 0 || n.rfind("g_timescroll", 0) == 0 || n == "g_distortionstrength" ||
-                         n.rfind("g_distortionintensity", 0) == 0 || n.rfind("g_rim", 0) == 0 || n == "g_incandescencestrength" ||
+                         n.rfind("g_distortionintensity", 0) == 0 || n.rfind("g_rim", 0) == 0 ||
                          n == "g_specularbrightness" || n == "g_specularenvironmentstrength" || n == "g_specularsecondlobebrightness" ||
                          n == "g_specularmetalness")
                     v = 0.0;
@@ -713,7 +716,7 @@ void convert_actor_pak(const fs::path &ps3_path, const fs::path &tmpl_path, cons
             }
         std::map<std::string, std::shared_ptr<Ps3Tex>> by_path;
         for (const auto &x : ps3tex) by_path[dir_of(x->shrt)] = x;
-        MatRec rec{mn, "", &tm, std::move(params), {}};
+        MatRec rec{mn, "", &tm, std::move(params), {}, tm.feats};
         for (const auto &b : tm.binds) {
             std::vector<std::string> want;
             for (const auto &[suf, ps] : TEX_KINDS)
@@ -740,6 +743,35 @@ void convert_actor_pak(const fs::path &ps3_path, const fs::path &tmpl_path, cons
             } else
                 e.made = tmpl_texture(b.full);   // environment maps, cornea, hair noise ...: the template's texture
             rec.binds.push_back({b.pname, use(e), b.shrt, b.full});
+        }
+        if (!exact) {
+            std::shared_ptr<Ps3Tex> inc;
+            for (const auto &x : own)
+                if (x->kind && *x->kind == "-incand") { inc = x; break; }
+            if (inc) {
+                auto has_bind = [&](const char *n) {
+                    return std::any_of(rec.binds.begin(), rec.binds.end(), [&](const Bind &b) { return b.pname == n; });
+                };
+                if (!has_bind("g_tIncandescenceMaskMap")) {
+                    Ref_ ce;
+                    ce.lazy = inc;
+                    rec.binds.push_back({"g_tIncandescenceMaskMap", use(ce), inc->shrt, ""});
+                }
+                if (std::find(rec.feats.begin(), rec.feats.end(), "ND_INCANDESCENCE") == rec.feats.end())
+                    rec.feats.push_back("ND_INCANDESCENCE");
+                auto ensure = [&](const char *n, double v) {
+                    for (auto &pp : rec.params)
+                        if (norm(pp.name) == norm(n)) { put(pp.vals, 0, v); return; }
+                    TMat::Param pp;
+                    pp.name = n;
+                    pp.cnt = 1;
+                    pp.vals.assign(16, 0);
+                    put(pp.vals, 0, v);
+                    rec.params.push_back(std::move(pp));
+                };
+                ensure("g_fIncandescenceStrength", 4.0);
+                ensure("g_fIncandescenceMaskStength", 1.0);
+            }
         }
         rec.name = dir_of(mn) + ":" + last_of(mn) + fmt(",00000000-0000-0000-0000-%012llx,", (unsigned long long)sidl(mn)) + tm.shader;
         mat_recs.push_back(std::move(rec));
@@ -974,7 +1006,7 @@ void convert_actor_pak(const fs::path &ps3_path, const fs::path &tmpl_path, cons
     for (const MatRec &m : mat_recs) {
         const TMat &tm = *m.tm;
         const size_t foff = featb->size();
-        for (const std::string &f : tm.feats) featb->ptr(strs, S(f));
+        for (const std::string &f : m.feats) featb->ptr(strs, S(f));
         const size_t poff = parb->size();
         for (const auto &pa : m.params) {
             const size_t voff = valb->size();
@@ -992,9 +1024,9 @@ void convert_actor_pak(const fs::path &ps3_path, const fs::path &tmpl_path, cons
             bindb->ptr(strs, S(b.pname)).ptr(strs, S(shrt)).ptr(strs, S(full)).i32(-1).u32(0).u64(0);
         }
         matb->ptr(strs, S(m.name)).ptr(strs, S(tm.shader));
-        matb->ptr(tm.feats.empty() ? nullptr : featb, int64_t(foff)).ptr(strs, S(tm.hash));
+        matb->ptr(m.feats.empty() ? nullptr : featb, int64_t(foff)).ptr(strs, S(tm.hash));
         matb->ptr(m.params.empty() ? nullptr : parb, int64_t(poff)).ptr(m.binds.empty() ? nullptr : bindb, int64_t(boff));
-        matb->u32(tm.feats.size()).u32(m.params.size()).u32(m.binds.size()).u32(tm.x3);
+        matb->u32(m.feats.size()).u32(m.params.size()).u32(m.binds.size()).u32(tm.x3);
         matb->u32(tm.tail).u32(0);
     }
     for (const auto &b : {featb, parb, valb, bindb, matb, texb})
