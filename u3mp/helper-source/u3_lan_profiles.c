@@ -377,6 +377,7 @@ __attribute__((visibility("hidden"))) int32_t u3x_queue_send(uintptr_t base,cons
 __attribute__((visibility("hidden"))) uint64_t u3x_network_usec(void);
 __attribute__((visibility("hidden"))) void u3x_retag_net_profile(uint8_t *page);
 __attribute__((visibility("hidden"))) void u3x_fam_natives_link(uintptr_t base);   /* N18 net-command */
+__attribute__((visibility("hidden"))) void u3x_m05_row(uintptr_t base,int32_t *ev,int after);   /* v7.258 fam: LIST_MATCHMAKING row */
 __attribute__((visibility("hidden"))) void u3x_fam_notice1(uintptr_t base);   /* NP-R6 server notice 1 */
 __attribute__((visibility("hidden"))) int u3x_net_profile_source(uintptr_t base,int32_t *ev,void *s);
 __attribute__((visibility("hidden"))) int u3x_film_select(uintptr_t base,void *s,int idx);
@@ -9297,8 +9298,10 @@ EXT static int m05_source(uintptr_t base,int32_t *event,ProfileState *s){
  if(native_gate_closed(base,event))return 1;
  uint8_t *lan=(uint8_t*)(base+0x17d5c60u),keep=*lan;
  if(keep&&m03.run&&onb_rows_online()&&M05_FILL())*lan=0;
+ if(tg==0x4d4d00c5u)u3x_m05_row(base,event,0);   /* v7.258: LIST_MATCHMAKING op 10 remembered */
  if(fn)((void(*)(int32_t*))(base+fn))(event);else mmv_source(base,event,s);
  if(tg==0x4d4d00c5u&&event[0]==6&&event[1]>0&&m03.run&&N02_ON()){event[1]=0;n02_d[6]++;}   /* n002: PS3's left panel minus Tournament = Profile only (PS4 rows: Profile, Tips, Paid Boosters) */
+ if(tg==0x4d4d00c5u)u3x_m05_row(base,event,1);   /* v7.258: the highlighted row kept across rebuilds */
  *lan=keep;return 1;}
 /* fixer L n005: defined in the n005 block at the end of the file (its diagnostics array must come after n04_d) */
 EXT static int n05_backout(uintptr_t base);

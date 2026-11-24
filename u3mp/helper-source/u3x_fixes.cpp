@@ -47080,6 +47080,18 @@ XP_FN void u3x_xp_room_msg(uint8_t *m, uint32_t id) {
 // touched (the game reads it).
 XP_FN void u3x_xp_md_out(uint8_t *o, uint32_t id, uint32_t n) {
     using namespace xp;
+    // v7.258: the member data a Create (303, data at +168, length at +38) or a Join (304, data at +24, length at +12)
+    // carries gets the same capability marks as a 314 (net level +0x2c, message layer v2, matchmaking v2 +0x2b). A
+    // matchmaking room's members send no 314 after their join, so without them the room never saw a v2 PC: the v2
+    // host took every PC for an old helper (stand-in vote, no player list, no map vote).
+    if ((id == 303 && n >= 232) || (id == 304 && n >= 88)) {
+        uint8_t *md = o + (id == 303 ? 168 : 24);
+        if (o[id == 303 ? 38 : 12] != 0x40 || md[0x19]) return;
+        if (st.base) u3x_hs_md_mark(st.base, md);
+        pmsg::cap_mark(md);
+        u3x_mm_md_mark(md);
+        return;
+    }
     if (id != 314 || n < 80 || o[4] != 0x40) return;
     if (!o[16 + 0x19]) pmsg::cap_mark(o + 16);   // v7.253 pm (R9): "message layer v2", party and match
     if (!o[16 + 0x19]) u3x_mm_md_mark(o + 16);   // v7.254 mm: "matchmaking v2" (+0x2b bit 0)
@@ -54722,6 +54734,8 @@ struct State {
     uint32_t actions[32];
     uint8_t after_pending;
     uint16_t hero_said;   // v7.256: records whose hero look was put back this match (one log line each)
+    int32_t m05_row, m05_last;   // v7.258: LIST_MATCHMAKING's highlighted / last row, + 1 (0 = none)
+    uint32_t m05_seen;           // v7.258: net clock of its last request
 };
 U3X_BSS State st;
 struct NativeRec { uint64_t fn, cname; uint32_t csid, pad0; uint64_t sname; uint32_t ssid, pad1; uint64_t next; };
@@ -55074,6 +55088,29 @@ FAM_FN void hero_hold(uintptr_t base, void *s) {
         Line l;
         l.s(t_hero).d(i).s(t_hero_slot).d(static_cast<uint32_t>(slot)).s(t_hero_was).d(was).s(t_hero_now).d(look[0]);
         say(l.s(t_hero_ns).x(ns, 2).z(), -1);
+    }
+}
+// v7.258: LIST_MATCHMAKING (the matchmaking page's Profile / Tips / Paid Boosters, through m05_source) keeps the row the
+// player highlighted while the page rebuilds the list: every search row and net state change of the search rebuilt it,
+// the list asked its source for the selected row (op 5) and the game's source answered the first one, so the highlight
+// went back to Profile and Paid Boosters could not be reached. Op 10 (a row selected) is remembered, op 5 answers it
+// while it is inside the list (op 6 = the last row). A list not asked for a second (page left) starts afresh at the
+// game's row. after = 0 before the game's source, 1 after it.
+FAM_FN void u3x_m05_row(uintptr_t base, int32_t *ev, int after) {
+    using namespace fam;
+    // st.m05_row / st.m05_last hold the row + 1 (0 = none), so the state starts zeroed
+    if (!after) {
+        const uint32_t t = static_cast<uint32_t>(u3x_net_clock(base));
+        if (t - st.m05_seen > 300) st.m05_row = st.m05_last = 0;   // 300 net ticks = 1 s
+        st.m05_seen = t;
+        if (ev[0] == 10 && ev[1] >= 0) st.m05_row = ev[1] + 1;
+        return;
+    }
+    if (ev[0] == 6) {
+        st.m05_last = ev[1] >= 0 ? ev[1] + 1 : 0;
+        if (st.m05_row > st.m05_last) st.m05_row = 0;
+    } else if (ev[0] == 5 && st.m05_row && (!st.m05_last || st.m05_row <= st.m05_last)) {
+        ev[1] = st.m05_row - 1;
     }
 }
 // every frame (ring tick): lobby entry, the connect step, the page after connecting, the rename keyboard, the co-op
