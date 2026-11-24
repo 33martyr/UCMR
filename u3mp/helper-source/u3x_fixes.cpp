@@ -1720,7 +1720,6 @@ U3H_IMPORT int u3h_start_match_catch(uintptr_t base, void *s, uint32_t id);
 U3H_IMPORT int u3h_film_action(uintptr_t base, const int32_t *ev);
 U3H_IMPORT int u3h_community_catch(uintptr_t base, void *s, uint32_t id);
 U3H_IMPORT void u3h_treasure_first_row(void *s);
-U3H_IMPORT void u3h_motd_ok(uintptr_t base, void *s);
 U3H_IMPORT void u3h_mission_take(uintptr_t base, void *s);
 U3H_IMPORT void u3h_party_kick_promote(uintptr_t base, int promote);
 U3H_IMPORT void u3h_report_popup(uintptr_t base, void *s);
@@ -1892,7 +1891,7 @@ extern "C" int u3x_menu_back(uintptr_t base, uint8_t *m, int silent);
 extern "C" void u3x_menu_close(uintptr_t base, uint8_t *m);
 
 // n032: in LAN Party (or, with ea[122] bit 2, only in offline mode) the Records page gets PS3 1.19's online rows
-// (two extra rows ahead of the native ones, Legacy, Message of the Day), and the player card's tab bar and body run
+// (two extra rows ahead of the native ones, Legacy; v7.256: no Message of the Day row), and the player card's tab bar and body run
 // their natives with the LAN byte cleared, as net.bin has only the online entry for that page. ea[122] bit 0 keeps
 // the 3 LAN Records rows, bit 1 leaves the card alone. ea[125] counts Records answers (low 16) and row clicks (<< 16),
 // ea[127] card calls run as online (low 24) and retags (<< 24).
@@ -10804,9 +10803,6 @@ constexpr uint32_t TITLE_HAT_STATS = 0x2e153e84u, TITLE_DLC = 0x9811415du;
 constexpr uint32_t TEXT_ON = 0xd1831446u, TEXT_OFF = 0x32066ec9u;
 constexpr uintptr_t PROFILE_HAT_STATS = 0x215c, PROFILE_DLC = 0xac8;
 
-// Records: Message of the Day
-constexpr uint32_t TITLE_MOTD = 0xa6694384u, MOTD_BODY = 0x60edaa4fu, MOTD_TITLE = 0xc6467f2du, MOTD_CLOSE = 0xe1e040aau;
-
 // "new" marker item type
 constexpr int32_t ITEM_TYPE_NEW = 0x2f;
 
@@ -10907,14 +10903,14 @@ extern "C" U3X_FN int u3x_net_profile_source(uintptr_t base, int32_t *ev, void *
     return 1;
 }
 
-// 4.9: six Records rows in LAN play: 0, 1 online rows; 2, 3 LAN rows 0, 1; 4 Message of the Day; 5 LAN row 2
+// 4.9: five Records rows in LAN play: 0, 1 online rows; 2, 3, 4 LAN rows 0, 1, 2 (v7.256: no Message of the Day row)
 extern "C" U3X_FN int u3x_n32_call(uintptr_t base, int32_t *ev, void *s, void (*native)(int32_t *)) {
     using namespace g28b;
     const int32_t op = ev[0];
 
     if (op == OP_LAST_ROW) {
         native(ev);
-        if (ev[W_ROW] >= 0) ev[W_ROW] += 3;
+        if (ev[W_ROW] >= 0) ev[W_ROW] += 2;
         uint32_t &counter = ext_ea()[125];
         counter = (counter & 0xffff0000u) | ((counter + 1) & 0xffffu);
         return 1;
@@ -10926,25 +10922,14 @@ extern "C" U3X_FN int u3x_n32_call(uintptr_t base, int32_t *ev, void *s, void (*
     else return 0;
     const int32_t row = ev[row_word];
 
-    if (row == 5 || row == 2 || row == 3) {   // a LAN row of the game, under its own number
-        ev[row_word] = row == 5 ? 2 : row - 2;
+    if (row >= 2 && row <= 4) {   // a LAN row of the game, under its own number
+        ev[row_word] = row - 2;
         native(ev);
         ev[row_word] = row;
         return 1;
     }
 
-    if (row == 4) {
-        if (op == OP_TEXT) {
-            if (ev[W_TEXT_SLOT] == 0) text_answer(ev, u3h_text(base, s, TITLE_MOTD));
-        } else if (op == OP_ROW_TEXT_ID) {
-            ev[W_ROW] = static_cast<int32_t>(TITLE_MOTD);
-        } else if (op == OP_CLICK) {
-            u3h_show_dialog(base, s, MOTD_BODY, MOTD_TITLE, 0, 0, 0, MOTD_CLOSE);
-        }
-        return 1;
-    }
-
-    if (row < 0 || row >= 6) return 1;
+    if (row < 0 || row >= 5) return 1;
 
     // row 0 or 1: the game's online row, read from the game
     const uint8_t *entry = reinterpret_cast<const uint8_t *>(base + IMG_ONLINE_RECORDS) + 16 * row;
@@ -27662,7 +27647,7 @@ U3X_FN uint32_t u3x_lobby_menu_rows(uintptr_t base, int online, int coop, uint32
 }  // namespace r2_G31
 namespace r2_G32 {
 // ===== r2 begin G32/part.cpp =====
-// G32: menu actions (catch-all dispatcher, lobby rows, Custom Game entry, LAN choice, profile list, MOTD OK, quit
+// G32: menu actions (catch-all dispatcher, lobby rows, Custom Game entry, LAN choice, profile list, quit
 // count). Written from spec G32_menu_actions.md.
 
 extern "C" {
@@ -27682,7 +27667,6 @@ int u3h_start_match_catch(uintptr_t base, void *s, uint32_t id);
 int u3h_film_action(uintptr_t base, const int32_t *ev);
 int u3h_community_catch(uintptr_t base, void *s, uint32_t id);
 void u3h_treasure_first_row(void *s);
-void u3h_motd_ok(uintptr_t base, void *s);
 void u3h_mission_take(uintptr_t base, void *s);
 void u3h_party_kick_promote(uintptr_t base, int promote);
 int u3x_sync_kick(uintptr_t base);   // v7.253 sync block (R2: PS3's in-match kick, events 82 / 81)
@@ -27707,7 +27691,6 @@ void u3x_custom_game(uintptr_t base, void *s);
 void u3x_menu_action(uintptr_t base, const int32_t *ev, void *s);
 int u3x_profile_list_op(uintptr_t base, int32_t *ev, void *s);
 void u3x_lobby_row(uintptr_t base, const int32_t *ev, void *s);
-void u3x_motd_ok(uintptr_t base, void *s);
 void u3x_mp_quit(uintptr_t base, void *s);
 void u3x_fam_action_note(uint32_t action);   // v7.254 fam block (end of the file)
 }
@@ -27751,7 +27734,6 @@ constexpr uint32_t ACT_TREASURES = 0xe9bce205u;
 constexpr uint32_t ACT_RECORDS = 0x420f5e96u;
 constexpr uint32_t ACT_UNLOCKS = 0x58dda3cdu;
 constexpr uint32_t ACT_MISSIONS = 0xe4794ab9u;
-constexpr uint32_t ACT_MOTD_OK = 0xab58f9dau;
 constexpr uint32_t ACT_MISSION_TAKE = 0xea1f40c5u;
 constexpr uint32_t ACT_LOCK_PARTY = 0xccbf832eu;
 constexpr uint32_t ACT_UNLOCK_PARTY = 0x0d0c91cdu;
@@ -27803,7 +27785,7 @@ constexpr int SLOT_LEAVE = 7;
 // ---- helper state block words
 constexpr uintptr_t EXT_COOP_WORDS = 0x100;
 constexpr uint32_t SWITCH_OFF = 2;   // bit 1 of ea[0] / ea[1]
-constexpr int EA_DELETE_SWITCH = 0, EA_119_SWITCH = 1, EA_MOTD_OK = 36, EA_QUITS = 37, EA_REPORT_HANDLER = 96;
+constexpr int EA_DELETE_SWITCH = 0, EA_119_SWITCH = 1, EA_QUITS = 37, EA_REPORT_HANDLER = 96;
 constexpr int EB_LOBBY_ACTION = 168, EB_START_MATCH = 169;
 
 // ---- state object fields
@@ -27938,7 +27920,6 @@ U3X_FN void u3x_menu_action(uintptr_t base, const int32_t *ev, void *s) {
     case ACT_RECORDS: u3h_show(base, s, PAGE_RECORDS, 0); break;
     case ACT_UNLOCKS: u3h_show(base, s, PAGE_UNLOCKS, 0); break;
     case ACT_MISSIONS: u3h_show(base, s, PAGE_MISSIONS, 0); break;
-    case ACT_MOTD_OK: u3h_motd_ok(base, s); break;
     case ACT_MISSION_TAKE: u3h_mission_take(base, s); break;
     case ACT_LOCK_PARTY: at<uint8_t>(base + G_PARTY_LOCKED) = 1; break;
     case ACT_UNLOCK_PARTY: at<uint8_t>(base + G_PARTY_LOCKED) = 0; break;
@@ -28020,18 +28001,6 @@ U3X_FN void u3x_lobby_row(uintptr_t base, const int32_t *ev, void *s) {
     case ROW_SPLITSCREEN: u3h_splitscreen(base, s); break;
     default: u3x_lobby_action(base, s, action); break;
     }
-}
-
-// 4.8 the OK button of the message-of-the-day page
-U3X_FN void u3x_motd_ok(uintptr_t base, void *s) {
-    using namespace g32;
-    if ((ext_ea()[EA_119_SWITCH] & SWITCH_OFF) == 0) {
-        game_call<void>(base + FN_MENU_SOUND, static_cast<int32_t>(0));
-        ext_ea()[EA_MOTD_OK]++;
-    }
-    u3h_show(base, s, PAGE_MULTIPLAYER, 0);
-    if ((ext_ea()[EA_119_SWITCH] & SWITCH_OFF) == 0)
-        game_call<void>(base + FN_REBUILD_HISTORY, reinterpret_cast<void *>(base + G_MENU));
 }
 
 // 4.9 back on the multiplayer page while the record still says "in a match": count a quit
@@ -54541,12 +54510,8 @@ uint32_t u3x_popup_id(uintptr_t base);
 //  * F2 MM-R2 (SPEC-motd-tips 2, R6): the lobby "tips" are YouTube videos of the dead YouTube data API v2; PS3 shows
 //    nothing today, so nothing is fetched or shown here either (the lobby video panel stays empty).
 //  * Final round (SPEC-families2): MM-R3 team-list mute rows (u3x_fam_team_mute), NP-R4 owned-content word, NP-R5 the
-//    page after connecting + the restored MOTD page, NP-R6 emblem reset (first connect, server notice 1), NP-R8 legacy
+//    page after connecting, NP-R6 emblem reset (first connect, server notice 1), NP-R8 legacy
 //    mark, N18 the `net-command` native, builder subs 43 / 44 (rename action, PAGE_LOADOUTS).
-//  * MOTD text (SPEC-motd-tips 1, R2..R5): no request; the body is PS3's: the texts of net18.bin's *motd-text-0* ..
-//    *motd-text-9* (one text id each) from the downloaded networking text bank (/data/u3-networking.bin), appended,
-//    at most 2047 bytes, "UNKNOWN STRING!!!" for an id the bank lacks, empty without data; the rest of the page's
-//    requests go to PS4's twin source 0x761bd0 (title 0xc6467f2d, OK 0xab58f9da).
 //  * F2 MM-R5 / F5 NP-R3 (u3x_fam_tick, once per connect, when the startup reaches the lobby): the leaderboard week
 //    (data 0x8466d21a, first word, as u3x_lb_week_board reads it) is logged; when it is there and the profile's stored
 //    week (record +0x1f20) differs, the nine weekly counters (+0x1c54 +0x1c58 +0x1eac +0x1f24 .. +0x1f38) are zeroed,
@@ -54682,10 +54647,8 @@ FAM_FN bool legacy_mark(uint8_t *rec) {
     return true;
 }
 // NP-R5 (5.2 / 5.3): the page after connecting. Online with an EULA row whose version is not the accepted one -> EULA;
-// Online Pass counts as owned (owner); else MULTIPLAYER. v7.255: PS3 shows PAGE_MULTIPLAYER_MOTD online here, but the
-// imported page could not be closed on PC (its OK button took no input, 0.10.159), so the page stays off until it is
-// fixed and tested live; the helper's MOTD dialog (x060) shows the message instead, as in v7.253.
-constexpr uint32_t PG_MULTIPLAYER = 0x53cbb5f2, PG_EULA = 0xda1f28d9, PG_MOTD = 0xd6f98d11;
+// Online Pass counts as owned (owner); else MULTIPLAYER (v7.256: the Message of the Day is removed, owner 2026-11-24)
+constexpr uint32_t PG_MULTIPLAYER = 0x53cbb5f2, PG_EULA = 0xda1f28d9;
 FAM_FN uint32_t page_after_connect(bool lan, bool eula_row, uint32_t eula_version, uint32_t accepted) {
     if (!lan && eula_row && accepted != eula_version) return PG_EULA;
     return PG_MULTIPLAYER;
@@ -54700,98 +54663,6 @@ FAM_FN uint32_t net_command_stats(uint32_t symbol, uint32_t players, uint32_t *o
     if (players > 3) out[n++] = NC_STAT4;
     return n;
 }
-// ---- SPEC-motd-tips 1 (MOTD body, PS3 rule): net18.bin's ten symbols *motd-text-0* .. *motd-text-9* (a symbol's
-// value = one text id), each id looked up in the downloaded "networking" text bank, the texts appended in order
-// the name ids of *motd-text-0* .. *motd-text-9* (the name-id CRC; fam_test computes them from the names)
-FAM_RO const uint32_t motd_sym[10] = {0x548bd230, 0x869213ec, 0xf4794c3f, 0x26608de3, 0x11aff399,
-                                      0xc3b63245, 0xb15d6d96, 0x6344ac4a, 0xdec39162, 0x0cda50be};
-FAM_RO const char motd_unknown[] = "UNKNOWN STRING!!!";   // the text of an id the bank does not have
-constexpr uint32_t MOTD_BYTES = 0x800;                     // PS3's body buffer: 2047 bytes and the NUL
-constexpr uint32_t DC_COUNT = 0x14, DC_SYMBOLS = 0x18, DC_SYMBOL = 12, DC_TYPE_SYMBOL = 0xc4ab6121u;
-FAM_FN uint32_t be32_at(const uint8_t *p) {
-    return static_cast<uint32_t>(p[0]) << 24 | static_cast<uint32_t>(p[1]) << 16 | static_cast<uint32_t>(p[2]) << 8 | p[3];
-}
-// net18.bin (DC00, big endian): the symbol count at +0x14, symbols {name id, type, offset} from +0x18; the first symbol
-// `name` of type symbol whose 4-byte value lies in the file gives the text id; false = no such symbol
-FAM_FN bool dc_text_id(const uint8_t *f, uint32_t size, uint32_t name, uint32_t &id) {
-    if (!f || size < DC_SYMBOLS) return false;
-    const uint32_t count = be32_at(f + DC_COUNT);
-    for (uint32_t i = 0; i < count && DC_SYMBOLS + static_cast<uint64_t>(DC_SYMBOL) * (i + 1) <= size; i++) {
-        const uint8_t *s = f + DC_SYMBOLS + DC_SYMBOL * i;
-        const uint32_t at = be32_at(s + 8);
-        if (be32_at(s) != name || be32_at(s + 4) != DC_TYPE_SYMBOL || static_cast<uint64_t>(at) + 4 > size) continue;
-        id = be32_at(f + at);
-        return true;
-    }
-    return false;
-}
-// the text bank, read front to back: read(ctx, buf, n) -> bytes (<= 0 = the end); rewind(ctx) starts it again
-// (false = no bank)
-struct Reader {
-    int64_t (*read)(void *ctx, uint8_t *buf, uint32_t n);
-    bool (*rewind)(void *ctx);
-    void *ctx;
-    uint32_t at, n;
-    uint8_t buf[0x400];
-};
-FAM_FN int next_byte(Reader &r) {
-    if (r.at >= r.n) {
-        const int64_t got = r.read(r.ctx, r.buf, sizeof r.buf);
-        if (got <= 0) return -1;
-        r.at = 0;
-        r.n = got > static_cast<int64_t>(sizeof r.buf) ? static_cast<uint32_t>(sizeof r.buf) : static_cast<uint32_t>(got);
-    }
-    return r.buf[r.at++];
-}
-FAM_FN bool next_be32(Reader &r, uint32_t &v) {
-    v = 0;
-    for (int k = 0; k < 4; k++) {
-        const int c = next_byte(r);
-        if (c < 0) return false;
-        v = v << 8 | static_cast<uint32_t>(c);
-    }
-    return true;
-}
-// the bank from its first byte (big endian: u32 count, count x {u32 id, u32 offset}, then the NUL-ended texts, offsets
-// from the first text): text `id` appended to out (n bytes used, at most cap - 1, NUL-ended); false = not in the bank
-FAM_FN bool bank_append(Reader &r, uint32_t id, char *out, uint32_t &n, uint32_t cap) {
-    uint32_t count = 0, key = 0, off = 0, want = 0;
-    bool found = false;
-    if (!next_be32(r, count)) return false;
-    for (uint32_t i = 0; i < count; i++) {
-        if (!next_be32(r, key) || !next_be32(r, off)) return false;
-        if (!found && key == id) {
-            found = true;
-            want = off;
-        }
-    }
-    if (!found) return false;
-    for (uint32_t k = 0; k < want; k++)
-        if (next_byte(r) < 0) return false;
-    for (int c; n + 1 < cap && (c = next_byte(r)) > 0;) out[n++] = static_cast<char>(c);
-    out[n] = 0;
-    return true;
-}
-// the body (R2 / R4): for N = 0..9 the text of *motd-text-N*: a missing symbol skipped, an id the bank does not have
-// (or no bank) gives "UNKNOWN STRING!!!"; appended in order, at most cap - 1 bytes (cut); empty without net18. Texts
-// are kept as they are (UTF-8, the backslash line marks). found = symbols present, unknown = of those not in the bank.
-FAM_FN uint32_t motd_body(const uint8_t *n18, uint32_t size, Reader &bank, char *out, uint32_t cap, uint32_t &found,
-                          uint32_t &unknown) {
-    uint32_t n = 0;
-    out[0] = 0;
-    found = unknown = 0;
-    for (uint32_t k = 0; k < 10; k++) {
-        uint32_t id = 0;
-        if (!dc_text_id(n18, size, motd_sym[k], id)) continue;
-        found++;
-        bank.at = bank.n = 0;
-        if (bank.rewind(bank.ctx) && bank_append(bank, id, out, n, cap)) continue;
-        unknown++;
-        for (uint32_t j = 0; motd_unknown[j] && n + 1 < cap; j++) out[n++] = motd_unknown[j];
-        out[n] = 0;
-    }
-    return n;
-}
 }  // namespace fam
 // ===== v7.254 fam pure end =====
 
@@ -54801,7 +54672,6 @@ constexpr uintptr_t NET_LAN = 0x17d5c60, MATCH_MODE = 0x17d1868, POST_MATCH = 0x
                     LOADOUT = 0x17d9988, NGM = 0x17cb060, NGM_PLAYERS = 0x17cb060 + 0x6a48,
                     SETTINGS = 0x17b6368, STATS = 0x17dd778, MENU_UI_STATE = 0x17bd080 + 8;
 constexpr uintptr_t FN_KILL_PROCESS = 0x11a6250, FN_RECORD_RESET = 0x72ebd0, FN_EULA_ROW = 0x6a8010;
-constexpr uintptr_t FN_MOTD_SOURCE = 0x761bd0;   // PS4's MOTD text source (source 0x59; the reduced twin of PS3 0x34b890)
 constexpr uintptr_t STATS_IN_MATCH = 8, STATS_POST_MATCH = 0xac10;
 constexpr uintptr_t R_CHAR = 0x10, R_IN_USE = 0xe1, R_TEAM = 0x21c, R_CONNECTION = 0x5b4, R_GONE = 0x5e4, R_KEY = 0x5b8,
                     R_STRIDE = 0x9c0, R_FIRST = 0x390, P_LOAD_STATE = 0x7ae8, REC_EULA = 0x530, REC_OWNED = 0x162c;
@@ -54809,19 +54679,12 @@ constexpr uintptr_t S_STARTUP = 680;   // the startup phase of the profile state
 constexpr uint32_t ST_LOBBY_HOST = 0x11, ST_LOBBY_GUEST = 0x12, DC_WEEK = 0x8466d21a,
                    TEXT_RENAME = 0xd3c13a7e, KB_RENAME = 12, SLOTS = 5;
 constexpr uint32_t ACT_OWN_TEAM_LIST = 0xb04c828bu, ACT_OTHER_TEAM_LIST = 0xb48d9f3cu;
-constexpr uint32_t MOTD_OK = 0xab58f9dau, TEXT_MOTD_TITLE = 0xc6467f2du, SRC_HELPER = 0xcf, MOTD_TAG = 0x4c414d44u,
-                   ITEM_BYTES = 0x68;
 constexpr uintptr_t REC_LOADOUTS = 8, LOADOUT_SIZE = 0x30;
-constexpr int RC_N18_STATE = 24, RC_N18 = 41, RC_N18_SIZE = 42;   // u3h_rc fields: the RPCN block's net18.bin copy
 FAM_RO const char t_gone[] = "monitor: gone record ";
 FAM_RO const char t_gone_rel[] = ": game object released (F1-R2, PS4 kill 0x11a6250), character handle was valid ";
 FAM_RO const char t_gone_res[] = ": record reset by index (F1-R3, PS4 0x72ebd0), slot ";
 FAM_RO const char t_lobby[] = "lobby entry (net state ", t_content[] = "): content complete ", t_mask[] = " (usable PS3 pack mask ",
                   t_close[] = ")";
-FAM_RO const char t_motd_body[] = "MOTD: body ", t_motd_syms[] = " bytes, *motd-text-N* symbols ",
-                  t_motd_n18[] = " of 10 (net18.bin ", t_motd_unknown[] = " bytes), not in the text bank ",
-                  t_motd_bank[] = " (/data/u3-networking.bin ", t_motd_open[] = "read)", t_motd_none[] = "missing)",
-                  t_motd_unused[] = "not read: no symbols)";
 FAM_RO const char t_week[] = "connect: leaderboard week ";
 FAM_RO const char t_week_none[] = "connect: no week data (0x8466d21a): leaderboard week 0, weekly counters kept";
 FAM_RO const char t_reset[] = "connect: weekly counters reset, week ", t_to[] = " -> ";
@@ -54837,20 +54700,14 @@ FAM_RO const char t_mute[] = "team list mute: row ", t_mute_team[] = " team ", t
                   t_mute_name[] = " ", t_mute_none[] = ": nobody (no player, no connection or the local player)";
 FAM_RO const char t_notice[] = "server notice 1 (emblem moderation): both users' emblems reset to default";
 FAM_RO const char t_netcmd[] = "net-command: symbol ", t_netcmd_players[] = ", players ", t_netcmd_stats[] = ", challenge stats bumped ";
-FAM_RO const char t_motd_items[] = "MOTD page: items ", t_motd_tagged[] = ", BUTTON_MULTIPLAYER_MOTD_OK (0xab58f9da) to the helper, its source was ";
 FAM_RO const char n_net_command_c[] = "DcNetCommand", n_net_command[] = "net-command";
-FAM_RO const char t_bank_path[] = "/data/u3-networking.bin";   // the server's text1/<lang>.networking, unsealed (launcher)
 struct State {
     uint32_t last_state, phase_was, n_actions, gone_said, reset_said;
     uint8_t content, entered, kb_slot;
     uint32_t actions[32];
-    uint8_t after_pending, motd_seen, motd_dirty;
+    uint8_t after_pending;
 };
 U3X_BSS State st;
-U3X_BSS char motd_text[MOTD_BYTES];   // the body the MOTD text items show (set_text keeps the pointer)
-struct BankFile { void *s; int64_t fd; };
-U3X_BSS BankFile bank_file;
-U3X_BSS Reader bank_reader;
 struct NativeRec { uint64_t fn, cname; uint32_t csid, pad0; uint64_t sname; uint32_t ssid, pad1; uint64_t next; };
 static_assert(sizeof(NativeRec) == 0x30, "PS4 native record");
 U3X_BSS NativeRec net_rec;
@@ -54975,7 +54832,6 @@ FAM_FN void after_connect(uintptr_t base, void *s) {
     l.s(t_next).x(page, 8);
     if (page == PG_MULTIPLAYER) return say(l.z(), -1);
     if (!u3h_show(base, s, page, 0)) l.s(t_next_fail);
-    else if (page == PG_MOTD) st.motd_seen = 1;
     say(l.z(), -1);
 }
 // MM-R1: the lobby was (re)entered (the lobby video panel stays empty, as on PS3 today: SPEC-motd-tips 2.5 R6)
@@ -54986,47 +54842,6 @@ FAM_FN void lobby_entry(uint32_t state) {
     Line l;
     l.s(t_lobby).x(state, 2).s(t_content).d(st.content).s(t_mask).x(mask, 2).s(t_close);
     say(l.z(), -1);
-}
-// the MOTD text bank file, through the profile state's open / read / close
-FAM_FN int64_t bank_read(void *c, uint8_t *b, uint32_t n) {
-    const BankFile &f = *static_cast<const BankFile *>(c);
-    if (f.fd < 0) return -1;
-    return reinterpret_cast<int64_t (*)(int, void *, uint64_t)>(state_fn(f.s, 5))(static_cast<int>(f.fd), b, n);
-}
-FAM_FN void bank_close(BankFile &f) {
-    if (f.fd >= 0) reinterpret_cast<int64_t (*)(int)>(state_fn(f.s, 7))(static_cast<int>(f.fd));
-    f.fd = -1;
-}
-FAM_FN bool bank_rewind(void *c) {
-    BankFile &f = *static_cast<BankFile *>(c);
-    bank_close(f);
-    f.fd = reinterpret_cast<int64_t (*)(const char *, int, int)>(state_fn(f.s, 4))(t_bank_path, 0, 0);
-    return f.fd >= 0;
-}
-// SPEC-motd-tips 1.2: the body from the loaded data: net18.bin as the RPCN block read it (the same copy the server
-// table comes from) and the text bank file. False = net18.bin not read yet (asked again at the next body request).
-FAM_FN bool motd_build(void *s) {
-    void *m = u3h_rc_mem();
-    const uint8_t *n18 = nullptr;
-    uint32_t size = 0;
-    if (m) {
-        if (!__atomic_load_n(static_cast<const volatile uint32_t *>(u3h_rc(m, RC_N18_STATE)), __ATOMIC_ACQUIRE)) return false;
-        n18 = static_cast<const uint8_t *>(u3h_rc(m, RC_N18));
-        size = *static_cast<const uint32_t *>(u3h_rc(m, RC_N18_SIZE));
-    }
-    bank_file.s = s;
-    bank_file.fd = -1;
-    bank_reader.read = bank_read;
-    bank_reader.rewind = bank_rewind;
-    bank_reader.ctx = &bank_file;
-    uint32_t found = 0, unknown = 0;
-    const uint32_t n = motd_body(n18, size, bank_reader, motd_text, MOTD_BYTES, found, unknown);
-    const bool bank = bank_file.fd >= 0;
-    bank_close(bank_file);
-    Line l;
-    l.s(t_motd_body).d(n).s(t_motd_syms).d(found).s(t_motd_n18).d(size).s(t_motd_unknown).d(unknown);
-    say(l.s(t_motd_bank).s(found ? (bank ? t_motd_open : t_motd_none) : t_motd_unused).z(), -1);
-    return true;
 }
 // MM-R3: toggle the voice mute of the player on a connection entry (the voice block's name list); nothing is sent
 FAM_FN int mute_toggle(uintptr_t base, const uint8_t *entry) {
@@ -55208,49 +55023,6 @@ FAM_FN void u3x_fam_notice1(uintptr_t base) {
     }
     say(t_notice, -1);
 }
-// NP-R5: PAGE_MULTIPLAYER_MOTD opened. The import's page (recipe 1.32.3, converted from PS3 1.19) has one element,
-// BUTTON_MULTIPLAYER_MOTD_OK 0xab58f9da (OK -> PAGE_MULTIPLAYER, G32), and no text ids: PS3's MOTD text source sits on
-// that element (its source word +0x34 holds PS3's enum 0x5a = PS4 0x59, the source 0x761bd0). The element goes to the
-// helper (source 0xcf, tag 'LAMD'; C retag list at page show), which fills the title and the body. The body is built
-// again from the loaded data at the next body request (SPEC-motd-tips 1.2: nothing kept apart from the downloaded files).
-FAM_FN void u3x_fam_motd_retag(uint8_t *page) {
-    using namespace fam;
-    if (rd<uint32_t>(page, 8) != PG_MOTD) return;
-    st.motd_dirty = 1;   // v7.255: not "seen" here (this runs at menu load); only after_connect's page show sets it
-    const uint8_t *list = rd<const uint8_t *>(page, 0x48);
-    uint8_t *items = list ? rd<uint8_t *>(list, 8) : nullptr;
-    const uint32_t count = list ? rd<uint32_t>(list, 0) : 0;
-    int32_t was = -1;
-    for (uint32_t i = 0; items && i < count && i < 64; i++) {
-        uint8_t *item = items + ITEM_BYTES * i;
-        if (rd<uint32_t>(item, 8) != MOTD_OK) continue;
-        if (rd<uint32_t>(item, 0x34) != SRC_HELPER) was = static_cast<int32_t>(rd<uint32_t>(item, 0x34));
-        *reinterpret_cast<uint32_t *>(item + 0x34) = SRC_HELPER;
-        *reinterpret_cast<uint32_t *>(item + 0x40) = MOTD_TAG;
-    }
-    Line l;
-    say(l.s(t_motd_items).d(count).s(t_motd_tagged).z(), was);   // -1: no such element (or already the helper's)
-}
-// the MOTD element's requests (SPEC-motd-tips 1.2): the body (op 1) is PS3's ten-symbol body (motd_body), built once per
-// page show from the loaded files (they change only at NetInit); empty without data, no fallback text. The title (op 2)
-// is text 0xc6467f2d. The rest (layout op 4, op 6, the default button OK 0xab58f9da op 0x13) is PS4's own MOTD source
-// 0x761bd0, which answers them as PS3 does.
-FAM_FN int u3x_fam_motd_source(uintptr_t base, int32_t *ev, void *s) {
-    using namespace fam;
-    const uint8_t *source = rd<const uint8_t *>(ev, 0x98);
-    if (!source || rd<uint32_t>(source, 0x1c) != MOTD_TAG) return 0;
-    if (ev[0] == 1) {
-        if (st.motd_dirty && s && motd_build(s)) st.motd_dirty = 0;
-        u3h_set_text(ev, motd_text);
-    } else if (ev[0] == 2) {
-        if (const char *t = s ? u3h_text(base, s, TEXT_MOTD_TITLE) : nullptr) u3h_set_text(ev, t);
-    } else {
-        game_call<void, int32_t *>(base + FN_MOTD_SOURCE, ev);
-    }
-    return 1;
-}
-// x060 (C): the helper's own MOTD dialog only when the MOTD page was not shown in this session
-FAM_FN int u3x_fam_motd_seen(void) { return fam::st.motd_seen; }
 // every frame (ring tick): lobby entry, the connect step, the page after connecting, the rename keyboard
 FAM_FN void u3x_fam_tick(uintptr_t base, Log) {
     using namespace fam;
@@ -55262,7 +55034,6 @@ FAM_FN void u3x_fam_tick(uintptr_t base, Log) {
     st.last_state = state ? state : 1;
     if (!s) return;
     const uint32_t phase = rd<uint32_t>(s, S_STARTUP);
-    if (phase == 1 && st.phase_was != 1) st.motd_seen = 0;   // NetInit: a new session for the x060 test
     if (phase == 3 && (st.phase_was == 1 || st.phase_was == 2)) {
         connect_step(base, s);
         st.after_pending = 1;

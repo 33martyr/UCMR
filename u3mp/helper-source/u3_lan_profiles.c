@@ -376,9 +376,6 @@ __attribute__((visibility("hidden"))) int32_t u3x_queue_post(uintptr_t base,cons
 __attribute__((visibility("hidden"))) int32_t u3x_queue_send(uintptr_t base,const uint8_t *id,uint32_t type,const void *data,uint32_t length);
 __attribute__((visibility("hidden"))) uint64_t u3x_network_usec(void);
 __attribute__((visibility("hidden"))) void u3x_retag_net_profile(uint8_t *page);
-__attribute__((visibility("hidden"))) void u3x_fam_motd_retag(uint8_t *page);   /* v7.254 fam final round (C++): restored MOTD page */
-__attribute__((visibility("hidden"))) int u3x_fam_motd_source(uintptr_t base,int32_t *ev,void *s);
-__attribute__((visibility("hidden"))) int u3x_fam_motd_seen(void);
 __attribute__((visibility("hidden"))) void u3x_fam_natives_link(uintptr_t base);   /* N18 net-command */
 __attribute__((visibility("hidden"))) void u3x_fam_notice1(uintptr_t base);   /* NP-R6 server notice 1 */
 __attribute__((visibility("hidden"))) int u3x_net_profile_source(uintptr_t base,int32_t *ev,void *s);
@@ -798,7 +795,6 @@ __attribute__((visibility("hidden"))) uint8_t *u3x_fr_pdata(uintptr_t base,uint8
 __attribute__((visibility("hidden"))) int u3x_lobby_buttons(uintptr_t base,int32_t *ev,void *s);   /* G31 */
 __attribute__((visibility("hidden"))) void u3x_set_icon(uintptr_t base,int32_t *ev,uint32_t id);   /* G31 */
 __attribute__((visibility("hidden"))) uint32_t u3x_lobby_menu_rows(uintptr_t base,int online,int coop,uint32_t *out);   /* G31 */
-__attribute__((visibility("hidden"))) void u3x_motd_ok(uintptr_t base,void *s);   /* G32 */
 __attribute__((visibility("hidden"))) void u3x_mp_quit(uintptr_t base,void *s);   /* G32 */
 __attribute__((visibility("hidden"))) int u3x_prompt_value(uintptr_t base,uint64_t *ev,int kind,void *s);   /* G33 */
 __attribute__((visibility("hidden"))) void u3x_report_popup(uintptr_t base,void *s);   /* G34 */
@@ -1667,7 +1663,6 @@ static void retag_dead_buttons(uint8_t *page);   /* agent A a011 */
 static int dead_button_source(int32_t *event);   /* agent A a011 */
 static uint8_t *lg_profile(uintptr_t base,uint32_t user);
 static uint8_t *lg_rec(uintptr_t base,ProfileState *s,uint8_t *p);
-static void motd_ok119(uintptr_t base,ProfileState *s);
 static void show_dialog(uintptr_t base,ProfileState*s,uint32_t body,uint32_t title,uint32_t action,int32_t buttons,uint32_t a6,uint32_t a7);
 static void mp_quit119(uintptr_t base,ProfileState *s);
 static void pagemp119(uintptr_t base,ProfileState *s,int32_t *ev);   /* agent A a012 */
@@ -1735,7 +1730,6 @@ static int prepare_lobby_menu(int32_t *header,int keep_box){
   k04_retag(page);   /* agent K k001: PAGE_CUSTOMRULES Friendly Fire style, Time Limit source */
   m04_retag(page);   /* agent M m004: PAGE_PLAYLISTS list (online semantics in offline mode) */
   h21_retag(page);   /* fixer H h021: PAGE_OPTIONS Credits hidden in MP (PS3 1.19 has no Credits button) */
-  u3x_fam_motd_retag(page);   /* v7.254 fam (SPEC-families2 NP-R5): restored PAGE_MULTIPLAYER_MOTD, its OK element 0xab58f9da (the MOTD text source) to the helper */
  }
  return ok;
 }
@@ -1893,7 +1887,6 @@ EXT static void lobby_focus(uintptr_t base,ProfileState *s){
  uint32_t ui=*(uint32_t*)(base+0x17bd080+8);
  uint64_t *fl=(uint64_t*)((uint8_t*)s+0x2400); /* lobby focus log: [0] frames on page, [1] changes, [2] last id, [3] guard moves, [4] redirects, [6..21] ring {frame<<32|id} */
  if(!page||*(uint32_t*)(page+0x10)!=0x53cbb5f2){s->focus_done=0;fl[0]=0;return;}
- {static uint32_t x60_motd EXT_BSS;if(onb_rows_online()&&!u3x_fam_motd_seen()&&x60_motd<=40&&++x60_motd==40)show_dialog(base,s,0x60edaa4fu,0xc6467f2du,0,0,0,0xe1e040aau);}   /* x060 */
  fl[0]++;
  fl[5]=(fl[5]&0xffffffffull)|((uint64_t)*(uint32_t*)(base+0x17bd080+0x14fc)<<32); /* popup page last opened by 0x6528d0 */
  {uint32_t n=*(uint32_t*)(page+0xac);uint8_t **controls=*(uint8_t***)(page+0xb0);uint32_t fid=0xffffffffu;
@@ -2521,19 +2514,14 @@ EXT static void lan_delete_profile(uintptr_t base,ProfileState *s,uint32_t actio
 /* PS4 0x672450, the catch-all of the menu's click registrations (id 0, called by Menu::OnButton
  * 0x64ce90 for every action), is a RET stub; PS3 f_28dbf8 handles these actions there. Only the
  * in-menu, non-online cases are ported. event[0] = action id. */
-/* ===== agent A a010: MOTD OK and the 1.19 quit count =====
- * (1) PS3 1.19 catch-all f_2902e8, case 0xab58f9da (BUTTON_MULTIPLAYER_MOTD_OK): f_265074(0) (menu sound 0, = 1.10 f_260bf8,
- *     rate limited 15 ticks; PS4 0x651fa0), show PAGE_MULTIPLAYER 0x53cbb5f2, then f_266f40(menu) (= 1.10 f_262418, rebuild
- *     the back history from the page stack; PS4 0x6530e0(menu 0x17bd080), which checks menu+0xc and walks +0x8b0/+0xdb0).
- *     1.10 f_28dbf8 did the last two only; the helper had done the show only. PS3 shows the MOTD page only after an online
- *     connect (1.19 f_28f800 state 4, NGM+4 == 0), so in LAN this case is reached from no page (kept for completeness).
- * (2) PS3 1.19 PAGE_MULTIPLAYER handler f_298e5c (1.10 f_29366c; PS4 0x66e560 is a RET stub, helper kind 6), event 6 at
- *     0x2999d0..0x299aac, new in 1.19: record (profile 0) +0x558 nonzero (the in-match flag, set at match start and cleared at
- *     a normal match end; PS4 0x68b758 / 0x788849, byte at profile+0x7a0) -> +0x558 = 0, +0x5b0 += 1, +0x1f24 += 1, publish
- *     (f_3668a8 = mp_publish), player info update f_32b1f8 (= 1.10 f_321e04; PS4 does it per user: 0x6b7b30(0), 0x6b7b30(1),
- *     as its own callers at 0x6a60ce / 0x6a65dc do). The rest of f_298e5c is not ported on PS4 (see NOTES-a010).
- * Switch U3MP_A010=0 (ea[1] bit1): old MOTD OK answer, no quit count. Diagnostics: ea[36] MOTD OK, ea[37] quits counted. */
-EXT static void motd_ok119(uintptr_t base,ProfileState *s){u3x_motd_ok(base,s);}   /* v7.213 C++ (G32) */
+/* ===== agent A a010: the 1.19 quit count =====
+ * PS3 1.19 PAGE_MULTIPLAYER handler f_298e5c (1.10 f_29366c; PS4 0x66e560 is a RET stub, helper kind 6), event 6 at
+ * 0x2999d0..0x299aac, new in 1.19: record (profile 0) +0x558 nonzero (the in-match flag, set at match start and cleared at
+ * a normal match end; PS4 0x68b758 / 0x788849, byte at profile+0x7a0) -> +0x558 = 0, +0x5b0 += 1, +0x1f24 += 1, publish
+ * (f_3668a8 = mp_publish), player info update f_32b1f8 (= 1.10 f_321e04; PS4 does it per user: 0x6b7b30(0), 0x6b7b30(1),
+ * as its own callers at 0x6a60ce / 0x6a65dc do). The rest of f_298e5c is not ported on PS4 (see NOTES-a010).
+ * Switch U3MP_A010=0 (ea[1] bit1): no quit count. Diagnostics: ea[37] quits counted. (v7.256: the Message of the Day OK
+ * answer is removed with the whole Message of the Day, owner 2026-11-24.) */
 EXT static void mp_quit119(uintptr_t base,ProfileState *s){u3x_mp_quit(base,s);}   /* v7.213 C++ (G32) */
 __attribute__((section(".text.ext"),noinline)) static int rpm_catch(uintptr_t base,ProfileState *s,uint32_t id);
 __attribute__((visibility("hidden"))) void u3x_vc_action(uintptr_t base,const int32_t *ev);__attribute__((visibility("hidden"))) void u3x_vc_frame(uintptr_t base,void *s,void (*log)(uintptr_t,const char*));__attribute__((visibility("hidden"))) void u3x_vc_party_image(uintptr_t base,int32_t *ev);   /* v7.228 #81 voice chat (C++); v7.233 the speaker picture */
@@ -8036,7 +8024,6 @@ int u3_profile_event(uintptr_t base,int32_t *event,int kind,ProfileState *s,uint
   if(coop_mods_source(base,event,s))return 1;
   if(missions_source(base,event,s))return 1;
   if(netprofile_source(base,event,s))return 1;   /* agent A a007 */
-  if(u3x_fam_motd_source(base,event,s))return 1;   /* v7.254 fam (NP-R5, SPEC-motd-tips 1): the MOTD text (net18 symbols + networking text bank) */
   if(records_source(base,event,s))return 1;   /* agent A a009 */
   if(profile_box_source(base,event,s))return 1;
   if(custom_load_source(base,event,s))return 1;
@@ -11061,7 +11048,6 @@ U3H int u3h_start_match_catch(uintptr_t base,void *s,uint32_t id){return onb_cat
 U3H int u3h_film_action(uintptr_t base,const int32_t *ev){return k41_film(base,ev);}
 U3H int u3h_community_catch(uintptr_t base,void *s,uint32_t id){return m02_catch(base,(ProfileState*)s,id);}
 U3H void u3h_treasure_first_row(void *s){u3x_treasure_first_row(s);}
-U3H void u3h_motd_ok(uintptr_t base,void *s){motd_ok119(base,(ProfileState*)s);}
 U3H void u3h_mission_take(uintptr_t base,void *s){mission_take(base,(ProfileState*)s);}
 U3H void u3h_party_kick_promote(uintptr_t base,int promote){party_kick_promote(base,promote);}
 U3H void u3h_report_popup(uintptr_t base,void *s){rpt_popup(base,(ProfileState*)s);}
@@ -11245,7 +11231,6 @@ U3H void *u3h_rc(void *m_,int field){RcMem *m=(RcMem*)m_;
   case 30:return &sm_keyok;case 31:return sm_keyb;case 32:return &rp_st;case 33:return &rp_try;case 34:return &nl_tk_ok;case 35:return &nl_rep_ip;case 36:return &nl_rep_port;
   case 37:return m->ox_rec;case 38:return (void*)&ox_state;case 39:return ox_name;   /* r2 S05: the other player's record, its state, its name */
   case 40:return m->ox_keep;   /* v7.228 #84: the Statistics card's copy */
-  case 41:return m->n18;case 42:return &m->n18_len;   /* v7.254 fam: net18.bin (the MOTD symbols *motd-text-0..9*) */
  }
  return 0;}
 _Static_assert(sizeof(plat_sock)==8&&sizeof(((RcMem*)0)->srv_host[0])==64&&sizeof(((RcMem*)0)->pf_rx)==0x3000&&sizeof(((RcMem*)0)->ban_rx)==0x100,"RcMem fields as u3x_fixes.cpp reads them");
