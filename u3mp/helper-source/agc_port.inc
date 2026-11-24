@@ -10,8 +10,8 @@
 
 EXT static int latejoin_closed119(uintptr_t base,ProfileState *s,uint64_t *regs){return u3x_latejoin_closed(base,s,regs);}   /* v7.213 C++ (G35) */
 
-EXT static int elim_round_end_hold(uintptr_t base,ProfileState *s,uint64_t *regs){(void)s;return u3x_elim_round_end_hold(base,regs);}   /* v7.213 C++ (G35) */
-EXT static void elim_wait_text(uintptr_t base){u3x_elim_wait_text(base);}   /* v7.213 C++ (G35) */
+EXT static int elim_round_end_hold(uintptr_t base,ProfileState *s,uint64_t *regs){(void)s;return u3x_gaps_elim_hold(base,regs);}   /* v7.213 C++ (G35); v7.254 open O2: + the owner's 152 */
+EXT static void elim_wait_text(uintptr_t base){u3x_gaps_elim_text(base);}   /* v7.213 C++ (G35); v7.254 open O2: + a received 152 */
 
 /* ---- c004: PS3 NetGameManager::Init (1.10 f_305d2c; 1.19 0x3115e0), called by NetInit f_2901e0 at 0x290714 ----
  * PS4 has no copy, and nothing on PS4 writes these fields before the match code reads them (PS4's NetInit is gone; the

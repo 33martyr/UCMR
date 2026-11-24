@@ -6320,6 +6320,7 @@ void u3x_message_events(uintptr_t base);
 void u3x_join_hold(uintptr_t base, const uint8_t *id, const uint8_t *d);
 void u3x_join_hold_tick(uintptr_t base);
 void u3x_join_reply_tick(uintptr_t base);
+int u3x_fam_join_rule(uint32_t lobby_mode, int busy, uint32_t state, int in_party);   // v7.254 fam block (end)
 }
 
 namespace g21a {
@@ -6346,7 +6347,8 @@ U3X_RO static const char t_locked[] = " party locked (presence): not asked";
 U3X_RO static const char t_held[] = "held join request from ";
 U3X_RO static const char t_accepted[] = " accepted";
 U3X_RO static const char t_refused_locked[] = " refused: locked";
-U3X_RO static const char t_refused_late[] = " refused after 5 s, state ";
+U3X_RO static const char t_refused_late[] = " refused (lobby mode 1 or busy), state ";   // v7.254 fam (PL-R1)
+U3X_RO static const char t_expired[] = " dropped unanswered after 20 s (the joiner's window), state ";   // v7.254 fam
 U3X_RO static const char t_to_game[] = " to the game (state 0)";
 U3X_RO static const char t_request[] = "join request from ";
 U3X_RO static const char t_party_up[] = " answered: new party up";
@@ -6459,16 +6461,26 @@ extern "C" U3X_FN void u3x_join_hold_tick(uintptr_t base) {
         const bool fresh = helper && e.request[10] == 2;   // "make a fresh party"
         const int32_t waited = static_cast<int32_t>(static_cast<uint32_t>(now) - static_cast<uint32_t>(e.since));
 
+        // v7.254 fam (SPEC-families PL-R1): answered as PS3 1.19 only in party state 6 (or handed to the game in state
+        // 0, refused there in lobby mode 1 / busy); every other state holds it with no 5-s refusal; dropped unanswered
+        // once the joiner's 20-s window is over
         Verdict verdict;
+        const int rule = u3x_fam_join_rule(at<uint32_t>(base + 0x17d603c), rd<uint8_t>(ses, 0x12ec), state,
+                                           u3h_join_can_accept(ses, 6));
         if (u3h_join_locked(base)) verdict = Verdict::refuse_locked;
         else if (fresh && state == 6 && waited <= FIVE_SECONDS) verdict = Verdict::wait;
-        else if (u3h_join_can_accept(ses, state)) verdict = Verdict::accept;
-        else if (state == 0) verdict = Verdict::to_game;
-        else if (waited > FIVE_SECONDS) verdict = Verdict::refuse_late;
+        else if (rule == 1) verdict = Verdict::accept;
+        else if (rule == 2) verdict = Verdict::to_game;
+        else if (rule == 3) verdict = Verdict::refuse_late;
         else verdict = Verdict::wait;
 
         if (verdict == Verdict::wait) {
-            ++i;
+            if (waited > 4 * FIVE_SECONDS) {   // 20 s: the joiner has given up
+                u3h_fj_note(t_held, e.id, t_expired, static_cast<int32_t>(state));
+                drop(i);
+            } else {
+                ++i;
+            }
             continue;
         }
         if (verdict == Verdict::accept) {
@@ -6656,6 +6668,7 @@ U3X_RO const char t_we_lead_it[] = ", we lead it ";
 U3X_RO const char t_friend_in_it[] = ", the friend is in it ";
 U3X_RO const char t_not_holding[] = "join: the room we got does not hold ";
 U3X_RO const char t_ask_fresh[] = ": leaving it, asking for a fresh party (0x10b again)";
+U3X_RO const char t_ps3_no_retry[] = ": no 0x1f0 from this host (PS3): no retry, one 20-s window";   // v7.254 fam (PL-R2)
 U3X_RO const char t_fail_again[] = "join: failed (again not in the friend's room)";
 U3X_RO const char t_fail_server[] = "join: failed (the server refused the party room)";
 U3X_RO const char t_link[] = "join: peer link to ";
@@ -6863,7 +6876,8 @@ U3X_FN void not_the_friends_room(uintptr_t base, void *s, int32_t now) {
     if (ticks_since(now, j->noted_at) < static_cast<int32_t>(ONE_SECOND)) return;   // a member can be announced late
 
     field<uint8_t>(party(base), S_LEAVE_ASKED) = 1;
-    if (j->retried) {
+    if (j->retried || !j->hint_ok) {   // v7.254 fam (PL-R2): no retry toward a PS3 host (no 0x1f0 info from it)
+        if (!j->retried) u3h_fj_note(t_not_holding, j->from, t_ps3_no_retry, -1);
         u3x_fj_fail(base, s, t_fail_again);
         return;
     }
@@ -7097,6 +7111,7 @@ U3X_FN void u3x_fj_cb(uintptr_t base, void *s, int32_t *ev) {
     if (event == 0) {   // the popup opens
         j->answered = 0;
         j->seen = 0;
+        j->hint_ok = 0;   // v7.254 fam (PL-R2): only this attempt's 0x1f0 says "a helper host"
         j->timeout = ticks_after(now, TWENTY_SECONDS);
         return;
     }
@@ -22847,6 +22862,8 @@ namespace g57b {
 
 U3X_RO const char name_mark[] = "-multi-emblem-";   // 14 characters
 U3X_RO const char board_mark[] = "boa";             // straight after the mark: a board
+// v7.254 (SPEC-families2 8.1, N17): Airport's blackboard has no mark; PS3 gives it the second emblem block (+0x7e8)
+U3X_RO const char blackboard[] = "art/levels/airport/prototypes/multi/objects/office/air-multi-blackboard.ma";
 
 constexpr int MARK_LENGTH = 14;
 constexpr int MARK_SEARCH_END = 40;      // start positions tried: 0..39
@@ -22877,6 +22894,13 @@ U3X_FN bool is_board(const char *rest) {
     return true;
 }
 
+// the art name is exactly Airport's blackboard
+U3X_FN bool is_blackboard(const char *name) {
+    int k = 0;
+    while (blackboard[k] && name[k] == blackboard[k]) k++;
+    return !blackboard[k] && !name[k];
+}
+
 // The player whose emblem is shown: the leading team's in a match, else (or when there is none) the local one.
 U3X_FN const uint8_t *shown_player(uintptr_t b) {
     const uint8_t *player = nullptr;
@@ -22901,8 +22925,9 @@ U3X_FN void wall_object(uint8_t *object, const uint8_t *player, uint64_t default
     const char *name = rd<const char *>(art, 0x48);
     if (!name) return;
     const char *rest = after_mark(name);
-    if (!rest) return;
-    const bool board = is_board(rest);
+    const bool blackboard_object = !rest && is_blackboard(name);
+    if (!rest && !blackboard_object) return;
+    const bool board = blackboard_object || is_board(rest);
 
     uint32_t *ec = ec_words();
     uint64_t record = player ? rd<uint64_t>(player, board ? 0x7e8 : 0x7f0) : 0;
@@ -27684,6 +27709,7 @@ int u3x_profile_list_op(uintptr_t base, int32_t *ev, void *s);
 void u3x_lobby_row(uintptr_t base, const int32_t *ev, void *s);
 void u3x_motd_ok(uintptr_t base, void *s);
 void u3x_mp_quit(uintptr_t base, void *s);
+void u3x_fam_action_note(uint32_t action);   // v7.254 fam block (end of the file)
 }
 
 namespace g32 {
@@ -27927,6 +27953,7 @@ U3X_FN void u3x_menu_action(uintptr_t base, const int32_t *ev, void *s) {
     default: {
         const uint32_t reason = action - ACT_REPORT_REASON_FIRST;
         if (reason < REPORT_REASONS) u3h_report_pick(base, s, reason);
+        else u3x_fam_action_note(action);   // v7.254 fam (MM-R6): logged once per id
         break;
     }
     }
@@ -31882,6 +31909,7 @@ int u3x_difficulty_vote_for(uintptr_t base, uint32_t game_type);
 void u3x_vote_open(uint8_t *vote);
 int u3x_stand_in_vote(uint32_t now);
 uint32_t u3x_cg_playlist_gate(uintptr_t base, const uint8_t *playlist);   // v7.253 cg block (end of the file)
+void u3x_gaps_vote_result(uintptr_t base, int32_t winner);   // v7.254 gaps block (end of the file)
 
 // ---- delivered here
 int u3x_m03_startmatch(uintptr_t base, void *s);
@@ -32094,6 +32122,7 @@ U3X_FN int u3x_n04_close(uintptr_t base, void *s) {
     select(ngm, winner, nullptr, 0xc);
     *chosen = winner;
     u3x_sync_player_info(base);   // v7.253 sync (R17): PS3's map result sends the owner's player info
+    u3x_gaps_vote_result(base, winner);   // v7.254 gaps (G2): and the owner's team descriptions (24)
     volatile uint32_t *diag = u3h_n04_diag();
     diag[0] = diag[0] + 1;
     diag[1] = static_cast<uint32_t>(winner);
@@ -34665,6 +34694,10 @@ int32_t u3x_net_clock(uintptr_t base);
 
 void u3x_onm_tick(uintptr_t base, void *s);
 void u3x_onm_fail(uintptr_t base);
+void u3x_onm_ready(uintptr_t base, void *s, uint32_t cnt);
+int u3x_mm_v2_on(uintptr_t base);              // v7.254 mm (end of the file)
+void u3x_mm_tick(uintptr_t base, void *s);     // v7.254 mm
+void u3x_mm_watchdog(uintptr_t base);          // v7.254 mm
 }
 
 namespace s01c {
@@ -35050,6 +35083,7 @@ extern "C" U3X_FN void u3x_onm_tick(uintptr_t base, void *s) {
     u3h_onm_watch(base, s);
 
     uint32_t *o = u3h_onm();
+    const bool v2 = u3x_mm_v2_on(base) != 0;   // v7.254 mm (A8): the PS3 matchmaking flow
     // watchdog on the match start ("Starting Game..." for more than 60 s)
     const uint32_t ns0 = at<uint32_t>(base + NS);
     if (ns0 == 0x2e || ns0 == 0x2f) {
@@ -35058,13 +35092,20 @@ extern "C" U3X_FN void u3x_onm_tick(uintptr_t base, void *s) {
             o[O_WATCHDOG] = t ? t : 1;
         } else if (t - o[O_WATCHDOG] > 18000) {
             o[O_WATCHDOG] = 0;
-            u3x_onm_fail(base);
+            if (v2)
+                u3x_mm_watchdog(base);   // v7.254 mm R17: a log line only (PS3 has no limit)
+            else
+                u3x_onm_fail(base);
         }
     } else {
         o[O_WATCHDOG] = 0;
     }
 
     if (!(ext_eb()[3] & 0x20000u) && u3h_n05_backout(base)) return;
+    if (v2) {   // v7.254 mm: R1..R18 replace the steps below (first-room join, 30-s merge, 0x113 leader check)
+        u3x_mm_tick(base, s);
+        return;
+    }
     follow_leader(base, s);
 
     if (!o[O_ARMED]) return;
@@ -35107,6 +35148,9 @@ extern "C" U3X_FN void u3x_onm_fail(uintptr_t base) {
     *u3h_mm_bg() = 0;
     u3h_onm_diag()[6] += 1;
 }
+
+// v7.254 mm: a room owner with an old helper in its room hands the countdown to today's stand-in (4.9 ready)
+extern "C" U3X_FN void u3x_onm_ready(uintptr_t base, void *s, uint32_t cnt) { s01c::ready(base, s, cnt); }
 // ===== r2 end S01/part_c.cpp =====
 }  // namespace r2_S01
 namespace r2_film_maths {
@@ -41186,6 +41230,7 @@ extern "C" int u3x_xp_member_ps3(const uint8_t *member);                  // v7.
 extern "C" int32_t u3x_netgame_type(uintptr_t base, void *s);
 extern "C" int u3x_handle_obj_valid(uint8_t *h);
 extern "C" int32_t u3x_queue_send(uintptr_t base, const uint8_t *id, uint32_t type, const void *data, uint32_t length);
+extern "C" void u3x_fam_team_mute(uintptr_t base, uint32_t action, int32_t row);   // v7.254 fam block (end of the file)
 
 namespace vc {
 namespace {
@@ -41514,6 +41559,7 @@ U3X_FN [[clang::minsize, gnu::force_align_arg_pointer]] void u3x_vc_frame(uintpt
 U3X_FN [[clang::minsize, gnu::force_align_arg_pointer]] void u3x_vc_action(uintptr_t base, const int32_t *ev) {
     using namespace vc;
     const uint32_t action = static_cast<uint32_t>(ev[0]);
+    u3x_fam_team_mute(base, action, ev[1]);   // v7.254 fam (SPEC-families2 MM-R3): the in-match team lists' rows
     if ((action != ACT_PARTY_VOICE && action != ACT_LIST_VOICE) || !table()) return;
     const uint8_t *name = &at<uint8_t>(base + SELECTED_ID);
     const uint32_t h = name_hash(name);
@@ -42333,6 +42379,9 @@ void u3x_ec_enter(uintptr_t base, uint8_t *st);
 int u3x_v52_not_leader(uintptr_t base);   // v7.252 block
 void u3x_members_check(uintptr_t base, int arg);
 void u3x_players_check(uintptr_t base);
+int u3x_fam_member_kick(uintptr_t base, const uint8_t *member, const uint8_t *entry);    // v7.254 fam block (end)
+int u3x_fam_silent(uintptr_t base, uint8_t *entry, int owner);                           // v7.254 fam
+void u3x_fam_gone(uintptr_t base, uint8_t *np, uint32_t i, const uint8_t *main_player);  // v7.254 fam
 void u3x_gt_base_write(uintptr_t base, uint8_t *sub, void *b);
 int u3x_gt_base_header(uintptr_t base, uint8_t *sub, void *b);
 void u3x_gt_drop_expired(uintptr_t base, uint8_t *sub);
@@ -42495,7 +42544,7 @@ extern "C" U3X_FN void u3x_members_check(uintptr_t base, int arg) {
         uint8_t *member = members[m];
         if (member == self) continue;
         const uint8_t *entry = u3x_entry_by_id(base, rd<int32_t>(member, 0x34));
-        if (entry && !rd<uint8_t>(entry, 5)) continue;   // connected and not dropped: stays
+        if (!u3x_fam_member_kick(base, member, entry)) continue;   // v7.254 fam (F1-R1): dropped, or no entry and no link
         u3x_session_kick(match, rd<uint32_t>(member, 0x2c));
         g12::count_eb(121);
         u3x_hs_monitor_note(1, rd<uint32_t>(member, 0x2c));   // v7.253 hs (R9): a helper rule, logged
@@ -42511,6 +42560,7 @@ extern "C" U3X_FN void u3x_players_check(uintptr_t base) {
     for (uint32_t i = 0; i < g12::list_max; ++i) {
         uint8_t *np = g12::net_player(base, i);
         if (np == rd<uint8_t *>(manager, 0x370) || np == rd<uint8_t *>(manager, 0x378)) continue;   // local
+        u3x_fam_gone(base, np, i, rd<const uint8_t *>(manager, 0x380));   // v7.254 fam (F1-R2 / R3): gone records
         if (!rd<uint8_t>(np, 0xe1) || rd<uint8_t>(np, 0x5e4)) continue;                            // not joined / leaving
         const uint32_t id = u3x_net_player_id(np);
         if (!id) continue;
@@ -42535,7 +42585,7 @@ extern "C" U3X_FN void u3x_players_check(uintptr_t base) {
         g12::stamp_heard(entry, clock);
         const uint8_t *game = at<const uint8_t *>(base + g12::game_object_at);
         if (at<int32_t>(base + g12::net_flags_at) != 0 && !(game && rd<uint8_t>(game, 0x3a04))) continue;
-        if (!u3h_link_timeout(base, entry)) continue;
+        if (!u3x_fam_silent(base, entry, u3x_session_host(match))) continue;   // v7.254 fam (F1-R4): owner every frame
         if (rd<uint8_t>(np, 0x1ec)) continue;
         if (u3x_session_host(match)) {
             u3x_session_kick(match, rd<uint32_t>(np, 0x1e4));   // the whole id word
@@ -42723,6 +42773,9 @@ void u3x_onb_vtable(void);
 void u3h_onb_addr_reset(void);
 void u3x_cm_reset_entry(uint8_t *entry);
 
+// v7.254 svc hooks block (services 2 R11, sub 38)
+void u3x_svc_signin_popup(uintptr_t base);
+int u3x_svc_signin_failed(void);
 // this part
 void u3x_play_online(uintptr_t base, void *s);
 void u3x_lan_chosen(void);
@@ -42878,6 +42931,13 @@ U3X_FN int u3x_signin_wait(uintptr_t base, void *s) {
     wait_last = now;
     const int32_t waited = ticks_since(now, wait_start);
     if (retry_step == 1 && profile != 3) retry_step = 2;   // the new download has started
+    // v7.254 services 2 R11: the sign-in wait popup ended without a session: stop here, no failure dialog (PS3)
+    if (u3x_svc_signin_failed()) {
+        eb[EB_STARTUP] = 3;
+        *reinterpret_cast<uint32_t *>(static_cast<uint8_t *>(s) + S_STARTUP_PHASE) = 0;
+        if (rd<const void *>(s, S_SHOW_PAGE)) u3h_show(base, s, u3h_k01_back_page(), 1);
+        return -1;
+    }
 
     // signed in, but the profile download has not finished: hold (at most 30 s). A failed download (state 3) stops
     // at once, unless the one new download of this press has not started yet (at most 3 s).
@@ -42899,6 +42959,7 @@ U3X_FN int u3x_signin_wait(uintptr_t base, void *s) {
     if (((u3h_online_cfg_ok() && u3h_online_status() != 3 && u3h_online_status() != 4) || u3h_smn_up() == 2) &&
         waited < 3000)
         return 1;
+    if (u3h_rc_signing_in()) u3x_svc_signin_popup(base);   // v7.254 services 2 R11 (sub 38)
     if ((u3h_rc_signing_in() || (u3h_smn_up() == 1 && u3h_onp_pending())) && waited < 9000) return 1;
     if (u3h_srv_retry_pending() && waited < 45000) return 1;
 
@@ -43035,6 +43096,7 @@ uint32_t u3x_onb_msg_in(void *be);
 int64_t u3x_onb_s1(void *be);
 void u3x_onb_ping_restart(void *be);
 int u3x_onb_ping_due(void *be);
+void u3x_jip2_room_lost(uintptr_t base, const uint8_t *ss, uint64_t room, uint32_t type);   // v7.254 open O5 (jip block)
 }
 
 namespace g13p2 {
@@ -43339,6 +43401,7 @@ U3X_FN static void room_lost(void *be, uintptr_t base, const uint8_t *m, uint32_
         put_number(t, type);
         put(t, t_state);
         u3h_fw_line(finish(t), at<uint32_t>(base + NET_STATE), 2, nullptr, -1);
+        u3x_jip2_room_lost(base, ss, room, type);   // v7.254 open O5: the late join's abort flag
         raise(ss, EV_DISCONNECTED);
         if (type == 312) raise(ss, EV_KICKED);
         fld<uint64_t>(ss, SS_ROOM) = 0;
@@ -43893,6 +43956,7 @@ U3X_FN void refuse_kick(uint32_t &counter, const char *text) {
 
 }  // namespace g14_room_life
 
+extern "C" uint32_t u3x_svc_region(uintptr_t base);   // v7.254 svc block (SPEC-open O8)
 // ---- slot 4, Create
 extern "C" U3X_FN int64_t u3x_onb_s4(void *be, uint8_t *ss, uint32_t cap, uint32_t a4, uint32_t a5, uint32_t a6) {
     using namespace g14_room_life;
@@ -43911,6 +43975,7 @@ extern "C" U3X_FN int64_t u3x_onb_s4(void *be, uint8_t *ss, uint32_t cap, uint32
     field<uint32_t>(m, 8) = cookie;
     field<uint32_t>(m, 12) = field<uint32_t>(ss, S_POOL);
     field<uint32_t>(m, 20) = field<uint32_t>(ss, S_GAME_TYPE) | (a6 ? GAME_TYPE_BIT15 : 0);
+    field<uint32_t>(m, 16) = u3x_svc_region(base);   // v7.254 SPEC-open O8: the account region word (as PS3's create)
     field<uint16_t>(m, 28) = static_cast<uint16_t>(a5);
     u3x_onb_geo(base, &field<uint16_t>(m, 32), &field<uint16_t>(m, 34));
     field<uint16_t>(m, 36) = static_cast<uint16_t>(cap);
@@ -43928,7 +43993,7 @@ extern "C" U3X_FN int64_t u3x_onb_s4(void *be, uint8_t *ss, uint32_t cap, uint32
 }
 
 // ---- slot 5, Search (sent also for a session that is not attached, then with cookie 0)
-extern "C" U3X_FN int64_t u3x_onb_s5(void *be, uint8_t *ss, uint32_t a3, uint32_t, int32_t level, int32_t below, int32_t above,
+extern "C" U3X_FN int64_t u3x_onb_s5(void *be, uint8_t *ss, uint32_t a3, uint32_t a4, int32_t level, int32_t below, int32_t above,
                                      uint32_t a8) {
     using namespace g14_room_life;
     u3x_onb_note(5);
@@ -43947,6 +44012,7 @@ extern "C" U3X_FN int64_t u3x_onb_s5(void *be, uint8_t *ss, uint32_t a3, uint32_
         field<uint16_t>(m, 28) = static_cast<uint16_t>(lowest > 0 ? lowest : 0);
         field<uint16_t>(m, 30) = static_cast<uint16_t>(highest);
     }
+    field<uint32_t>(m, 32) = a4 ? u3x_svc_region(base) : 0;   // v7.254 SPEC-open O8: same region asked -> region word
 
     field<uint32_t>(ss, S_SEARCH_COUNT) = 0;
     u3x_onb_send(m, 36);
@@ -44572,6 +44638,8 @@ extern "C" void u3x_pinfo_pull_tick(uintptr_t base, Log log);   // v7.225, below
 extern "C" void u3x_npc_spawn_report(uintptr_t base, Log log);   // v7.225, below
 extern "C" void u3x_netanim_report(uintptr_t base, Log log);   // v7.236, above
 extern "C" void u3x_cg_tick(uintptr_t base, Log log);   // v7.253 cg block (end of the file)
+extern "C" void u3x_svc_tick(uintptr_t base, Log log);   // v7.254 svc block (end of the file)
+extern "C" void u3x_fam_tick(uintptr_t base, Log log);   // v7.254 fam block (end of the file)
 
 // once per frame in a net game: a boot.log line every ~30 s when the counts changed (40 at most)
 extern "C" U3X_FN [[clang::minsize]] void u3x_ring_tick(uintptr_t base, Log log) {
@@ -44582,6 +44650,8 @@ extern "C" U3X_FN [[clang::minsize]] void u3x_ring_tick(uintptr_t base, Log log)
     u3x_netanim_report(base, log);   // v7.236: remote characters posed when a snapshot cannot be decoded
     u3x_v52_tick(base, log);   // v7.252: PS3 net behaviour (late join 0x103, reset give-up, rules line, 30-s pool report)
     u3x_sync_tick(base, log);   // v7.253 sync: the 30-s in-match sync counters (R10, R12)
+    u3x_svc_tick(base, log);   // v7.254 svc: heartbeat, location, clan tag, RPCN drop, can-host (SPEC-services)
+    u3x_fam_tick(base, log);   // v7.254 fam: lobby entry (MM-R1 / R2), connect step (MM-R5, NP-R3), loadout rename poll
     if (!at<uint8_t>(base + NET_GAME)) return;
     if (!(n32_switches() & 8u) || ++st.frame % 1800u || st.lines >= 40 || !log) return;
     if (st.drawables == st.last_drawables && st.draws == st.last_draws && st.fixes == st.last_fixes) return;
@@ -45140,6 +45210,8 @@ uint8_t *u3x_jip_slot_player(uintptr_t base, uint32_t handle);
 void u3h_fj_note(const char *before, const uint8_t *id, const char *after, int32_t value);
 int32_t u3h_mq_send(uintptr_t base, const uint8_t *id, uint32_t type, const void *data, uint32_t length);
 U3H_IMPORT uint8_t *u3h_jip_party_md(uintptr_t base, const uint8_t *np);   // the party member data of a net player's owner, or null
+int u3x_jip2_park(uintptr_t base, const uint8_t *rec, uint32_t slot);   // v7.254 jip (A7 R7, end of the file)
+int u3x_jip2_ps3_order(uintptr_t base);
 }
 namespace jorder {
 constexpr uintptr_t STATUS = 0x1b69530, HANDLES = 0x1b69560, MATCH = 0x17d6420, PARTY = 0x17dc298;
@@ -45194,7 +45266,9 @@ extern "C" U3X_FN [[clang::minsize]] void u3x_jip_order_host(uintptr_t base) {
             continue;
         }
         if (!np) continue;
-        if (!phase[i]) {
+        if (!phase[i] && !u3x_jip2_park(base, np, i)) {   // v7.254 jip (R7): a PS3 / JIP v2 joiner, PS3's order
+            phase[i] = 3;   // left alone until the slot leaves status 2
+        } else if (!phase[i]) {
             phase[i] = 1;
             since[i] = now;
             ready_at[i] = 0;
@@ -45252,6 +45326,10 @@ extern "C" U3X_FN [[clang::minsize]] void u3x_jip_order_joiner(uintptr_t base) {
 // host (`tell_host`: its join info 0x1f0 came), as for 0x1f1
 extern "C" U3X_FN [[clang::minsize]] void u3x_jip_plays(uintptr_t base, int tell_host) {
     using namespace jorder;
+    if (u3x_jip2_ps3_order(base)) {   // v7.254 jip (R7): a PS3 / JIP v2 owner gets no "plays" word or bit
+        u3x_sync_player_info(base);
+        return;
+    }
     plays = 1;
     u3h_fj_note(t_tell, nullptr, nullptr, -1);
     uint8_t *const ps = reinterpret_cast<uint8_t *>(base + PARTY);
@@ -45714,7 +45792,7 @@ U3X_FN [[clang::minsize]] void u3x_pl2_idle(uintptr_t base) {
 //    the PC's), one more flag after EmitGrenade (8) / GrenadeExplode (9), u8 + flag + u32 after AssignTeamDesc (24) and
 //    Message (58: at the ends of its Write / Read, its entries hold an older hook). The factory makes a
 //    PS3 type 151 (SyncWeaponPickupsNew) a type 99 (the unnamed 1.10 weapon-pickup sync) read with full floats and
-//    152 (Alert, a one-shot whose PS4 counterpart is not known) an event that does nothing. PC players: unchanged
+//    152 (Alert) an empty event whose handle raises the Elimination wait (v7.254, PCs too). PC players: unchanged
 //    (v7.253 sync: a PC peer's 151 is read the same way; ids by SPEC-inmatch-sync 1.2).
 //  * A PC party leader with PS3 members (u3x_xp_lead_tick, game link, the game's own send function to one
 //    connection): 0x110 lobby mode / 0x114 in the Custom Game lobby, 0x102 with its match room, 0x10e go / cancel
@@ -45800,6 +45878,7 @@ struct State {
     const uint8_t *ev151;        // the type 99 object the factory made for a PS3 type 151 (read in the 151 form)
     uintptr_t vt152[8];          // the no-op event's function table (type 0's, with Read / Write / handle no-ops)
     uint32_t vt152_ok;
+    uint32_t alert_in;           // 152 events handled (any peer; v7.254 SPEC-open O2)
     uint32_t ps3_w[8], ps3_r[8]; // events written / read in the PS3 layout: 2, 8, 9, 24, 59, 151, 152, 58
     uint32_t no_room, too_long;  // PS3 layouts not written (the packet was full), messages too long to convert
     uint32_t group_logged;       // LoadLevel's PS3 group shown (bit 0 read, bit 1 written)
@@ -46128,8 +46207,27 @@ XP_FN void ll_read(uint8_t *ev, Bits *b, bool from_pc = false) {
 
 // type 59's data for a PS3 player: a converted copy (the object is written again on a resend)
 U3X_BSS uint8_t copy59[0x200];
-// the no-op event of type 152 (Alert): Read, Write and handle do nothing
+// the event of type 152 (Alert): Read and Write do nothing (an empty event); v7.254 (SPEC-open O2 R3): its handle
+// counts it (the gaps block raises the Elimination wait from that count; it sends nothing)
 XP_FN void noop(void *, void *) {}
+XP_FN void alert(void *, void *) { st.alert_in++; }
+// a 152 object: the factory's type 0 object (0 = the factory hook is missing) with the 152 table
+XP_FN uint8_t *make152(uintptr_t base) {
+    const uintptr_t own = trampoline(base, 22);
+    if (!own) return nullptr;
+    uint8_t *made = reinterpret_cast<uint8_t *(*)(uint32_t)>(own)(0u);
+    if (!made) return nullptr;
+    if (!st.vt152_ok) {
+        const uintptr_t *t0 = reinterpret_cast<const uintptr_t *>(base + TYPE0_TABLE);
+        for (int i = 0; i < 8; i++) st.vt152[i] = t0[i];
+        st.vt152[2] = st.vt152[3] = reinterpret_cast<uintptr_t>(&noop);   // Read, Write
+        st.vt152[4] = reinterpret_cast<uintptr_t>(&alert);                // handle
+        st.vt152_ok = 1;
+    }
+    *reinterpret_cast<uintptr_t *>(made) = reinterpret_cast<uintptr_t>(st.vt152);
+    made[8] = 152;
+    return made;
+}
 // one party / game message to one connection, in PC order (type 59's Write hook turns it for a PS3 player)
 XP_FN void send_to(uintptr_t base, uint32_t connection, uint32_t type, const void *data, uint32_t n, const char *name) {
     game_call<void>(base + SEND_MESSAGE, connection, type, data, n);
@@ -46171,7 +46269,7 @@ XP_FN bool session_ps3(const uint8_t *session) {
 //    first of each type per direction and transport with the peer, the length and the data as hex (at most 64
 //    bytes), then only counted;
 //  * net events 0 StartConnection, 1 ConnectionDone, 2 LoadLevel, 3 ReadyToStart, 4 StartGame, 24 AssignTeamDesc,
-//    58 PlayerInfo, 92 PlayerLeft, 151 SyncWeaponPickupsNew (PS3 only): in = made by the factory hook (kind 244 sub 22) while a
+//    58 PlayerInfo, 92 PlayerLeft, 151 SyncWeaponPickupsNew (PS3 only), 138 / 139 (v7.254 jip): in = made by the factory hook (kind 244 sub 22) while a
 //    packet is read (the first per type with that packet's bytes in wire order), out = queued for a data packet (the
 //    first per type with the event object's bytes; a reliable event stays queued until acknowledged and is counted
 //    once, by its number at node +8);
@@ -46183,11 +46281,12 @@ XP_FN bool session_ps3(const uint8_t *session) {
 //    data lines 80 of them.
 #define A0_FN [[gnu::section(".text.ext"), gnu::noinline, clang::minsize]]   // region B (v7.253 integration: -Os gave B room)
 namespace a0 {
-constexpr uint32_t LINES = 600, MD_LINES = 80, MSG_N = 0x23, EVS = 9;
+constexpr uint32_t LINES = 600, MD_LINES = 80, MSG_N = 0x23, EVS = 11;
 constexpr uintptr_t CONNECTIONS = 0x17f31b0, ENTRY_SIZE = 0x220;
-U3X_RO const uint8_t ev_types[EVS] = {0, 1, 2, 3, 4, 24, 58, 92, 151};
+// v7.254 jip (A7 R9, R14): 138 / 139 = the late joiner's sync end markers (SPEC-join-in-progress-v2 9.1)
+U3X_RO const uint8_t ev_types[EVS] = {0, 1, 2, 3, 4, 24, 58, 92, 151, 138, 139};
 U3X_RO const char ev_names[] = "StartConnection\0ConnectionDone\0LoadLevel\0ReadyToStart\0StartGame\0AssignTeamDesc\0"
-                              "PlayerInfo\0PlayerLeft\0SyncWeaponPickupsNew";
+                              "PlayerInfo\0PlayerLeft\0SyncWeaponPickupsNew\0LateJoinSyncDone\0LateJoinSyncDoneHost";
 // PS3 net state names: per entry one byte (the state | n << 6: the next n states share the name as _2, _3), the name
 U3X_RO const char state_names[] =
     "\x03" "CREATE_GAME_WAIT\0" "\x04" "CLIENT_START\0" "\x05" "HOST_WAIT_VOTE?\0" "\x06" "CLIENT_GAME_LIST_WAIT\0"
@@ -46301,12 +46400,13 @@ A0_FN bool ev_first(uint32_t dir, uint32_t k, uint32_t times, Line &l, const cha
 //  * Member (R3): 0x104 from the party leader (its connection, or its name for a PS3): lobby mode and the selected net
 //    game (selected as the game selects it; the option block is not applied: its PS3 field types are unknown); 0x102
 //    only in lobby mode 2; 0x10e {0} from the leader leaves; 0x106 is left (KEEP) for u3x_pinfo_pull_tick
-//    (no net time sync restart). 0x107 0x108 0x114 0x115 0x118 0x11b 0x11c 0x11f and unknown ids: logged, dropped.
+//    (no net time sync restart). 0x107 0x108 0x114 0x115 0x118 0x11c 0x11f and unknown ids: logged, dropped; 0x11b
+//    goes to the jip block (v7.254, A7).
 //  * Leader (R4): 0x114 / 0x115 on entering / leaving the Custom Game lobby and 0x104 on a change of the block or of
 //    the members it goes to, to PS3 and v2 members; 0x110 to PS3 members; to PS3 members 0x102 with this PC's 36-byte
 //    member id in its match room, then each one's 0x10d (looked at in net state 0xb, where PS4 code tallies it, taken
-//    otherwise): 0x10e {1} once every one answered 1, {0} on a failure or after 10 s; 0x11b to a PS3 member that joins
-//    the party while this PC owns a running match (net state 0x1d).
+//    otherwise): 0x10e {1} once every one answered 1, {0} on a failure or after 10 s (the 0x11b of a running match:
+//    the jip block, v7.254).
 //  * Votes (R6), match room: the owner sends 0x112 / 0x109 (map vote open / result), 0x120 / 0x122 (difficulty vote
 //    open / result) and 0x11e (countdown) when its vote state does that; every player sends its own votes (0x10a, 0x121)
 //    and counts everyone's. Raw deadlines are the lobby deadline word (net clock); 0x109 / 0x122 carry network time.
@@ -46331,6 +46431,10 @@ int u3x_n04_close(uintptr_t base, void *s);
 uint64_t u3x_network_usec();
 int32_t u3x_net_clock(uintptr_t base);
 void u3x_ng_select(uintptr_t base, void *s);
+void u3x_jip2_11b(uintptr_t base, const uint8_t *d, uint32_t n, const char *from);   // v7.254 jip (A7 R2)
+int u3x_mm_msg(uintptr_t base, uint32_t type);   // v7.254 mm (end of the file): 0x107 / 0x108 / 0x118
+void u3x_mm_md_mark(uint8_t *md);                  // v7.254 mm: capability byte 2 (member data +0x2b)
+int u3x_mm_lobby(uintptr_t base);                  // v7.254 mm: the hs lobby migration step is the mm driver's
 }
 namespace pmsg {
 constexpr uintptr_t NET = 0x17d5c58, NGM = 0x17cb060, V = 0x17d7760, W = 0x17d7784, TAKE = 0x7762c0;
@@ -46682,13 +46786,15 @@ PM_FN int tick(uintptr_t base, Log log) {
             if (by_leader && n >= 0x30) u3x_start_102(base, d, leader);   // v7.253 start (A5 R9): the member's follow
         } else if (type == 0x104) {
             if (by_leader && n >= 0x30) lobby_in(base, d);
+        } else if (type == 0x11b) {
+            u3x_jip2_11b(base, d, n, from);   // v7.254 jip (A7 R2): the match owner's "join my running match"
         } else if (type == 0x10e) {
             if (by_leader) u3x_start_10e(base, n && d[0] ? 1u : 0u);   // v7.253 start (A5 R9)
             if (by_leader && !(n && d[0])) {
                 xp::st.leader_room = 0;
                 leave = 1;
             }
-        } else {
+        } else if (!u3x_mm_msg(base, type)) {   // v7.254 mm: 0x107 (enter matchmaking), 0x108 (back out), 0x118
             vote_in(base, type, d, n);
         }
     }
@@ -47007,6 +47113,7 @@ XP_FN void u3x_xp_md_out(uint8_t *o, uint32_t id, uint32_t n) {
     using namespace xp;
     if (id != 314 || n < 80 || o[4] != 0x40) return;
     if (!o[16 + 0x19]) pmsg::cap_mark(o + 16);   // v7.253 pm (R9): "message layer v2", party and match
+    if (!o[16 + 0x19]) u3x_mm_md_mark(o + 16);   // v7.254 mm: "matchmaking v2" (+0x2b bit 0)
     if (!st.base) return;
     const uint64_t room = rd<uint64_t>(o, 8);
     for (uint32_t k = 0; k < 2; k++) {
@@ -47040,13 +47147,13 @@ XP_FN void u3x_xp_search_started(uintptr_t base) {
 // else 0} on each change and to each new member; 0x102 (pmsg::follow_block) when this PC's match room is there; then
 // each one's 0x10d: 0x10e {1} once every member told 0x102 answered 1, {0} on a failure or after 10 s (PS3's wait), {0}
 // also when the room goes before the level load (the level load has started at net state 0x2c: no cancel after it;
-// v7.253 part 1: no 0x106 there, PS3 sends 0x106 only as a player info request); 0x11b {the follow block} to a member
-// that joined the party while this PC's match ran (net state 0x1d). PC members keep following by the member data marks.
+// v7.253 part 1: no 0x106 there, PS3 sends 0x106 only as a player info request). (v7.254: the 0x11b to a member that
+// joins while this PC's match runs is the jip block's.) PC members keep following by the member data marks.
 XP_FN void u3x_xp_lead_tick(uintptr_t base) {
     using namespace xp;
     uint8_t *ps = reinterpret_cast<uint8_t *>(base + PARTY);
     const uint8_t *ms = reinterpret_cast<const uint8_t *>(base + MATCH);
-    const bool leads = pmsg::owns(ps), runs = pmsg::owns(ms) && at<uint32_t>(base + NET_STATE) == 0x1d;
+    const bool leads = pmsg::owns(ps);
     const uint32_t mode = at<uint32_t>(base + NET_MENU_MODE) == 2 ? 2 : 0;
     const uint64_t room = pmsg::owns(ms) && mode == 2 ? rd<uint64_t>(ms, 0x18) : 0;
     const uint32_t ns = at<uint32_t>(base + NET_STATE), now = at<uint32_t>(base + CLOCK);
@@ -47061,10 +47168,8 @@ XP_FN void u3x_xp_lead_tick(uintptr_t base) {
             s.mode = 0xff;
             s.room = 0;
             s.go = s.loading = 0;
-            pmsg::pst.jip &= ~bit(i);
             if (!led) continue;
             for (int c = 0; c < 16 && name[c]; c++) s.name[c] = name[c];
-            if (runs) pmsg::pst.jip |= bit(i);   // joined while this PC's match runs
         }
         const bool ps3 = is_ps3(name);
         if (s.mode != mode) {
@@ -47076,13 +47181,8 @@ XP_FN void u3x_xp_lead_tick(uintptr_t base) {
         }
         if (!ps3 && !u3x_start_pc_led(base)) continue;   // v7.253 start (A5 R9): level-2 PC members on the PS3 path too
         uint8_t d[0x30];
-        if (ps3 && (pmsg::pst.jip & bit(i))) {   // once; not when it is in the match already
-            pmsg::pst.jip &= ~bit(i);
-            if (!pmsg::in_session(ms, name)) {
-                pmsg::follow_block(base, d);
-                pmsg::send(base, m, 0x11b, d, 0x30);
-            }
-        }
+        // (v7.254 jip: the 0x11b to a member that joins while this PC's match runs moved to the jip block, A7 R1:
+        // from the match owner, leader or not, to PS3 and level-3 members)
         const uint32_t sel = static_cast<uint32_t>(static_cast<int32_t>(at<int16_t>(base + LOBBY_SEL)));
         if (room && s.room != room && ps3 && (st.off || ps3_index(sel) == NO_PS3)) {   // no such PS3 net game (or crossplay off): it stays out
             if (st.refused_room != static_cast<uint32_t>(room) && may_log(st.log)) {
@@ -47205,6 +47305,10 @@ XP_FN int u3x_xp_hook(uintptr_t base, uint64_t *r) {
         ll_write(reinterpret_cast<uint8_t *>(r[4]), b, true);
         return 1;
     }
+    if (sub == 22 && !st.peer && static_cast<uint32_t>(r[4]) == 152) {   // v7.254 SPEC-open O2: a PC owner's 152
+        r[8] = reinterpret_cast<uint64_t>(make152(base));
+        return 1;
+    }
     if (sub == 22 && !st.peer) return u3x_v52_made(base, r);   // v7.252: a PC player's events (LoadLevel rules)
     if (!st.peer || sub < 10 || sub > 25) return 0;
     if (sub == 24 || sub == 25) {   // Message (58), at the end of its Write / Read: r10 = the stream, r9 = the event
@@ -47314,18 +47418,10 @@ XP_FN int u3x_xp_hook(uintptr_t base, uint64_t *r) {
         st.last_type = type;
         if (type != 151 && type != 152) return 0;
         using Make = uint8_t *(*)(uint32_t);
-        uint8_t *made = reinterpret_cast<Make>(own)(type == 151 ? 99u : 0u);
+        uint8_t *made = type == 151 ? reinterpret_cast<Make>(own)(99u) : make152(base);
         if (made && type == 151) {
             st.ev151 = made;
         } else if (made) {
-            if (!st.vt152_ok) {
-                const uintptr_t *t0 = reinterpret_cast<const uintptr_t *>(base + TYPE0_TABLE);
-                for (int i = 0; i < 8; i++) st.vt152[i] = t0[i];
-                st.vt152[2] = st.vt152[3] = st.vt152[4] = reinterpret_cast<uintptr_t>(&noop);   // Read, Write, handle
-                st.vt152_ok = 1;
-            }
-            *reinterpret_cast<uintptr_t *>(made) = reinterpret_cast<uintptr_t>(st.vt152);
-            made[8] = 152;
             st.ps3_r[6]++;
         }
         r[8] = reinterpret_cast<uint64_t>(made);
@@ -48334,6 +48430,11 @@ int u3x_cg_jip_ok(uintptr_t base, const uint8_t *host);   // v7.253 cg block (en
 void u3x_start_tick(uintptr_t base);                           // v7.253 start block (end of the file, A5)
 int u3x_start_on(uintptr_t base);
 void u3x_start_ll_applied(uintptr_t base, const uint8_t *ev);
+void u3x_jip2_tick(uintptr_t base);                                 // v7.254 jip block (end of the file, A7)
+void u3x_jip2_wait_start(uintptr_t base, uint64_t room);
+int u3x_jip2_end(uintptr_t base, uint64_t room, int why);
+void u3x_jip2_fwd_103(uintptr_t base, const void *d, uint32_t n);
+int u3x_mm_late_due(uintptr_t base);                                // v7.254 mm block (A8 R15): 0 = hold the late-join load
 }
 namespace v7252 {
 // image offsets
@@ -48489,6 +48590,7 @@ V52_FN bool refused_for(uintptr_t base, uint64_t room) {
     uint64_t data[2] = {0, 0};
     uint32_t length = 0x10;
     if (u3h_mq_get_np(base, index, from, data, &length) != 0) return false;
+    u3x_jip2_fwd_103(base, data, length);   // v7.254 jip (R10): a party owner forwards it to its party
     return length >= 8 && data[0] == room;
 }
 // a net player leaves: gone, no connection; an entry no session uses any more drops what is queued for it
@@ -48678,6 +48780,7 @@ V52_FN void u3x_v52_tick(uintptr_t base, Log log) {
     }
     u3x_hs_frame(base);   // v7.253 hs: net game begin / end resets, lobby migration 0x12 -> 0x11 (SPEC-host-leaves L4)
     u3x_start_tick(base);   // v7.253 start (A5): path latch, owner logs, start-load watch, member follow state
+    u3x_jip2_tick(base);    // v7.254 jip (A7): the owner's 0x11b, the joiner's entry 0 / 0x10d, a v2 leader's 0x10d
     if (net_state != 0x12) st.wait_room = st.left_room = 0;   // the wait ended (abort, normal load, given up)
     if (st.jip_active) {
         if (net_state >= 0x31 && net_state <= 0x33) {
@@ -48687,7 +48790,7 @@ V52_FN void u3x_v52_tick(uintptr_t base, Log log) {
                 l.s(t_103).x(net_state, 2);
                 put(l);
                 leave_room(session(base, MATCH));
-                unable_to_join(base);
+                if (!u3x_jip2_end(base, st.jip_room, 5)) unable_to_join(base);   // v7.254 jip (R5): PS3 keeps the party
                 at<uint32_t>(base + NET_STATE) = 0x26;   // back to the Custom Game lobby, as PS3
                 at<uint32_t>(base + NET_STATE_SINCE) = t;
             }
@@ -48721,7 +48824,9 @@ V52_FN int u3x_jip_wait(uintptr_t base, uint64_t room, int start, Log log) {
             if (h == room) tries++;
         if (tries >= 4) {
             say(t_retry);
-            unable_to_join(base);
+            if (void *s = u3h_fl_state())   // v7.254 jip (R11): PS3's retry dialog 0x2850cf6f (was 0x4d972420)
+                u3h_show_dialog(base, s, 0x2850cf6fu, 0xc6467f2du, 0xd3107e4bu, 0, 0, 0xe1e040aau);
+            session(base, PARTY)[S_LEAVE] = 1;
             st.left_room = room;
             leave_room(ms);
             return 0;
@@ -48737,6 +48842,7 @@ V52_FN int u3x_jip_wait(uintptr_t base, uint64_t room, int start, Log log) {
         if (u3x_hs_note_wanted(base, host) && host)
             u3x_queue_send(base, host, CONNECTED_NOTE, nullptr, 0);   // the handshake's "connected" (PC hosts)
         say(t_wait);
+        u3x_jip2_wait_start(base, room);   // v7.254 jip (R3): 0x10d {1} to the leader on the 0x11b route
     }
     if (refused_for(base, room)) {
         st.wait_room = 0;
@@ -48745,7 +48851,13 @@ V52_FN int u3x_jip_wait(uintptr_t base, uint64_t room, int start, Log log) {
         put(l);
         st.left_room = room;
         leave_room(ms);
-        unable_to_join(base);
+        if (!u3x_jip2_end(base, room, 1)) unable_to_join(base);   // v7.254 jip (R4): PS3 keeps the party here
+        return 0;
+    }
+    if (u3x_jip2_end(base, room, 2)) {   // v7.254 jip (R4): the owner's record gone (JIP v2 / PS3 owner only)
+        st.wait_room = 0;
+        st.left_room = room;
+        leave_room(ms);
         return 0;
     }
     if (ms[0x1338]) {   // raised without our handle (an image without the factory hook): it is the LoadLevel too
@@ -48759,9 +48871,10 @@ V52_FN int u3x_jip_wait(uintptr_t base, uint64_t room, int start, Log log) {
             st.wait_room = 0;
             st.left_room = room;
             leave_room(ms);   // before any load, as PS3 ("missing content")
-            unable_to_join(base);
+            if (!u3x_jip2_end(base, room, 4)) unable_to_join(base);   // v7.254 jip (R4): PS3 leaves room + party
             return 0;
         }
+        if (!u3x_mm_late_due(base)) return 0;   // v7.254 mm R15: a matchmaking late join (0x27) loads at its 25-s deadline
         Line l;
         l.s(t_ll_in).d((t - st.wait_t) * 10u / 3u).s(t_hrec).s(t_yes).s(t_orec).s(t_yes);
         put(l);
@@ -48775,6 +48888,7 @@ V52_FN int u3x_jip_wait(uintptr_t base, uint64_t room, int start, Log log) {
         put(l);
         st.left_room = room;
         leave_room(ms);   // the follow's abort takes this PC back to the party lobby
+        u3x_jip2_end(base, room, 3);   // v7.254 jip (R4): PS3: failed-room list, party left, net state 0x26
     }
     return 0;
 }
@@ -49078,7 +49192,8 @@ namespace hs {
 // capability byte (member data +0x2c, IMPL-v7.253.md): top nibble 0xa = mark, bits 0..1 level (this block), bit 2
 // message layer v2 (pm), bit 3 link v2 (link); put_level keeps bits 2 and 3
 constexpr uint8_t MARK = 0xa0, MARK_MASK = 0xf0, LEVEL_MASK = 3, PM_V2 = 4, LINK_V2 = 8;
-constexpr int LEVEL_HANDSHAKE = 1, LEVEL_START = 2, LEVEL_PS3 = 7;
+constexpr int LEVEL_HANDSHAKE = 1, LEVEL_JIP = 3, LEVEL_PS3 = 7;   // v7.254 jip: 3 = JIP v2 (includes 2)
+[[maybe_unused]] constexpr int LEVEL_START = 2;   // the PS3 start sequence (start block); written as part of 3 since v7.254
 constexpr uintptr_t MD_LEVEL = 0x2c, MD_SECOND = 0x19;
 constexpr uintptr_t R_IN_USE = 0xe1, R_SECONDARY = 0x1ec, R_INFO = 0x365, R_CONNECTION = 0x5b4, R_GONE = 0x5e4,
                     R_CONNECTED = 0x5ee, R_DONE = 0x5f8, R_LATE = 0x5f9;
@@ -49184,8 +49299,8 @@ HS_RO const char ht_rank[] = "HostRank 322 out (", ht_rank2[] = " ids):", ht_sp[
 HS_RO const char ht_note[] = "late join: the host does the handshake, no 0x1f1 to ";
 HS_RO const char ht_left[] = "match room: ", ht_left2[] = " left: PlayerLeft step (id ";
 HS_RO const char ht_lobby[] = "lobby: became the owner: 0x12 -> 0x11";
-HS_RO const char ht_mon[] = "monitor: id ", ht_mon1[] = " kicked: no live link (members check: helper rule, not PS3)",
-                 ht_mon2[] = " kicked: silent 20 s (its 10-s repeat limit is a helper rule)", ht_mon3[] = " dropped: silent 20 s";
+HS_RO const char ht_mon[] = "monitor: id ", ht_mon1[] = " kicked: entry dropped, or no entry and no signaling link (members check)",
+                 ht_mon2[] = " kicked: silent 20 s (asked every frame until removed)", ht_mon3[] = " dropped: silent 20 s";   // v7.254 fam texts
 
 struct Leave { uint32_t id; int32_t connection; uint8_t name[16]; };
 struct State {
@@ -49412,6 +49527,7 @@ HS_FN void u3x_hs_frame(uintptr_t base) {
     if (!lobby_step(st.lobby_room, at<uint32_t>(base + v7252::NET_STATE), rd<uint64_t>(ms, S_ROOM), v7252::is_match_host(base),
                     ms[v7252::S_LEAVE] != 0))
         return;
+    if (u3x_mm_lobby(base)) return;   // v7.254 mm: a matchmaking room's new owner waits in its lobby (no start here)
     u3x_ng_select(base, u3h_fl_state());
     at<uint32_t>(base + v7252::NET_STATE) = 0x11;
     at<uint32_t>(base + v7252::NET_STATE_SINCE) = v7252::now(base);
@@ -49422,7 +49538,8 @@ HS_FN void u3x_hs_frame(uintptr_t base) {
 int u3x_start_hooks(uintptr_t base);   // v7.253 start block (end of the file): subs 28 / 29 in place
 HS_FN void u3x_hs_md_mark(uintptr_t base, uint8_t *md) {
     if (at<uint8_t>(base + hs::PROC_START) != 0xc3 && at<uint8_t>(base + hs::PROC_DONE) != 0xc3)   // A5 R12: level 2
-        hs::put_level(md, u3x_start_hooks(base) ? hs::LEVEL_START : hs::LEVEL_HANDSHAKE);   // with the start hooks too
+        hs::put_level(md, u3x_start_hooks(base) ? hs::LEVEL_JIP : hs::LEVEL_HANDSHAKE);   // with the start hooks too
+                                                                                         // (v7.254 jip: level 3 = JIP v2, includes 2)
 }
 
 // R9: one line per id for the monitor's kicks / drops (kind 1 members check, 2 silence kick, 3 silence drop)
@@ -50315,6 +50432,7 @@ CG_FN uint32_t u3x_cg_mask(uintptr_t base, int match, uint32_t *n) {
 //    zeroed its net time before sending it); sub 29 (LoadLevels guest gate) holds the guest's ReadyToStart {start}
 //    until 8 samples since that restart. PS3 path: no limit; v7.252 path (mixed party, Custom Game only): samples
 //    count only after #2, at most 10 s; matchmaking guests pass as x023 did.
+extern "C" int u3x_jip2_ll_gate(uintptr_t base);   // v7.254 jip block (A7 R7): sub 29 for a late joiner
 #define ST_FN [[gnu::section(".text.ext"), gnu::noinline, clang::minsize]]
 #define ST_RO [[gnu::section(".rodata.ext")]]
 // ===== v7.253 start pure begin =====
@@ -50630,6 +50748,10 @@ ST_FN int loadlevels_gate(uintptr_t base) {   // H2, sub 29 (replaces the owner 
     uint8_t *ms = sess(base, MATCH);
     const uint64_t room = rd<uint64_t>(ms, S_ROOM);
     if (!room || pmsg::owns(ms)) return 0;   // the owner, no match session: pass
+    if (at<uint32_t>(base + v7252::JIP_STATUS) > 3) {   // v7.254 jip (A7 R7): a late joiner of a PS3 / JIP v2 owner is held
+        const int h = u3x_jip2_ll_gate(base);
+        if (h >= 0) return h;
+    }
     if ((ext_eb()[0] & 8u) || at<uint32_t>(base + v7252::JIP_STATUS) == 6) return 0;   // no sync / a late joiner: as x023
     const uint32_t t = v7252::now(base);
     const bool on = member_on(room);
@@ -50936,3 +51058,4224 @@ ST_FN void u3x_start_tick(uintptr_t base) {
 
 }  // extern "C"
 // ===== v7.253 start end =====
+
+// ===== v7.254 jip: join in progress as PS3 1.19 (ps3net/SPEC-join-in-progress-v2.md, area A7, R1..R14) =====
+// Own C++ from the behaviour sections 1-8 of SPEC-join-in-progress-v2 and the other areas' IMPL notes; no game code.
+// Release gate: level 3 = "JIP v2" in the capability byte (member data +0x2c bits 1..0; u3x_hs_md_mark writes it where
+// it wrote level 2: the image has the handshake stubs and the start hooks; level 3 includes level 2). A pair runs the
+// PS3 route when this PC is level 3 and the other side is level 3 or a PS3 player (hs::member_level 7); toward older PCs
+// everything stays as in v7.252 / v7.253 (member data / 0x1f0 follow, 0x1f1, parking).
+//  * Owner (R1, R12): the machine that owns the running match room (net state 0x1d, lobby mode not 1, leader or not)
+//    sends 0x11b {its 36-byte member id in the match room, u64 room} once to a party member that joins while the match
+//    runs, when that member is a PS3 player or level 3; held (not dropped) while a late-join slot is in use, the last
+//    0x11b's joiner is not in yet (30 s) or the rules refuse a late join now (PS3 keeps both rooms closed then; the room
+//    joinable flags themselves are not set: no backend call known, see IMPL-v7.254-jip.md). Replaces the xp lead tick's
+//    0x11b (PS3 members, leader only).
+//  * Joiner (R2, R3): 0x11b from the message layer (not the party owner, this PC level 3, idle, online party): the
+//    5-entry late-join history (v7.252's) holding the room 4 times -> dialog 0x2850cf6f, party left; else entry 0 := 4,
+//    the follow done here as the C part does it (lobby mode 2, net states 0xb -> 0xf -> 0x12 on the JOINING page:
+//    PS4's own RoomJoin path), entry 0 := 5 at the join; at 0x12 with the link to the owner up (20 s, as the C part's
+//    link gate) the v7.252 wait (u3x_jip_wait) starts (player info x2) and 0x10d {1} goes to the leader; an attempt
+//    that ends before that gets 0x10d {0}, entry 0 := 0. The C part's member-data follow stays off meanwhile.
+//  * Joining page (R4, in u3x_jip_wait): 0x103 -> leave the room, JOINING page closed, party kept; the owner's record
+//    gone -> leave room and party; 9.3 s without LoadLevel -> the 8-entry failed-room list, leave room and party, net
+//    state 0x26; game mode not playable -> leave room and party; retries -> 0x2850cf6f on both routes (R11).
+//  * 0x31..0x33 (R5, R10): a 0x103 leaves the match, net state 0x26, party kept, no dialog; a party owner forwards
+//    every 0x103 it takes to its party (PS3 members and message-layer v2 PCs).
+//  * Order (R7): sub 29 (the x023 site) answers "hold" for a late joiner of a PS3 / level-3 owner: no ReadyToStart from
+//    LoadLevels, the game's own late-joiner step to Playing (ReadyToStart 4 s into Playing is the game's); still held
+//    after 5 s -> the x023 path as before (logged). The owner parks no slot of a PS3 joiner, nor of a level-3 joiner
+//    when it is level 3 itself; the joiner sends no "plays" word to such an owner.
+//  * Route D (R13): a level-3 PC does not follow a level-3 leader's member data (or its 0x1f0) into a running match.
+//  * A v2 leader takes the late joiners' 0x10d out of its queue outside a start (PS4 tallies 0x10d in net state 0xb).
+// boot.log: "U3MP jip: " lines (R14), with the v7.252 "U3MP late join" and the C part's "late join slot" lines.
+#ifndef U3X_FN_D
+#define U3X_FN_D [[gnu::section(".text.d"), gnu::noinline]]
+#define U3X_RO_D [[gnu::section(".rodata.d")]]
+#endif
+#define JP_FN [[gnu::section(".text.d"), gnu::noinline, clang::minsize]]   // region D (helpers v7.254 and later)
+#define JP_RO [[gnu::section(".rodata.d")]]
+#pragma clang section text=".text.d" rodata=".rodata.d"
+// ===== v7.254 jip pure begin =====
+namespace jip2 {
+constexpr uint32_t TICKS = 300, MD_WAIT = 5 * TICKS, LAST_WAIT = 30 * TICKS, HOLD_MAX = 5 * TICKS;
+constexpr int LEVEL_V2 = 3;   // JIP v2 (a PS3 player counts as 7)
+
+// R2: 1 = the room (low 32 bits, as PS3) is in the last 5 late joins 4 times or more
+JP_FN bool retry_refused(const uint64_t *history, uint32_t n, uint64_t room) {
+    uint32_t k = 0;
+    for (uint32_t i = 0; i < n; i++)
+        if (history[i] && static_cast<uint32_t>(history[i]) == static_cast<uint32_t>(room)) k++;
+    return k >= 4;
+}
+
+// R2: what this PC does with a 0x11b
+enum { A_ACCEPT, A_RETRY, A_BUSY, A_OFF, A_SAME };
+JP_FN int accept_11b(bool v2, bool party_owner, bool same_room, bool busy, bool retry) {
+    if (!v2 || party_owner) return A_OFF;   // PS3: only a member that does not own the party reads it
+    if (same_room) return A_SAME;           // already joining / in that room
+    if (busy) return A_BUSY;                // in another match room or a join / start step (helper rule)
+    return retry ? A_RETRY : A_ACCEPT;
+}
+
+// R1 / R12: the owner's step for a party member that joined while its match runs. level: hs::member_level (0 = no
+// mark yet: no member data, a PS3 player not recognised yet, an old PC); waited: ticks since it joined
+enum { O_WAIT, O_SEND, O_DROP, O_HOLD };
+JP_FN int owner_step(int level, bool in_match, bool busy, bool refused, uint32_t waited) {
+    if (in_match) return O_DROP;
+    if (level <= 0) return waited >= MD_WAIT ? O_DROP : O_WAIT;
+    if (level < LEVEL_V2) return O_DROP;   // a v7.253 PC: the member data / 0x1f0 route
+    return busy || refused ? O_HOLD : O_SEND;
+}
+
+// R7: the owner parks a late-join slot (v7.235 order) unless the pair runs the PS3 order
+JP_FN bool park_wanted(int own_level, int joiner_level) {
+    if (joiner_level == 7) return false;   // a PS3 joiner reports ready from Playing
+    return !(own_level >= LEVEL_V2 && joiner_level >= LEVEL_V2);
+}
+
+// R4: the 8-entry list of recently failed rooms (room + time): an empty entry, else the oldest is replaced
+struct Failed { uint64_t room; uint32_t t; };
+JP_FN void failed_push(Failed *f, uint32_t n, uint64_t room, uint32_t t) {
+    uint32_t k = n;
+    for (uint32_t i = 0; i < n && k == n; i++)
+        if (!f[i].room) k = i;
+    if (k == n) {
+        k = 0;
+        for (uint32_t i = 1; i < n; i++)
+            if (t - f[i].t > t - f[k].t) k = i;
+    }
+    f[k].room = room;
+    f[k].t = t;
+}
+JP_FN bool failed_has(const Failed *f, uint32_t n, uint64_t room) {
+    for (uint32_t i = 0; i < n; i++)
+        if (room && f[i].room == room) return true;
+    return false;
+}
+
+// R7: sub 29 for a late joiner of a PS3-order owner, once a frame while LoadLevels runs: hold (the game's late-joiner
+// step), after HOLD_MAX in one stay pass (x023's ReadyToStart path); a gap of 2 s starts a new stay
+struct Hold { uint32_t first, seen; uint8_t passed; };
+enum { L_HOLD, L_HOLD_NEW, L_PASS, L_PASS_NEW };
+JP_FN int ll_step(Hold &h, uint32_t t) {
+    if (!h.seen || t - h.seen > 2 * TICKS) {
+        h.first = t;
+        h.seen = t | 1u;
+        h.passed = 0;
+        return L_HOLD_NEW;
+    }
+    h.seen = t | 1u;
+    if (t - h.first < HOLD_MAX) return L_HOLD;
+    if (h.passed) return L_PASS;
+    h.passed = 1;
+    return L_PASS_NEW;
+}
+
+// O4 (SPEC-open 4.1): the match owner's room lock in a Playing frame. Closed (match room and party room) while a
+// late-join slot is in use, the rules refuse a late join, the match room is full (members >= the net game maximum) or,
+// in matchmaking, the party members outside the match plus the members exceed the playlist maximum; otherwise the
+// match room is open and the party room open in Custom Game, closed in matchmaking. Bit 0 = match room closed, bit 1 =
+// party room closed. max / mm_max 0 = not known (that test is skipped)
+enum : uint8_t { LOCK_MATCH = 1, LOCK_PARTY = 2 };
+JP_FN uint8_t room_lock(bool slot_busy, bool refused, uint32_t members, uint32_t max, bool mm, uint32_t party_out,
+                        uint32_t mm_max) {
+    const bool closed = slot_busy || refused || (max && members >= max) || (mm && mm_max && party_out + members > mm_max);
+    return closed ? LOCK_MATCH | LOCK_PARTY : mm ? LOCK_PARTY : 0;
+}
+
+// O5 (SPEC-open 5): what a failed late join does. why: 1 0x103 for the room, 2 the owner's record gone, 3 no LoadLevel
+// in 9.3 s (give-up), 4 game mode not playable, 6 the abort flag (room kicked / destroyed), 7 the net game aborting.
+// page: 1 MULTIPLAYER (0xb808d03c), 2 the page stack closed (root page); state: the net state, KEEP = not written
+enum : uint8_t { PG_NONE, PG_MULTIPLAYER, PG_ROOT };
+constexpr uint32_t KEEP = 0xffffffffu;
+struct EndPlan { uint8_t leave_party, close_top, page; uint32_t state; };
+JP_FN EndPlan end_plan(int why, bool cg) {
+    const uint8_t party = cg ? 1 : 0;   // only a Custom Game join leaves the party
+    switch (why) {
+    case 1: return {0, 1, PG_MULTIPLAYER, 0};                      // party kept
+    case 2: return {party, 0, PG_MULTIPLAYER, 0};
+    case 3: return {party, 1, PG_ROOT, cg ? 0x26u : 0x14u};      // give-up: no page pushed
+    case 4: return {party, 1, PG_MULTIPLAYER, 0};
+    case 6: return {party, 0, PG_MULTIPLAYER, 0};
+    case 7: return {0, 0, PG_MULTIPLAYER, KEEP};                   // nothing else
+    default: return {0, 1, PG_NONE, 0};
+    }
+}
+}  // namespace jip2
+// ===== v7.254 jip pure end =====
+
+extern "C" {
+U3H_IMPORT void **u3h_onb_vt(void);
+U3H_IMPORT int32_t u3h_fw_host_link(uintptr_t base);   // the link to the match owner: 2 = active
+void u3x_sync_player_info(uintptr_t base);
+int u3x_jip_wait(uintptr_t base, uint64_t room, int start, Log log);
+void u3x_start_prepare(uintptr_t base, void *s);
+void u3x_page_show(uintptr_t base, void *s, uint32_t page, int a);
+// open items (SPEC-open O4 / O5): the G30 page id stack, net game limits, the matchmaking area's reservations
+void u3x_pm_pg_clear(uintptr_t base);
+void u3x_pm_pg_push(uintptr_t base, uint32_t id);
+void u3x_ng_limits(uintptr_t base, int32_t type, int32_t *most, int32_t *fewest);
+int32_t u3x_netgame_type(uintptr_t base, void *s);
+uint32_t u3x_mm_max(void);
+int u3x_mm_reserve_ids(uintptr_t base, const uint8_t *ids, uint32_t count, uint32_t max);
+}
+namespace jip2 {
+constexpr uintptr_t PARTY = 0x17dc298, MATCH = 0x17d6420, NGM = 0x17cb060, JIP_STATUS = 0x1b69530, NET = 0x17d5c58,
+                    TARGET = 0x1b69050, MENU = 0x17bd080, FN_BACK = 0x652200, FN_LATE_OK = 0x746790, R_GONE = 0x5e4,
+                    R_KEY = 0x5b8, S_LEAVE = 0x1334, S_JOIN_RESULT = 0x1334;
+// open items: the session's attribute byte (backend slot 8 keeps it: 318 lock), the abort byte (net game aborting),
+// the net game manager reset (the 10 net player records), the page set call of the post-match handler (G30)
+constexpr uintptr_t S_ATTR = 0x12ec, ABORT = 0x16e7170, FN_NGM_RESET = 0x720500, FN_SET_PAGE = 0x751aa0;
+constexpr uint32_t PAGE_ROOT = 0x37656388u, PAGE_MP = 0x53cbb5f2u, PAGE_MULTIPLAYER = 0xb808d03cu, SET_PAGE_ARG = 0x5ef96af1u;
+constexpr uint32_t PAGE_JOINING = 0x1af4bdd2u, LINK_WAIT = 20 * TICKS;
+constexpr uint32_t LINES = 300;
+JP_RO const char t_pre[] = "U3MP jip: ";
+JP_RO const char t_out[] = "0x11b out to ", t_room[] = ": room ", t_held[] = "0x11b held for ",
+                 t_held_slot[] = ": a late join is running (one at a time, PS3 closes the rooms)",
+                 t_held_rules[] = ": the rules refuse a late join now", t_old[] = "0x11b not sent to ",
+                 t_old2[] = ": level ", t_old3[] = " (older route: member data / 0x1f0)",
+                 t_noplay[] = ": PS3 player, crossplay off or no PS3 net game";
+JP_RO const char t_in[] = "0x11b in from ", t_ns[] = ", net state ";
+JP_RO const char t_acc[] = ": accepted, entry 0 -> 4, lobby mode 2, following (0xb -> 0xf -> 0x12, JOINING page)",
+                 t_retry[] = ": room late-joined 4 of the last 5 times: dialog 0x2850cf6f, party left",
+                 t_busy[] = ": ignored (this PC is in a match room or a join step)",
+                 t_same[] = ": that room is already being joined", t_off[] = ": ignored (not JIP v2 or the party owner)";
+JP_RO const char t_e45[] = "entry 0: 4 -> 5 (RoomJoin 304 running)";
+JP_RO const char t_10d1[] = "0x10d {1} out to the leader ", t_10d1b[] = " (link to the owner up, room joined)";
+JP_RO const char t_10d0[] = "0x10d {0} out to the leader ";
+JP_RO const char t_early[] = "late join ended before the joining page (RoomJoin or link failed), entry 0 -> 0, net state ";
+JP_RO const char t_103[] = "joining page: 0x103 in: match room left, top page closed, MULTIPLAYER (0xb808d03c), party kept";
+JP_RO const char t_gone[] = "joining page: the owner's record is gone: match room left (Custom Game: party too) -> MULTIPLAYER";
+JP_RO const char t_giveup[] = "joining page: no LoadLevel in 9.3 s: room in the failed list, net player records reset, match room left (Custom Game: party too, 0x26; matchmaking: 0x14), page stack closed";
+JP_RO const char t_mode[] = "joining page: the owner's game mode is not playable here: match room left (Custom Game: party too), top page closed -> MULTIPLAYER";
+JP_RO const char t_abort[] = "room lost (abort) -> MULTIPLAYER (kicked from or destroyed: the target match room; Custom Game: party left)";
+JP_RO const char t_aborting[] = "joining page: the net game is aborting -> MULTIPLAYER";
+JP_RO const char t_flag[] = "abort flag up: the server reported the target match room ", t_kicked[] = "kicked (312)",
+                 t_destroyed[] = "destroyed (313)";
+JP_RO const char t_lock[] = "318 out room 0x", t_lock2[] = " value ", t_lock3[] = " mask 3 (", t_lock_m[] = "match room ",
+                 t_lock_p[] = "party room ", t_closed[] = "closed: ", t_open[] = "open", t_after[] = "open (after the match: helper safety net)";
+JP_RO const char t_why[] = "a late-join slot is in use\0the rules refuse a late join\0the match room is full\0the party does not fit the playlist\0matchmaking";
+JP_RO const char t_rp[] = ")";
+JP_RO const char t_resv[] = "reserved ", t_resv2[] = " ids for 0x11b (10 s, the owner's table)", t_resv_no[] = ": slot reservation refused (all or nothing, ids ";
+JP_RO const char t_late103[] = "late-join page: 0x103 in: match room left, net state 0x26, party kept";
+JP_RO const char t_fwd[] = "0x103 forwarded to the party (party owner), room ";
+JP_RO const char t_hold[] = "LoadLevels: late joiner of a PS3-order owner: no ReadyToStart here (x023 not applied), the game's step to Playing";
+JP_RO const char t_pass[] = "LoadLevels: late joiner still in LoadLevels after 5 s: x023 path (ReadyToStart, WaitReady skipped) - BAD, send the log";
+JP_RO const char t_plays[] = "late joiner: in Playing, PS3 order (ReadyToStart 4 s in from the game, no 0x1f1 word)";
+JP_RO const char t_nopark[] = "late join: PS3 order, slot not parked, slot ";
+JP_RO const char t_skip_md[] = "join in progress: the leader is JIP v2: no member-data follow into its running match (only a 0x11b starts a late join)";
+JP_RO const char t_skip_info[] = "join in progress: join info (0x1f0) from a JIP v2 leader: not followed (only a 0x11b starts a late join)";
+JP_RO const char t_10d_in[] = "0x10d in from ", t_10d_in2[] = " outside a start (late join step): taken, value ";
+JP_RO const char t_play[] = "late join: Playing";
+JP_RO const char t_link_up[] = "joining page: room joined, link to the owner up after ms ";
+JP_RO const char t_link_no[] = "joining page: no link to the match owner 20 s after the room join: leaving the match room";
+JP_RO const char t_lost[] = "joining page: not in the owner's match room any more (join failed, kicked or room gone): JOINING page closed";
+
+struct State {
+    // owner
+    char name[10][16];
+    uint32_t due_since[10];
+    uint8_t due[10], noted[10], inited;
+    char last_to[16];
+    uint32_t last_t;
+    // joiner
+    uint64_t room;          // the 0x11b attempt (0 = none)
+    uint8_t target[0x38];   // the JOINING page's join target: u64 room, the owner's 36-byte member id
+    uint8_t sent_10d, waiting, md_skip_logged;
+    uint32_t md_skip_room, at12;
+    Failed failed[8];
+    Hold hold;
+    uint32_t lines;
+    // open items: the abort flag (O5), the abort byte at the accept, the party room closed by the 318 rule (O4)
+    uint8_t abort, abort_at_accept, party_locked;
+};
+U3X_BSS State st;
+
+[[gnu::always_inline]] inline uint32_t now(uintptr_t base) { return at<uint32_t>(base + xp::CLOCK); }
+[[gnu::always_inline]] inline uint8_t *sess(uintptr_t base, uintptr_t s) { return reinterpret_cast<uint8_t *>(base + s); }
+JP_FN void put(uintptr_t base, Line &l) {
+    if (v7252::st.log && st.lines < LINES) {
+        st.lines++;
+        v7252::st.log(base, l.z());
+    }
+}
+JP_FN void say(uintptr_t base, const char *text) {
+    Line l;
+    put(base, l.s(t_pre).s(text));
+}
+JP_FN bool same16(const char *a, const char *b) { return xp::same(a, b); }
+JP_FN void copy16(char *d, const char *s) {
+    for (int k = 0; k < 16; k++) d[k] = 0;
+    for (int k = 0; k < 16 && s[k]; k++) d[k] = s[k];
+}
+// this image runs JIP v2: the handshake stubs and the start hooks (level 3 in its member data)
+JP_FN bool self_v2(uintptr_t base) {
+    return at<uint8_t>(base + hs::PROC_START) != 0xc3 && at<uint8_t>(base + hs::PROC_DONE) != 0xc3 && u3x_start_hooks(base);
+}
+JP_FN bool online(const uint8_t *s) {
+    const uint8_t *be = rd<const uint8_t *>(s, 8);
+    return be && rd<void **>(be, 0) == u3h_onb_vt();
+}
+// the match room owner's level (0 = no owner member known)
+JP_FN int owner_level(uintptr_t base) {
+    uint8_t *ms = sess(base, MATCH);
+    if (!rd<uint64_t>(ms, v7252::S_ROOM)) return 0;
+    return hs::member_level(base, u3x_find_member(ms, rd<uint32_t>(ms, v7252::S_OWNER)));
+}
+// this PC and the match owner run the PS3 order (JIP v2 or PS3)
+JP_FN bool pair_v2(uintptr_t base) { return self_v2(base) && owner_level(base) >= LEVEL_V2; }
+// the match member of a net player record (by name), or null
+JP_FN uint8_t *member_of(uintptr_t base, const uint8_t *rec) {
+    uint8_t *ms = sess(base, MATCH);
+    for (uint32_t i = 0; i < 10; i++) {
+        uint8_t *m = xp::slot(ms, i);
+        if (m[0x25] && hs::same_name(m, rec + R_KEY)) return m;
+    }
+    return nullptr;
+}
+JP_FN void party_leave(uintptr_t base) { sess(base, PARTY)[S_LEAVE] = 1; }
+JP_FN void retry_dialog(uintptr_t base) {
+    if (void *s = u3h_fl_state()) u3h_show_dialog(base, s, 0x2850cf6fu, 0xc6467f2du, 0xd3107e4bu, 0, 0, 0xe1e040aau);
+    party_leave(base);
+}
+// 0x10d {v} to the party leader (PS3 or level 3; never when this PC owns the party)
+JP_FN void tell_leader(uintptr_t base, uint8_t v) {
+    uint8_t *leader = xp::leader_slot(base);
+    if (!leader || hs::member_level(base, leader) < LEVEL_V2) return;
+    pmsg::send(base, leader, 0x10d, &v, 1);
+    Line l;
+    l.s(t_pre).s(v ? t_10d1 : t_10d0);
+    xp::name16(l, reinterpret_cast<const char *>(leader));
+    put(base, v ? l.s(t_10d1b) : l);
+}
+
+// ---- joiner: the follow of an accepted 0x11b, by the game's JOINING page (its states 0xb -> 0xf -> 0x12 call the
+// backend's room join with the target at net +0x78), as the C part's follow does it; lobby mode 2 (Custom Game)
+JP_FN void follow(uintptr_t base, uint64_t room, const uint8_t *id) {
+    void *s = u3h_fl_state();
+    const uint32_t t = now(base);
+    at<uint32_t>(base + xp::NET_MENU_MODE) = 2;
+    if (s) u3x_start_prepare(base, s);
+    for (uint8_t &c : st.target) c = 0;
+    *reinterpret_cast<uint64_t *>(st.target) = room;
+    for (uint32_t k = 0; k < 0x24; k++) st.target[8 + k] = id[k];
+    for (uint32_t k = 0; k < 0x2c; k++) at<uint8_t>(base + NET + 0x78 + k) = st.target[k];
+    at<uintptr_t>(base + TARGET) = reinterpret_cast<uintptr_t>(st.target);
+    at<int32_t>(base + MATCH + S_JOIN_RESULT) = -1;
+    at<uint32_t>(base + xp::NET_STATE) = 0xb;
+    at<uint32_t>(base + v7252::NET_STATE_SINCE) = t;
+    if (s) u3x_page_show(base, s, PAGE_JOINING, 1);
+}
+// the attempt ended here: net state as given (KEEP: not written), the JOINING page closed when it is the top page
+// (back to the page under it) and close_top asks for it
+JP_FN void follow_end(uintptr_t base, uint32_t state, bool close_top = true) {
+    if (state != KEEP) {
+        at<uint32_t>(base + xp::NET_STATE) = state;
+        at<uint32_t>(base + v7252::NET_STATE_SINCE) = now(base);
+    }
+    st.room = 0;
+    st.waiting = 0;
+    st.abort = 0;
+    if (!close_top) return;
+    const uint8_t *menu = reinterpret_cast<const uint8_t *>(base + MENU);
+    const uint32_t ui = rd<uint32_t>(menu, 8), dp = rd<uint32_t>(menu, 0xdb0);
+    const uint8_t *pg = ui != 7 && ui != 8 && dp < 160 ? rd<const uint8_t *>(menu, 0x8b0 + dp * 8) : nullptr;
+    if (pg && rd<uint32_t>(pg, 0x10) == PAGE_JOINING) game_call<int>(base + FN_BACK, reinterpret_cast<void *>(base + MENU), 0);
+}
+// O5: the page after a failed late join: MULTIPLAYER over root / the multiplayer menu, or only the root page (the page
+// stack closed); the page id stack is set the way the post-match handler (G30) sets it, then the page is shown
+JP_FN void end_page(uintptr_t base, uint8_t page) {
+    if (page == PG_NONE) return;
+    u3x_pm_pg_clear(base);
+    u3x_pm_pg_push(base, PAGE_ROOT);
+    if (page == PG_MULTIPLAYER) {
+        u3x_pm_pg_push(base, PAGE_MP);
+        u3x_pm_pg_push(base, PAGE_MULTIPLAYER);
+    }
+    game_call<void>(base + FN_SET_PAGE, page == PG_MULTIPLAYER ? PAGE_MULTIPLAYER : PAGE_ROOT, SET_PAGE_ARG);
+}
+// O5: an end of the attempt as SPEC-open 5 (why as end_plan); the caller has left the match room where it had to
+JP_FN void end_as_ps3(uintptr_t base, uint64_t room, int why) {
+    const EndPlan p = end_plan(why, at<uint32_t>(base + xp::NET_MENU_MODE) == 2);
+    if (p.leave_party) party_leave(base);
+    if (why == 3) {
+        failed_push(st.failed, 8, room, now(base));
+        game_call<void>(base + FN_NGM_RESET, reinterpret_cast<void *>(base + NGM));   // R3: the 10 net player records
+    }
+    at<uint32_t>(base + JIP_STATUS) = 0;
+    follow_end(base, p.state, p.close_top);   // (the C route's follow abort may still write net state 0 after this)
+    end_page(base, p.page);
+}
+
+// ---- O4 (SPEC-open 4.1): session-server message 318 lock (mask 3) through backend slot 8, which keeps the bit at
+// session +0x12ec, sends only on a change and picks the value (1 Custom Game, 3 matchmaking); 1 = sent
+JP_FN bool lock_set(uintptr_t base, uintptr_t which, bool closed, int why, bool after = false) {
+    uint8_t *ss = sess(base, which);
+    const uint64_t room = rd<uint64_t>(ss, v7252::S_ROOM);
+    if (!room || !online(ss) || (ss[S_ATTR] != 0) == closed) return false;
+    uint8_t *be = rd<uint8_t *>(ss, 8);
+    const uintptr_t fn = (*reinterpret_cast<uintptr_t *const *>(be))[8];
+    reinterpret_cast<int64_t (*)(void *, void *, uint32_t)>(fn)(be, ss, closed ? 1u : 0u);
+    const uint32_t v = closed ? (at<uint32_t>(base + xp::NET_MENU_MODE) == 2 ? 1u : 3u) : 0u;
+    Line l;
+    l.s(t_pre).s(t_lock).x(room, 8).s(t_lock2).d(v).s(t_lock3).s(which == MATCH ? t_lock_m : t_lock_p);
+    if (closed) {
+        const char *p = t_why;
+        for (int k = 0; k < why; k++) while (*p++) {}
+        l.s(t_closed).s(p);
+    } else {
+        l.s(after ? t_after : t_open);
+    }
+    put(base, l.s(t_rp));
+    return true;
+}
+// the owner's lock every Playing frame (both rooms, on change)
+JP_FN void lock_tick(uintptr_t base, bool slot_busy, bool refused) {
+    uint8_t *ms = sess(base, MATCH), *ps = sess(base, PARTY);
+    const bool mm = at<uint32_t>(base + xp::NET_MENU_MODE) != 2;
+    uint32_t members = 0, party_out = 0;
+    for (uint32_t i = 0; i < 10; i++) members += xp::slot(ms, i)[0x25] ? 1u : 0u;
+    for (uint32_t i = 0; i < 10 && rd<uint64_t>(ps, v7252::S_ROOM); i++) {
+        const uint8_t *m = xp::slot(ps, i);
+        if (m[0x25] && !pmsg::in_session(ms, reinterpret_cast<const char *>(m))) party_out++;
+    }
+    int32_t most = 0, fewest = 0;
+    if (void *s = u3h_fl_state()) u3x_ng_limits(base, u3x_netgame_type(base, s), &most, &fewest);
+    const uint32_t max = most > 0 ? static_cast<uint32_t>(most) : 0u;
+    const uint8_t lock = room_lock(slot_busy, refused, members, max, mm, party_out, u3x_mm_max());
+    const int why = slot_busy ? 0 : refused ? 1 : (max && members >= max) ? 2 : 3;
+    lock_set(base, MATCH, lock & LOCK_MATCH, why);
+    if (pmsg::owns(ps) && lock_set(base, PARTY, lock & LOCK_PARTY, (lock & LOCK_MATCH) ? why : 4))
+        st.party_locked = (lock & LOCK_PARTY) ? 1 : 0;
+}
+// the party room this rule closed, open again once this PC is out of the match room (PS3 opens it on the party lobby
+// page, G31 does that too; this keeps today's open party room after a Custom Game match)
+JP_FN void lock_after(uintptr_t base) {
+    if (!st.party_locked || rd<uint64_t>(sess(base, MATCH), v7252::S_ROOM)) return;
+    st.party_locked = 0;
+    if (pmsg::owns(sess(base, PARTY))) lock_set(base, PARTY, false, 0, true);
+}
+
+// ---- owner: 0x11b to members that join the party while this PC's match runs (R1, R12)
+JP_FN void owner_tick(uintptr_t base, uint32_t ns, uint32_t t) {
+    uint8_t *ps = sess(base, PARTY), *ms = sess(base, MATCH);
+    const bool runs = self_v2(base) && hs::gate_on(base) && pmsg::owns(ms) && ns == 0x1d &&
+                      at<uint32_t>(base + xp::NET_MENU_MODE) != 1;
+    const bool party = rd<uint64_t>(ps, v7252::S_ROOM) != 0;
+    bool busy = false;
+    const uint32_t *slots = reinterpret_cast<const uint32_t *>(base + JIP_STATUS);
+    for (uint32_t i = 0; i < 12; i++)
+        if (slots[i] >= 1 && slots[i] <= 3) busy = true;
+    const bool slot_busy = busy;
+    if (st.last_to[0]) {
+        if (!runs || t - st.last_t > LAST_WAIT || (pmsg::in_session(ms, st.last_to) && !busy)) st.last_to[0] = 0;
+        else busy = true;
+    }
+    const bool refused = runs && !(game_call<int>(base + FN_LATE_OK, reinterpret_cast<void *>(base + NGM)) & 0xff);
+    if (runs) lock_tick(base, slot_busy, refused);   // O4 R1: 318 lock of both rooms (before the late-join step)
+    else lock_after(base);
+    for (uint32_t i = 0; i < 10; i++) {
+        uint8_t *m = xp::slot(ps, i);
+        const char *name = reinterpret_cast<const char *>(m);
+        const bool present = party && m[0x25] && rd<uint32_t>(m, 0x2c) != rd<uint32_t>(ps, 0x12e4);
+        if (!present || !same16(st.name[i], name)) {
+            if (present) copy16(st.name[i], name);
+            else st.name[i][0] = 0;
+            st.due[i] = present && runs && st.inited;   // joined while the match runs (not the ones there before)
+            st.due_since[i] = t;
+            st.noted[i] = 0;
+        }
+        if (!runs) st.due[i] = 0;
+        if (!st.due[i]) continue;
+        int level = hs::member_level(base, m);
+        const bool ps3 = level == hs::LEVEL_PS3;
+        if (ps3 && (xp::st.off || xp::ps3_index(static_cast<uint32_t>(at<int16_t>(base + xp::LOBBY_SEL))) == xp::NO_PS3)) {
+            st.due[i] = 0;
+            Line l;
+            l.s(t_pre).s(t_old);
+            xp::name16(l, name);
+            put(base, l.s(t_noplay));
+            continue;
+        }
+        const int a = owner_step(level, pmsg::in_session(ms, name), busy, refused, t - st.due_since[i]);
+        Line l;
+        l.s(t_pre);
+        if (a == O_DROP) {
+            st.due[i] = 0;
+            if (level > 0 && level < LEVEL_V2) {
+                xp::name16(l.s(t_old), name);
+                put(base, l.s(t_old2).d(static_cast<uint32_t>(level)).s(t_old3));
+            }
+        } else if (a == O_HOLD) {
+            const uint8_t why = busy ? 1 : 2;
+            if (st.noted[i] != why) {
+                st.noted[i] = why;
+                xp::name16(l.s(t_held), name);
+                put(base, l.s(busy ? t_held_slot : t_held_rules));
+            }
+        } else if (a == O_SEND) {
+            // O4 R2: the party's ids that are not in the match yet into the owner's reservation table first (all or
+            // nothing, 10 s; the table of the matchmaking 0x100 path); refused = held like the R12 hold
+            uint8_t ids[10 * 0x24];
+            uint32_t n = 0;
+            for (uint32_t j = 0; j < 10; j++) {
+                const uint8_t *p = xp::slot(ps, j);
+                if (!p[0x25] || rd<uint32_t>(p, 0x2c) == rd<uint32_t>(ps, 0x12e4) ||
+                    pmsg::in_session(ms, reinterpret_cast<const char *>(p)))
+                    continue;
+                for (uint32_t c = 0; c < 0x24; c++) ids[n * 0x24 + c] = p[c];
+                n++;
+            }
+            int32_t most = 0, fewest = 0;
+            if (void *s = u3h_fl_state()) u3x_ng_limits(base, u3x_netgame_type(base, s), &most, &fewest);
+            const uint32_t cap = at<uint32_t>(base + xp::NET_MENU_MODE) != 2 && u3x_mm_max() ? u3x_mm_max()
+                                 : most > 0 ? static_cast<uint32_t>(most) : 10u;
+            if (n && !u3x_mm_reserve_ids(base, ids, n, cap)) {
+                if (st.noted[i] != 3) {
+                    st.noted[i] = 3;
+                    xp::name16(l.s(t_held), name);
+                    put(base, l.s(t_resv_no).d(n).s(t_rp));
+                }
+                continue;
+            }
+            if (n) {
+                Line r;
+                put(base, r.s(t_pre).s(t_resv).d(n).s(t_resv2));
+            }
+            uint8_t d[0x30];
+            pmsg::follow_block(base, d);
+            pmsg::send(base, m, 0x11b, d, 0x30);
+            st.due[i] = 0;
+            copy16(st.last_to, name);
+            st.last_t = t;
+            busy = true;
+            xp::name16(l.s(t_out), name);
+            put(base, l.s(t_room).x(rd<uint64_t>(d, 0x28), 8));
+        }
+    }
+    st.inited = 1;
+}
+
+// ---- a v2 leader: late joiners' 0x10d taken outside a start (PS4 code tallies 0x10d only in net state 0xb)
+JP_FN void drain_10d(uintptr_t base, uint32_t ns) {
+    if (ns == 0xb || !pmsg::owns(sess(base, PARTY)) || !self_v2(base)) return;
+    uint32_t &count = at<uint32_t>(base + xp::MQ_COUNT);
+    for (uint32_t i = 0; i < count && i < 64; i++) {
+        const uint8_t *e = reinterpret_cast<const uint8_t *>(base + xp::MQ) + i * 0x40;
+        if (rd<uint32_t>(e, 0x28) != 0x10d) continue;
+        const char *name = reinterpret_cast<const char *>(e);
+        bool led = false;   // the start's lead tick waits for this member's answer
+        for (const xp::State::Member &s : xp::st.led)
+            if (s.name[0] && same16(s.name, name) && s.room && !s.go) led = true;
+        if (led) continue;
+        char from[17];
+        for (int c = 0; c < 16; c++) from[c] = name[c];
+        from[16] = 0;
+        uint32_t conn = 0, n = 1;
+        uint8_t b = 0;
+        game_call<void>(base + pmsg::TAKE, i, &conn, static_cast<void *>(&b), &n);
+        Line l;
+        l.s(t_pre).s(t_10d_in);
+        xp::name16(l, from);
+        put(base, l.s(t_10d_in2).d(b));
+        return;   // one a frame (the queue moved)
+    }
+}
+
+// ---- joiner: the 0x11b attempt every frame (R2..R4): entry 0 4 -> 5 at the room join; at 0x12 the link to the owner
+// (20 s, as the C part's follow gate), then v7.252's joining-page wait (u3x_jip_wait: player info, LoadLevel, 9.3 s,
+// 0x103); an end before the wait: 0x10d {0} to the leader, entry 0 -> 0
+JP_FN void joiner_tick(uintptr_t base, uint32_t ns, uint32_t t) {
+    if (!st.room) return;
+    uint32_t &entry = at<uint32_t>(base + JIP_STATUS);
+    uint8_t *ms = sess(base, MATCH);
+    if (entry == 4 || entry == 5) {   // O5 steps 1 and 4: the net game aborting; the abort flag (room kicked / destroyed)
+        const bool aborting = at<uint8_t>(base + ABORT) && !st.abort_at_accept;
+        if (aborting || st.abort) {
+            const uint64_t room = st.room;
+            say(base, aborting ? t_aborting : t_abort);
+            if (!st.sent_10d) tell_leader(base, 0);
+            if (!aborting && rd<uint64_t>(ms, v7252::S_ROOM)) v7252::leave_room(ms);
+            if (v7252::st.wait_room == room) v7252::st.wait_room = 0;
+            end_as_ps3(base, room, aborting ? 7 : 6);
+            return;
+        }
+    }
+    if (entry == 4 && (ns == 0xf || ns == 0x12)) {
+        entry = 5;
+        say(base, t_e45);
+    }
+    if (ns == 0x12 && (entry == 4 || entry == 5)) {
+        if (rd<uint64_t>(ms, v7252::S_ROOM) != st.room) {   // join failed, kicked or room gone (the C route: fw_abort)
+            say(base, t_lost);
+            entry = 0;
+            if (!st.sent_10d) tell_leader(base, 0);
+            follow_end(base, 0);
+        } else if (st.waiting == 1) {
+            u3x_jip_wait(base, st.room, 0, v7252::st.log);
+        } else if (!st.waiting) {
+            if (!st.at12) st.at12 = t | 1u;
+            if (u3h_fw_host_link(base) == 2) {
+                st.waiting = 1;
+                Line l;
+                put(base, l.s(t_pre).s(t_link_up).d((t - st.at12) * 10u / 3u));
+                u3x_jip_wait(base, st.room, 1, v7252::st.log);
+            } else if (t - st.at12 > LINK_WAIT) {
+                st.waiting = 2;   // leaving: the next frames see the room gone
+                say(base, t_link_no);
+                v7252::leave_room(ms);
+            }
+        }
+        return;
+    }
+    if ((entry == 4 || entry == 5) && ns != 0xb && ns != 0xf) {
+        entry = 0;
+        if (!st.sent_10d) tell_leader(base, 0);
+        Line l;
+        put(base, l.s(t_pre).s(t_early).x(ns, 2));
+        st.room = 0;
+        st.waiting = 0;
+    } else if (entry != 4 && entry != 5) {   // the late join runs (entry 6) or ended: watched until it plays or ends
+        const bool loading = (ns >= 0x31 && ns <= 0x33) || (ns >= 0x2c && ns <= 0x30) || ns == 0x1b || ns == 0x1c;
+        if (ns == 0x1d) say(base, t_play);
+        if (!loading) st.room = 0;
+    }
+}
+}  // namespace jip2
+
+extern "C" {
+
+// every frame (the v7.252 tick)
+JP_FN void u3x_jip2_tick(uintptr_t base) {
+    using namespace jip2;
+    const uint32_t ns = at<uint32_t>(base + xp::NET_STATE), t = now(base);
+    owner_tick(base, ns, t);
+    drain_10d(base, ns);
+    joiner_tick(base, ns, t);
+}
+
+// the message layer (pmsg::tick) took a 0x11b
+JP_FN void u3x_jip2_11b(uintptr_t base, const uint8_t *d, uint32_t n, const char *from) {
+    using namespace jip2;
+    if (n < 0x30) return;
+    uint8_t *ps = sess(base, PARTY), *ms = sess(base, MATCH);
+    const uint64_t room = rd<uint64_t>(d, 0x28), mine = rd<uint64_t>(ms, v7252::S_ROOM);
+    const uint32_t ns = at<uint32_t>(base + xp::NET_STATE);
+    const bool idle = ns == 0 || ns == 0x13 || ns == 0x14 || ns == 0x26;
+    const int a = accept_11b(self_v2(base) && online(ps), pmsg::owns(ps), room == mine || (st.room && room == st.room),
+                             mine != 0 || !idle, retry_refused(v7252::st.history, 5, room));
+    Line l;
+    l.s(t_pre).s(t_in);
+    xp::name16(l, from);
+    l.s(t_room).x(room, 8).s(t_ns).x(ns, 2);
+    put(base, l.s(a == A_ACCEPT ? t_acc : a == A_RETRY ? t_retry : a == A_BUSY ? t_busy : a == A_SAME ? t_same : t_off));
+    if (a == A_RETRY) retry_dialog(base);
+    if (a != A_ACCEPT) return;
+    st.room = room;
+    st.abort = 0;   // O5: the accept step clears the abort flag
+    st.abort_at_accept = at<uint8_t>(base + ABORT);
+    st.sent_10d = st.waiting = 0;
+    st.at12 = 0;
+    st.hold.seen = 0;
+    at<uint32_t>(base + JIP_STATUS) = 4;
+    follow(base, room, d);
+}
+
+// u3x_jip_wait, the wait's start (link up, player info out): 0x10d {1} to the leader on the 0x11b route
+JP_FN void u3x_jip2_wait_start(uintptr_t base, uint64_t room) {
+    using namespace jip2;
+    if (!st.room || st.room != room || st.sent_10d) return;
+    st.sent_10d = 1;
+    tell_leader(base, 1);
+}
+
+// u3x_jip_wait / the v7.252 tick: an end of the joining page (why 1 0x103, 2 the owner's record gone (checked here), 3
+// no LoadLevel in 9.3 s, 4 game mode not playable) or of the late-join page (5 0x103). 1 = done the PS3 way (JIP v2);
+// 0 = not this route (the v7.252 handling goes on; for 2: nothing happened)
+JP_FN int u3x_jip2_end(uintptr_t base, uint64_t room, int why) {
+    using namespace jip2;
+    if (!((st.room && st.room == room) || pair_v2(base))) return 0;
+    if (why == 2) {   // the owner's net player record (in use, the owner's name) marked gone
+        const uint8_t *host = rd<const uint8_t *>(reinterpret_cast<const uint8_t *>(base + NGM), 0x380);
+        uint8_t *ms = sess(base, MATCH);
+        const uint8_t *owner = u3x_find_member(ms, rd<uint32_t>(ms, v7252::S_OWNER));
+        if (!host || !owner || !host[hs::R_IN_USE] || !host[R_GONE] || !hs::same_name(owner, host + R_KEY)) return 0;
+    }
+    say(base, why == 1 ? t_103 : why == 2 ? t_gone : why == 3 ? t_giveup : why == 4 ? t_mode : t_late103);
+    if (why == 5) return 1;   // the caller leaves the match room and sets 0x26
+    end_as_ps3(base, room, why);   // O5: party (Custom Game only), net state, pages as SPEC-open 5
+    return 1;
+}
+
+// refused_for (v7.252) took a 0x103: a v2 party owner forwards it to its party first (PS3's MP-menu reader)
+JP_FN void u3x_jip2_fwd_103(uintptr_t base, const void *d, uint32_t n) {
+    using namespace jip2;
+    uint8_t *ps = sess(base, PARTY);
+    if (n < 8 || !self_v2(base) || !pmsg::owns(ps)) return;
+    pmsg::to_all(base, PARTY, 0x103, d, 8);
+    Line l;
+    put(base, l.s(t_pre).s(t_fwd).x(rd<uint64_t>(d, 0), 8));
+}
+
+// start253::loadlevels_gate (sub 29) for a late joiner (entry 0 > 3): 1 = hold, 0 = pass, -1 = not the PS3 order
+JP_FN int u3x_jip2_ll_gate(uintptr_t base) {
+    using namespace jip2;
+    if (!pair_v2(base)) return -1;
+    const int a = ll_step(st.hold, now(base));
+    if (a == L_HOLD_NEW) say(base, t_hold);
+    if (a == L_PASS_NEW) say(base, t_pass);
+    return a == L_HOLD || a == L_HOLD_NEW;
+}
+
+// u3x_jip_order_host (v7.235), a slot reaching status 2: 1 = park it as before, 0 = the PS3 order (logged)
+JP_FN int u3x_jip2_park(uintptr_t base, const uint8_t *rec, uint32_t slot) {
+    using namespace jip2;
+    if (park_wanted(self_v2(base) ? LEVEL_V2 : hs::LEVEL_HANDSHAKE, hs::member_level(base, member_of(base, rec)))) return 1;
+    Line l;
+    put(base, l.s(t_pre).s(t_nopark).d(slot));
+    return 0;
+}
+
+// u3x_jip_plays (v7.235), reaching Playing as a late joiner: 1 = PS3 order (no "plays" word / bit)
+JP_FN int u3x_jip2_ps3_order(uintptr_t base) {
+    using namespace jip2;
+    if (!pair_v2(base)) return 0;
+    say(base, t_plays);
+    return 1;
+}
+
+// fl_decide (C), the leader's member data says it plays: 1 = do not follow it into its match (R13; and never while a
+// 0x11b attempt runs: that one is followed here, not by the C part)
+JP_FN int u3x_jip2_md_skip(uintptr_t base, uint8_t *leader, uint64_t room) {
+    using namespace jip2;
+    if (st.room) return 1;
+    if (!self_v2(base) || hs::member_level(base, leader) < LEVEL_V2) return 0;
+    if (st.md_skip_room != static_cast<uint32_t>(room)) {
+        st.md_skip_room = static_cast<uint32_t>(room);
+        say(base, t_skip_md);
+    }
+    return 1;
+}
+
+// fj_dir_tick (C): the 0x1f0 join info came from a JIP v2 leader: 1 = not followed (R13)
+JP_FN int u3x_jip2_info_skip(uintptr_t base, const uint8_t *from) {
+    using namespace jip2;
+    if (!self_v2(base)) return 0;
+    uint8_t *ps = sess(base, PARTY);
+    for (uint32_t i = 0; i < 10; i++) {
+        uint8_t *m = xp::slot(ps, i);
+        if (!m[0x25] || !hs::same_name(m, from) || hs::member_level(base, m) < LEVEL_V2) continue;
+        say(base, t_skip_info);
+        return 1;
+    }
+    return 0;
+}
+
+// for the matchmaking area (A8): the room failed a late join recently (PS3's 8-entry list)
+JP_FN int u3x_jip2_failed(uint64_t room) { return jip2::failed_has(jip2::st.failed, 8, room) ? 1 : 0; }
+
+// O5 R1: the session layer (G14 room_lost) took a 312 kicked / 313 room destroyed for a session: the abort flag goes
+// up when it is the match session and that room is the late join's target (the joining step handles it next frame)
+JP_FN void u3x_jip2_room_lost(uintptr_t base, const uint8_t *ss, uint64_t room, uint32_t type) {
+    using namespace jip2;
+    if (ss != sess(base, MATCH) || !st.room || room != st.room) return;
+    st.abort = 1;
+    Line l;
+    put(base, l.s(t_pre).s(t_flag).s(type == 312 ? t_kicked : t_destroyed));
+}
+
+}  // extern "C"
+#pragma clang section text=".text.ext" rodata=".rodata.ext"   // back to the file's default (region B)
+// ===== v7.254 jip end =====
+
+// ===== v7.254 mm: matchmaking for every playlist as PS3 1.19 (ps3net/SPEC-matchmaking-v2.md, area A8, R1..R18) =====
+// Own C++ written from the behaviour spec (sections 2-9, 12) and the other areas' IMPL notes; no game code read.
+// One flow for every mode (TDM, FFA, Plunder, Elimination, Hardpoint, Kill Confirmed, Three Team Duel, Team Objective,
+// co-op adventure / arena / hunter, DLC and event playlists). The helper keeps its own PS3 net state number (mm.st,
+// logged with its PS3 name) and writes the PS4 net state only where PS4 handlers are known to behave: 0x14 while it
+// decides, picks and joins, 6 while a search is out, 0x12 in a room (owner and guest: PS4's 0x11 does not wait), 0x11
+// for the owner's start (PS4's 0x11 -> 0x2c, the Custom Game path of SPEC-custom-start).
+//  * Owner exception (issue #104, memory note mm-min-players-rule): the minimum stays the helper's (2; 3 for Three Team
+//    Duel, 1 for a co-op playlist of at most 3); waits, rows and give-up are PS3's.
+//  * Release gate: member data +0x2b = "capability byte 2" (top nibble 0xa = mark, bit 0 = matchmaking v2; written in
+//    every 314 by u3x_xp_md_out while +0x19 is 0). A room owner with an old PC member (no bit, not a PS3) hands the
+//    room to today's stand-in at the countdown (u3x_onm_ready). ec[2] bit 0x400 = this driver off (today's driver).
+//  * Unverified field meanings (logged raw for a capture): search result u32 +44 = member count, u32 +52 = room flags
+//    (bit 0 = match in progress); Search a3 = location tolerance, a4 = same region, a8 = "content complete" (bit 15 of
+//    the game type word); Create a5 = level value, a6 = content complete; NAT byte 3 = strict (never hosts).
+// boot.log: "U3MP online: mm: ..." (state changes with PS3 names, search rows, rooms and picks, reservations, votes).
+#ifndef MM_FN
+#define MM_FN [[gnu::section(".text.d"), gnu::noinline, clang::minsize]]   // region D (helpers v7.254 and later)
+#endif
+#ifndef MM_RO
+#define MM_RO [[gnu::section(".rodata.d")]]
+#endif
+#pragma clang section text=".text.d" rodata=".rodata.d"
+extern "C" int u3x_fam_content_complete(void);   // v7.254 fam block (SPEC-families MM-R1): Search a8 / Create a6
+// ===== v7.254 mm pure begin =====
+namespace mm254 {
+constexpr uint32_t TPS = 300;   // game clock ticks per second
+constexpr uint32_t HOST_WAIT = 8 * TPS, COUNTDOWN = 15, MAP_VOTE = 10, LATE_WAIT = 25, FAIL_KEEP = 30 * TPS;
+constexpr uint32_t FAILS = 8, ROOMS = 20, RESV = 12, ID = 0x24;
+// 5.1: the owner's wait (seconds) by index 10 - (maximum - count); index 1 when alone
+MM_RO const uint8_t wait_table[11] = {0, 4, 8, 15, 20, 25, 30, 35, 40, 50, 0};
+
+MM_FN uint32_t wait_ticks(uint32_t max, uint32_t count) {
+    uint32_t i = 1;
+    if (count > 1) {
+        const int32_t k = 10 - static_cast<int32_t>(max) + static_cast<int32_t>(count);
+        i = k < 0 ? 0u : k > 10 ? 10u : static_cast<uint32_t>(k);
+    }
+    return wait_table[i] * TPS;
+}
+
+// xorshift32 (Marsaglia 2003)
+MM_FN uint32_t next(uint32_t &s) {
+    uint32_t x = s ? s : 0x9e3779b9u;
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    s = x;
+    return x;
+}
+
+// 3.1: host (1) or search (0); was = last round's flag, hit = the 1 / maximum draw came up
+MM_FN uint8_t decide(uint8_t was, bool hit, bool rows_done, bool can_host, bool party_fills) {
+    uint8_t f = was ? 0 : hit ? 1 : 0;
+    if (rows_done) f = 1;
+    if (!can_host) f = 0;
+    if (party_fills) f = 1;
+    return f;
+}
+
+// 3.3 / 3.4: the level value of the search (-1 = no level range) and of the room
+MM_FN int32_t search_level(uint32_t level) { return level ? static_cast<int32_t>(2 * level + 75) : -1; }
+MM_FN uint32_t create_level(uint32_t level) { return level ? 5 * level + 80 : 0xffffffffu; }
+
+// 4.2: one search result
+struct Room {
+    uint64_t id;
+    uint32_t count, flags;
+    uint8_t tried, recent, bad, same, covers;
+};
+enum : uint8_t { PICK_OK, SKIP_TRIED, SKIP_RECENT, SKIP_FULL, SKIP_BAD, SKIP_LATE };
+MM_FN uint8_t skip_why(const Room &r, uint32_t max, uint32_t party, bool late_ok) {
+    if (r.tried) return SKIP_TRIED;
+    if (r.recent) return SKIP_RECENT;
+    if (r.count >= max) return SKIP_FULL;
+    if (r.bad) return SKIP_BAD;
+    if ((r.flags & 1) && (!r.covers || party > 1 || !late_ok)) return SKIP_LATE;
+    return PICK_OK;
+}
+// the room with the highest score (members, +10 for the same content); the earlier one on equal scores; -1 = none
+MM_FN int32_t pick(const Room *r, uint32_t n, uint32_t max, uint32_t party, bool late_ok, uint8_t *why, uint32_t *score) {
+    int32_t best = -1;
+    uint32_t top = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        why[i] = skip_why(r[i], max, party, late_ok);
+        score[i] = r[i].count + (r[i].same ? 10u : 0u);
+        if (why[i]) continue;
+        if (best < 0 || score[i] > top) {
+            best = static_cast<int32_t>(i);
+            top = score[i];
+        }
+    }
+    return best;
+}
+
+// 4.2: the last 8 rooms that failed this machine, each kept 30 s
+struct Fail {
+    uint64_t room;
+    uint32_t at;   // clock | 1; 0 = empty
+};
+MM_FN void fail_add(Fail *f, uint32_t &next_i, uint64_t room, uint32_t now) {
+    Fail &e = f[next_i++ % FAILS];
+    e.room = room;
+    e.at = now | 1u;
+}
+MM_FN bool fail_has(const Fail *f, uint64_t room, uint32_t now) {
+    for (uint32_t k = 0; k < FAILS; k++)
+        if (f[k].at && f[k].room == room && now - f[k].at < FAIL_KEEP) return true;
+    return false;
+}
+// 4.3: the room is too far for the row's maximum ping (ms); rtt in microseconds
+MM_FN bool too_far(uint32_t rtt_us, uint32_t max_ping) { return max_ping && rtt_us / 2000 >= max_ping; }
+
+// 5.3: teams of a net game type (co-op and free-for-all: no balance) and their least common multiple
+MM_FN uint32_t teams_of(uint32_t type, bool coop) { return coop ? 1 : type == 1 ? 3 : type == 0xe ? 1 : 2; }
+MM_FN uint32_t lcm(uint32_t a, uint32_t b) {
+    if (!a || !b) return a ? a : b;
+    uint32_t x = a, y = b;
+    while (y) {
+        const uint32_t t = x % y;
+        x = y;
+        y = t;
+    }
+    return a / x * b;
+}
+// parties to remove so that count is a multiple of n: from the last party back, every party (never the owner's) whose
+// size fits the remainder. 0 = balanced already, 1 = *kick (bit per party) brings it there, -1 = no set fits
+MM_FN int balance(const uint8_t *size, uint32_t parties, int32_t owner, uint32_t n, uint32_t count, uint32_t *kick) {
+    *kick = 0;
+    if (n <= 1) return 0;
+    uint32_t rem = count % n;
+    if (!rem) return 0;
+    for (int32_t i = static_cast<int32_t>(parties) - 1; i >= 0 && rem; i--) {
+        if (i == owner || !size[i] || size[i] > rem) continue;
+        *kick |= 1u << i;
+        rem -= size[i];
+    }
+    return rem ? -1 : 1;
+}
+
+// 6.2: a weighted random pick (-1 when every weight is 0)
+MM_FN int32_t weighted(const uint32_t *w, uint32_t n, uint32_t r) {
+    uint32_t total = 0;
+    for (uint32_t i = 0; i < n; i++) total += w[i];
+    if (!total) return -1;
+    r %= total;
+    for (uint32_t i = 0; i < n; i++) {
+        if (r < w[i]) return static_cast<int32_t>(i);
+        r -= w[i];
+    }
+    return -1;
+}
+// A, then B by picks until it differs from A (at most 100 tries: one candidate -> B = A)
+MM_FN void candidates(const uint32_t *w, uint32_t n, uint32_t &seed, int32_t *a, int32_t *b) {
+    *a = weighted(w, n, next(seed));
+    *b = *a;
+    for (int k = 0; k < 100 && *a >= 0 && *b == *a; k++) *b = weighted(w, n, next(seed));
+}
+// 6.3: more votes win, a tie at random
+MM_FN int32_t map_winner(int32_t a, int32_t b, int32_t na, int32_t nb, uint32_t r) {
+    return na > nb ? a : nb > na ? b : (r & 1) ? b : a;
+}
+// 6.4: Easy 0 .. Crushing 3; a single Crushing vote counts as Hard, most votes win, ties to the lower choice, none = Normal
+MM_FN int32_t diff_winner(const int32_t *c) {
+    int32_t t[4] = {c[0], c[1], c[2], c[3]};
+    if (t[3] == 1) {
+        t[2] += 1;
+        t[3] = 0;
+    }
+    int32_t winner = 1, best = 0;
+    for (int32_t k = 0; k < 4; k++)
+        if (t[k] > best) {
+            best = t[k];
+            winner = k;
+        }
+    return winner;
+}
+
+// 4.7: slot reservations of the owner (until = clock | 1 while live)
+struct Resv {
+    char name[ID];
+    uint32_t until;
+};
+MM_FN bool live(const Resv &r, uint32_t now) { return r.until && static_cast<int32_t>(r.until - now) > 0; }
+MM_FN uint32_t live_count(const Resv *t, uint32_t now) {
+    uint32_t n = 0;
+    for (uint32_t k = 0; k < RESV; k++) n += live(t[k], now) ? 1u : 0u;
+    return n;
+}
+// the live entry of an id (ID bytes, compared up to its end), or -1
+MM_FN int32_t find_live(const Resv *t, const uint8_t *id, uint32_t now) {
+    for (uint32_t k = 0; k < RESV; k++) {
+        if (!live(t[k], now)) continue;
+        uint32_t b = 0;
+        while (b < ID - 1 && t[k].name[b] == static_cast<char>(id[b]) && id[b]) b++;
+        if (b == ID - 1 || (t[k].name[b] == static_cast<char>(id[b]) && !id[b])) return static_cast<int32_t>(k);
+    }
+    return -1;
+}
+// count ids of ID bytes each, all or nothing into free_slots minus the live reservations; one entry per id (an id
+// that is already reserved gets a new expiry and takes no second slot); 1 = accepted
+MM_FN int reserve(Resv *t, const uint8_t *ids, uint32_t count, uint32_t free_slots, uint32_t now, uint32_t life) {
+    if (!count || count > RESV) return 0;
+    const uint32_t used = live_count(t, now);
+    uint32_t fresh = 0;
+    for (uint32_t c = 0; c < count; c++) fresh += find_live(t, ids + c * ID, now) < 0 ? 1u : 0u;
+    if (used + fresh > free_slots || used + fresh > RESV) return 0;
+    for (uint32_t c = 0; c < count; c++) {
+        int32_t k = find_live(t, ids + c * ID, now);
+        for (uint32_t j = 0; k < 0 && j < RESV; j++)
+            if (!live(t[j], now)) k = static_cast<int32_t>(j);
+        if (k < 0) return 0;   // (not reached: fresh fits)
+        for (uint32_t b = 0; b < ID; b++) t[k].name[b] = static_cast<char>(ids[c * ID + b]);
+        t[k].name[ID - 1] = 0;
+        t[k].until = (now + life) | 1u;
+    }
+    return 1;
+}
+}  // namespace mm254
+// ===== v7.254 mm pure end =====
+
+extern "C" {
+U3H_IMPORT void u3h_so_note(const char *a, const char *name, int32_t v, const char *b);
+U3H_IMPORT int u3h_onb_mode(void);
+U3H_IMPORT uint32_t *u3h_onm(void);
+U3H_IMPORT uint8_t *u3h_mm_bg(void);
+U3H_IMPORT void u3h_onm_state(uintptr_t base, uint32_t state);
+int32_t u3h_mq_send(uintptr_t base, const uint8_t *to, uint32_t type, const void *data, uint32_t len);
+int u3h_show(uintptr_t base, void *s, uint32_t page, int silent);
+uint32_t u3h_active_page(uintptr_t base);
+uint8_t *u3h_active_page_object(uintptr_t base);
+uint8_t *u3x_sym_table(void *s, uint32_t id);
+const uint8_t *u3x_pick_playlist(const uint8_t *table, uint32_t picked);
+int32_t u3x_net_clock(uintptr_t base);
+int u3x_party_leader(uintptr_t base);
+int u3x_party_players(const uint8_t *session);
+int u3x_type_is_coop(uintptr_t base, int32_t type);
+int u3x_difficulty_vote_for(uintptr_t base, uint32_t game_type);
+void u3x_vote_open(uint8_t *vote);
+int u3x_n04_close(uintptr_t base, void *s);
+int u3x_n09_open(uintptr_t base, void *s);
+void u3x_send_player_info(uintptr_t base);
+void u3x_xp_search_started(uintptr_t base);
+int u3x_cg_vote_ok(uintptr_t base, int32_t pc);
+uint32_t u3x_cg_vote_weight(uintptr_t base, int32_t pc, uint32_t weight, uint32_t penalty, uint32_t minimum);
+int u3x_jip_wait(uintptr_t base, uint64_t room, int start, Log log);
+void u3x_onm_ready(uintptr_t base, void *s, uint32_t cnt);
+void u3x_onm_fail(uintptr_t base);
+uint32_t u3x_svc_region(uintptr_t base);   // v7.254 svc block: the account region word (SPEC-open O8)
+}
+
+namespace mm254 {
+constexpr uintptr_t CLOCK = 0x17b4ba4, NS = 0x1b68810, NET = 0x17d5c58, MS = 0x17d6420, PS = 0x17dc298, MGR = 0x17dd768,
+                    NGM = 0x17cb060, V = 0x17d7760, W = 0x17d7784, SEARCH_PHASE = 0x17d79e8, PROFILES = 0x17dd610,
+                    START_FLAG_A = 0x16e7171, START_FLAG_B = 0x16e7172, MENU = 0x17bd080, MENU_BACK = 0x652200,
+                    FN_NGM_RESET = 0x720500, FN_LOAD_REQUEST = 0x72b570, TAKE = 0x7762c0, MQ = 0x1b6d3d0,
+                    MQ_COUNT = 0x1b6d3c0, CM = 0x17f31b8, CM_SIZE = 0x220;
+constexpr uintptr_t S_ROOM = 0x18, S_DONE = 0xb0, S_RESULT = 0xb4, S_COUNT = 0x218, S_RES = 0x220, S_OWN = 0x12e4,
+                    S_OWNER = 0x12e8, S_START_LOAD = 0x1338, SLOTS = 0x680, SLOT = 0x120;
+constexpr uintptr_t R_NAME = 8, R_COUNT = 44, R_FLAGS = 52, R_SIZE = 56;
+constexpr uintptr_t M_USED = 0x25, M_ID = 0x2c, M_NAT = 0x30, M_DLEN = 0x3c, M_DATA = 0x40;
+constexpr uint32_t PAGE_MM = 0xe35f0f1a, SYM_PLAYLISTS = 0xc1b0be0d, SYM_NET_GAMES = 0x3b9a067d, SYM_ROWS = 0xb25ab071,
+                   SYM_VOTE_FLOOR = 0x75c48c5a, SYM_VOTE_PENALTY = 0xbddc3008, NG_SIZE = 0xd0;
+constexpr uint32_t CAP2 = 0x2b, OFF_BIT = 0x400, CONNECT_T = 10 * TPS, RESERVE_T = 10 * TPS, RESV_LIFE = 10 * TPS,
+                   JOIN_T = 30 * TPS, SEARCH_T = 30 * TPS, LINES = 400;
+constexpr uint8_t CAP2_MARK = 0xa0, CAP2_MM = 0x01;
+enum : int { E_CREATE = 4, E_SEARCH = 5, E_JOIN = 6, E_LEAVE = 7, E_ATTR = 8, E_KICK = 9 };
+
+MM_RO const char t_pre[] = "mm: ", t_state[] = "state ", t_arrow[] = " -> ", t_after[] = " after ms ";
+MM_RO const char t_begin[] = "matchmaking v2 (PS3 flow), playlist 0x", t_min[] = ", min ", t_max[] = " max ",
+                 t_rows[] = ", search rows ", t_rows_dc[] = " (DC table)", t_rows_def[] = " (no DC table: all-zero rows)",
+                 t_lvl[] = ", level ", t_nat[] = ", NAT ", t_party[] = ", party ", t_member[] = " (party member)";
+MM_RO const char t_decide[] = "host or search: ", t_host[] = "host", t_search[] = "search", t_why[] = " (was ",
+                 t_rowsd[] = ", rows done ", t_can[] = ", can host ", t_fills[] = ", party fills ", t_cl[] = ")";
+MM_RO const char t_req[] = "search row ", t_req2[] = " sent (309): tolerance ", t_req3[] = ", same region ",
+                 t_req4[] = ", level ", t_req5[] = ", width ", t_req6[] = ", max ping ";
+MM_RO const char t_res[] = "search result (310), row ", t_res2[] = ": rooms ", t_res_t[] = "no search result in 30 s: taken as none";
+MM_RO const char t_room[] = "  room 0x", t_rmem[] = " members ", t_rfl[] = " flags 0x", t_rown[] = " owner ",
+                 t_rsc[] = ": score ", t_rsk[] = ": skipped, ";
+MM_RO const char t_skip[] = "picked\0tried\0failed here in the last 30 s\0full\0owner is a bad peer\0in progress, no late join";
+MM_RO const char t_none[] = "no usable room: pause ms ", t_none2[] = ", then row ";
+MM_RO const char t_chose[] = "room chosen: 0x", t_nolink[] = "no game link to the owner before the join (the PC links with the join): ping check and reservation skipped";
+MM_RO const char t_far[] = "room too far: rtt us ", t_res_out[] = "0x100 out to the owner: ids ", t_r101[] = "0x101 in: ",
+                 t_acc[] = "accepted", t_ref[] = "refused", t_resv_to[] = "no 0x101 in 10 s: next room";
+MM_RO const char t_join[] = "joining 0x", t_joined[] = "in the match room 0x", t_jfail[] = "join failed (no 305 in 30 s): 0x103 to the party, room 0x",
+                 t_113[] = "0x113 out to the party (", t_113r[] = "with reservation)", t_113n[] = "without reservation)",
+                 t_113in[] = "0x113 in from ", t_113in2[] = ": following into room 0x";
+MM_RO const char t_create[] = "hosting (303), capacity ", t_created[] = "room created 0x", t_cfail[] = "create failed: 0x13";
+MM_RO const char t_wait[] = "owner wait: players ", t_wait2[] = ", deadline in ms ", t_pend[] = ", reservations pending ";
+MM_RO const char t_giveup[] = "below the minimum at the deadline: 0x103 to the party, room given up (search next)";
+MM_RO const char t_kick[] = "team balance: teams ", t_kick2[] = ", players ", t_kick3[] = ", kicked (312) ";
+MM_RO const char t_nofit[] = "team balance: no party set fits, room given up";
+MM_RO const char t_legacy[] = "old helper in the room (no matchmaking v2 bit): ", t_legacy2[] = ", today's stand-in vote / countdown";
+MM_RO const char t_count[] = "countdown 0x11e (15 s), players ", t_lock[] = "room locked, map vote 0x112: candidates ",
+                 t_and[] = " and ", t_novote[] = "no candidate playable by every member: room given up";
+MM_RO const char t_tally[] = "map vote result: ", t_votes[] = " votes ", t_tie[] = " (tie: random)", t_win[] = ", winner ";
+MM_RO const char t_dv[] = "difficulty vote result (E N H C ", t_dv2[] = "): ";
+MM_RO const char t_start[] = "post-vote deadline: owner starts the load (0x11)", t_done[] = "match flow started at net state 0x",
+                 t_fb[] = "0x12: the guest page did not take the start-load flag in 0.5 s: 0x2d by the helper";
+MM_RO const char t_mig[] = "lobby host migration: this PC owns room 0x", t_mig2[] = " now, in state ";
+MM_RO const char t_back[] = "back-out", t_back_l[] = " (0x108 out to the party)", t_back_m[] = " (0x108 in from the leader)";
+MM_RO const char t_103[] = "0x103 in for room 0x", t_103f[] = " (forwarded to the party)", t_left[] = ": leaving";
+MM_RO const char t_107[] = "0x107 in: matchmaking page, waiting for the leader's 0x113", t_118[] = "0x118 out to the party: searching again from room 0x";
+MM_RO const char t_res_in[] = "0x100 in from ", t_res_in2[] = ": ids ", t_out101[] = ", 0x101 out ";
+MM_RO const char t_late[] = "late join of a match in progress (0x27): status 5, 25 s", t_wd[] = "start watchdog: 60 s at 0x2e / 0x2f (log only, PS3 has no limit)";
+MM_RO const char t_left_room[] = "the match room is gone: 0x26";
+MM_RO const char t_endgame[] = "EndGame: 0x105 out (post-match handler), net state 0x12 CLIENT_LOBBY, same room 0x",
+                 t_endgame2[] = " (no new search)";
+MM_RO const char t_stay[] = "0x12 -> 0x11 room 0x", t_stay2[] = " (after the match, same room), reservations n = members ",
+                 t_region[] = ", region 0x";
+
+struct State {
+    uint8_t on, st, member, host_next, row, rows, rows_done, dc_rows, backing, dv_due, nolink, in_progress, late_first,
+        tie, wd_said, page_seen,
+        flow, after;   // SPEC-open O7: this driver started the match flow; back in the room after the match
+    uint32_t t, wait_start, until, lines, seed, max, min, rtt, conn, kick_t, lobby_t, last_count, playlist;
+    uint32_t row_v[3][5];   // per row: tolerance, same region, max ping, (unused), width
+    uint64_t target;
+    char owner[ID];
+    uint32_t n_rooms, tried;   // results of the last search, tried bit per result
+    Room rooms[ROOMS];
+    Fail fail[FAILS];
+    uint32_t fail_next;
+    Resv resv[RESV];
+    uint8_t buf[0x200];
+};
+U3X_BSS State mm;
+
+[[gnu::always_inline]] inline uint32_t now(uintptr_t base) { return at<uint32_t>(base + CLOCK); }
+[[gnu::always_inline]] inline uint8_t *sess(uintptr_t base, uintptr_t s) { return reinterpret_cast<uint8_t *>(base + s); }
+[[gnu::always_inline]] inline uint8_t *slot(uint8_t *s, uint32_t i) { return s + SLOTS + i * SLOT; }
+[[gnu::always_inline]] inline uint32_t ps4_state(uintptr_t base) { return at<uint32_t>(base + NS); }
+[[gnu::always_inline]] inline int32_t &status(uintptr_t base) { return at<int32_t>(base + NET + 0x40); }
+[[gnu::always_inline]] inline int32_t &deadline(uintptr_t base) { return at<int32_t>(base + NET + 0x2c); }
+[[gnu::always_inline]] inline uint64_t room_of(uintptr_t base) { return rd<uint64_t>(sess(base, MS), S_ROOM); }
+
+MM_FN void put(Line &l) {
+    if (mm.lines >= LINES) return;
+    mm.lines++;
+    Line o;
+    o.s(t_pre).s(l.z());
+    u3h_so_note(o.z(), nullptr, -1, nullptr);
+}
+MM_FN void say(const char *a) {
+    Line l;
+    put(l.s(a));
+}
+MM_FN void name(Line &l, const char *n) {
+    for (int k = 0; k < 16 && n[k] && l.n < 190; k++) l.b[l.n++] = n[k] >= 32 && n[k] < 127 ? n[k] : '?';
+}
+// the status word and its deadline (net clock) the matchmaking page shows
+MM_FN void show(uintptr_t base, int32_t st, uint32_t seconds) {
+    status(base) = st;
+    deadline(base) = u3x_net_clock(base) + static_cast<int32_t>(seconds * TPS);
+}
+MM_FN bool due(uintptr_t base) { return u3x_net_clock(base) >= deadline(base); }
+
+// R18: the helper's PS3 net state, one line per change
+MM_FN void leave(uintptr_t base);
+MM_FN void go(uintptr_t base, uint8_t st) {
+    if (st == mm.st) return;
+    Line l;
+    l.s(t_state);
+    a0::state_name(l, mm.st);
+    l.s(t_arrow);
+    a0::state_name(l, st);
+    l.s(t_after).d((now(base) - mm.t) * 10u / 3u);
+    put(l);
+    mm.st = st;
+    mm.t = now(base);
+    if (st == 0x26 && room_of(base)) leave(base);   // 0x26 LEAVE_GAME leaves the room (again every 5 s until it is gone)
+}
+
+// the session manager (pointer and table both there) and its entry k
+MM_FN uint8_t *manager(uintptr_t base) {
+    uint8_t *m = at<uint8_t *>(base + MGR);
+    return m && rd<uint64_t>(m, 0) ? m : nullptr;
+}
+MM_FN uintptr_t entry(uint8_t *m, int k) { return rd<const uintptr_t *>(m, 0)[k]; }
+MM_FN void leave(uintptr_t base) {
+    if (uint8_t *m = manager(base)) game_call<int64_t>(entry(m, E_LEAVE), m, sess(base, MS));
+}
+MM_FN bool join(uintptr_t base, uint64_t room) {
+    uint8_t *m = manager(base);
+    if (!m || !room) return false;
+    game_call<int64_t>(entry(m, E_LEAVE), m, sess(base, MS));
+    return game_call<int64_t>(entry(m, E_JOIN), m, sess(base, MS), room) >= 0;
+}
+// a backend slot of the match session: SetAttr (lock / hide, 318) and Kick (312)
+MM_FN void be_call(uintptr_t base, int k, uint32_t a, uint32_t b) {
+    uint8_t *ms = sess(base, MS);
+    uint8_t *be = rd<uint8_t *>(ms, 8);
+    if (!be || !*reinterpret_cast<uintptr_t **>(be)) return;
+    const uintptr_t fn = (*reinterpret_cast<uintptr_t **>(be))[k];
+    if (k == E_KICK)
+        reinterpret_cast<int64_t (*)(void *, void *, uint32_t, uint32_t)>(fn)(be, ms, a, b);
+    else
+        reinterpret_cast<int64_t (*)(void *, void *, uint32_t)>(fn)(be, ms, a);
+}
+
+// a member that speaks matchmaking v2: a PS3 player (PS3 protocol) or a PC with the bit under the mark
+MM_FN bool v2(const uint8_t *m) {
+    if (xp::is_ps3(reinterpret_cast<const char *>(m))) return true;
+    const uint8_t c = m[M_DATA + CAP2];
+    return rd<uint32_t>(m, M_DLEN) == 0x40 && !m[M_DATA + 0x19] && (c & 0xf0) == CAP2_MARK && (c & CAP2_MM);
+}
+// own member slot: the party session's, else the match session's
+MM_FN const uint8_t *own_in(uint8_t *ss) {
+    if (!rd<uint64_t>(ss, S_ROOM)) return nullptr;
+    for (uint32_t i = 0; i < 10; i++)
+        if (slot(ss, i)[M_USED] && rd<uint32_t>(slot(ss, i), M_ID) == rd<uint32_t>(ss, S_OWN)) return slot(ss, i);
+    return nullptr;
+}
+MM_FN const uint8_t *own(uintptr_t base) {
+    const uint8_t *m = own_in(sess(base, PS));
+    return m ? m : own_in(sess(base, MS));
+}
+MM_FN uint32_t party_size(uintptr_t base) {
+    const int n = u3x_party_players(sess(base, PS));
+    return n > 0 ? static_cast<uint32_t>(n) : 1u;
+}
+MM_FN bool leader(uintptr_t base) { return u3x_party_leader(base) != 0; }
+
+// the picked playlist (profile id, one lookup), its net game list {count, items {name, weight}}
+MM_FN const uint8_t *playlist(uintptr_t base, void *s) {
+    const uint8_t *prof = at<const uint8_t *>(base + PROFILES);
+    return u3x_pick_playlist(u3x_sym_table(s, SYM_PLAYLISTS), prof ? rd<uint32_t>(prof, 0x774) : 0);
+}
+MM_FN const uint8_t *ng_entry(void *s, int32_t i) {
+    const uint8_t *t = u3x_sym_table(s, SYM_NET_GAMES);
+    const uint8_t *e = t ? rd<const uint8_t *>(t, 8) : nullptr;
+    return e && i >= 0 && i < rd<int32_t>(t, 0) ? e + static_cast<uintptr_t>(i) * NG_SIZE : nullptr;
+}
+MM_FN int32_t ng_index(void *s, uint32_t name) {
+    const uint8_t *t = u3x_sym_table(s, SYM_NET_GAMES);
+    const uint8_t *e = t ? rd<const uint8_t *>(t, 8) : nullptr;
+    for (int32_t i = 0; e && i < rd<int32_t>(t, 0) && i < 512; i++)
+        if (rd<uint32_t>(e, static_cast<uintptr_t>(i) * NG_SIZE) == name) return i;
+    return -1;
+}
+// the playlist's list: *n items of 8 bytes {net game name, weight}
+MM_FN const uint32_t *ng_list(const uint8_t *pl, uint32_t *n) {
+    const uint8_t *list = pl ? rd<const uint8_t *>(pl, 0x30) : nullptr;
+    const uint32_t *items = ptr_ok(list) ? rd<const uint32_t *>(list, 8) : nullptr;
+    *n = items ? rd<uint32_t>(list, 0) : 0;
+    if (*n > 64) *n = 64;
+    return items;
+}
+// the helper's minimum (#104, kept by the owner): 3 for Three Team Duel, 1 for a co-op playlist of at most 3, else 2
+MM_FN uint32_t minimum(uintptr_t, void *s, const uint8_t *pl, uint32_t max) {
+    uint32_t n = 0;
+    const uint32_t *items = ng_list(pl, &n);
+    const uint8_t *e = n ? ng_entry(s, ng_index(s, items[0])) : nullptr;
+    uint32_t v = e && rd<uint32_t>(e, 0xc) == 1 ? 3 : max <= 3 ? 1 : 2;
+    return v > max ? max : v;
+}
+// N of 5.3 over the playlist's net games
+MM_FN uint32_t teams_lcm(uintptr_t base, void *s, const uint8_t *pl) {
+    uint32_t n = 0, l = 1;
+    const uint32_t *items = ng_list(pl, &n);
+    for (uint32_t k = 0; k < n; k++)
+        if (const uint8_t *e = ng_entry(s, ng_index(s, items[2 * k]))) {
+            const uint32_t type = rd<uint32_t>(e, 0xc);
+            l = lcm(l, teams_of(type, u3x_type_is_coop(base, static_cast<int32_t>(type)) == 1));
+        }
+    return l;
+}
+// a DC scalar (u32 behind the symbol), or the default
+MM_FN uint32_t dc_value(void *s, uint32_t id, uint32_t def) {
+    const uint8_t *v = u3x_sym_table(s, id);
+    return v ? rd<uint32_t>(v, 0) : def;
+}
+
+// the game link to a peer: 1 active (rtt in us), 0 none, -1 a bad peer (no address / lookup failed)
+MM_FN int link_of(const char *n, uint32_t *rtt) {
+    const lnk::Peer *p = lnk::find(n);
+    if (!p) return 0;
+    const int32_t st = lnk::state(p);
+    if (st == lnk::LOOKUP_FAIL || st == lnk::NOADDR) return -1;
+    if (st != lnk::ACTIVE) return 0;
+    *rtt = p->rtt;
+    return 1;
+}
+// the game's connection record of that name (its id), or -1
+MM_FN int32_t connection(uintptr_t base, const char *n) {
+    for (uint32_t i = 0; i < 32; i++) {
+        const uint8_t *e = reinterpret_cast<const uint8_t *>(base + CM + i * CM_SIZE);
+        if (rd<uint8_t>(e, 4) && xp::same(reinterpret_cast<const char *>(e + 7), n)) return rd<int32_t>(e, 0);
+    }
+    return -1;
+}
+
+// the first queued message of a type this area owns (KEEP for the pm layer): taken into mm.buf; -1 = none, else its
+// length; *conn / from = the sender
+MM_FN int32_t take(uintptr_t base, uint32_t type, uint32_t *conn, char *from) {
+    const uint32_t count = at<uint32_t>(base + MQ_COUNT);
+    for (uint32_t i = 0; i < count && i < 64; i++) {
+        const uint8_t *e = reinterpret_cast<const uint8_t *>(base + MQ) + i * 0x40;
+        if (rd<uint32_t>(e, 0x28) != type) continue;
+        for (int c = 0; c < 16; c++) from[c] = static_cast<char>(e[c]);
+        from[16] = 0;
+        uint32_t n = sizeof mm.buf;
+        for (uint32_t c = 0; c < sizeof mm.buf; c++) mm.buf[c] = 0;
+        game_call<void>(base + TAKE, i, conn, static_cast<void *>(mm.buf), &n);
+        return static_cast<int32_t>(n > sizeof mm.buf ? 0 : n);
+    }
+    return -1;
+}
+// a message to the party: PS3 and v2 PCs over the game link; with old_too the other PCs on the own-server path too
+MM_FN void to_party(uintptr_t base, uint32_t type, const void *d, uint32_t n, bool old_too) {
+    uint8_t *ps = sess(base, PS);
+    if (!rd<uint64_t>(ps, S_ROOM) || !leader(base)) return;
+    for (uint32_t i = 0; i < 10; i++) {
+        const uint8_t *m = slot(ps, i);
+        if (!m[M_USED] || rd<uint32_t>(m, M_ID) == rd<uint32_t>(ps, S_OWN)) continue;
+        if (pmsg::speaks(m))
+            pmsg::send(base, m, type, d, n);
+        else if (old_too)
+            u3h_mq_send(base, m, type, d, n);
+    }
+}
+MM_FN void send_103(uintptr_t base, uint64_t room) {
+    uint8_t d[8];
+    *reinterpret_cast<uint64_t *>(d) = room;
+    to_party(base, 0x103, d, 8, false);
+}
+// R6: 0x113 {this PC's 36-byte member id in its match room, 4, u64 room}; with reservation the owner reserves the
+// party's slots first
+MM_FN void tell_party(uintptr_t base, bool reserve_slots) {
+    uint8_t *ps = sess(base, PS);
+    if (!rd<uint64_t>(ps, S_ROOM) || !leader(base)) return;
+    uint8_t d[0x30];
+    for (uint8_t &c : d) c = 0;
+    pmsg::follow_block(base, d);
+    uint32_t told = 0;
+    for (uint32_t i = 0; i < 10; i++) {
+        const uint8_t *m = slot(ps, i);
+        if (!m[M_USED] || rd<uint32_t>(m, M_ID) == rd<uint32_t>(ps, S_OWN)) continue;
+        told++;
+        if (reserve_slots) reserve(mm.resv, m, 1, RESV, now(base), RESV_LIFE);
+    }
+    if (!told) return;
+    to_party(base, 0x113, d, 0x30, true);
+    Line l;
+    put(l.s(t_113).s(reserve_slots ? t_113r : t_113n));
+}
+
+// players in the room: every member whose game link is up (all of them when the link layer is off), plus this PC;
+// a member with a second local player counts 2
+MM_FN uint32_t players(uintptr_t base) {
+    uint8_t *ms = sess(base, MS);
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < 10; i++) {
+        const uint8_t *m = slot(ms, i);
+        if (!m[M_USED]) continue;
+        uint32_t rtt = 0;
+        const bool me = rd<uint32_t>(m, M_ID) == rd<uint32_t>(ms, S_OWN);
+        if (!me && lnk::cx.pl && link_of(reinterpret_cast<const char *>(m), &rtt) != 1) continue;
+        n += m[0x59] ? 2u : 1u;
+    }
+    return n;
+}
+// a reservation ends when its player is in the room (it is counted as a member from then on: no slot twice)
+MM_FN void settle(uintptr_t base) {
+    for (Resv &r : mm.resv)
+        if (r.until && pmsg::in_session(sess(base, MS), r.name)) r.until = 0;
+}
+// reservations whose player is not in the room yet
+MM_FN uint32_t pending(uintptr_t base) {
+    const uint32_t t = now(base);
+    uint32_t n = 0;
+    for (uint32_t k = 0; k < RESV; k++)
+        if (live(mm.resv[k], t) && !pmsg::in_session(sess(base, MS), mm.resv[k].name)) n++;
+    return n;
+}
+
+// the end: status 0, vote blocks closed, the online driver's words cleared; menu = also one menu page back (0x108,
+// failures; a player who left the page himself is already there)
+MM_FN void stop(uintptr_t base, bool menu) {
+    status(base) = 0;
+    at<uint8_t>(base + NET + 0x18) = 0;
+    at<uint8_t>(base + V) = at<uint8_t>(base + V + 1) = 0;
+    at<uint8_t>(base + W) = at<uint8_t>(base + W + 1) = 0;
+    if (menu) {
+        at<uint8_t>(base + NET + 0x28) = 1;
+        game_call<void>(base + MENU_BACK, reinterpret_cast<void *>(base + MENU), 0);
+    }
+    u3h_onm_state(base, 0);
+    at<uint8_t>(base + START_FLAG_A) = at<uint8_t>(base + START_FLAG_B) = 0;
+    uint32_t *o = u3h_onm();
+    o[0] = o[1] = o[2] = 0;
+    *u3h_mm_bg() = 0;
+    mm.on = 0;
+    mm.st = 0;
+}
+
+// 3.2 / 3.3: the search of row mm.row (309 through the session manager, as the game's own search fills it)
+MM_FN bool search(uintptr_t base) {
+    uint8_t *m = manager(base);
+    if (!m) return false;
+    uint8_t *ms = sess(base, MS);
+    uint8_t *net = reinterpret_cast<uint8_t *>(base + NET);
+    net[0x18] = 0;
+    if (rd<uint64_t>(ms, S_ROOM)) game_call<int64_t>(entry(m, E_LEAVE), m, ms);
+    game_call<void>(base + FN_NGM_RESET, reinterpret_cast<uint8_t *>(base + NGM));
+    *reinterpret_cast<uint32_t *>(ms + 0xf8) = rd<uint32_t>(net, 0x10);
+    *reinterpret_cast<uint32_t *>(ms + 0xfc) = rd<uint64_t>(net, 0x10) != 0 ? 1 : 0;
+    const uint32_t *r = mm.row_v[mm.row < 3 ? mm.row : 2];
+    const uint8_t *me = own(base);
+    const int32_t level = search_level(me ? me[M_DATA + 0xe] : 0);
+    const int64_t ok = game_call<int64_t>(entry(m, E_SEARCH), m, ms, r[0], r[1] ? 1u : 0u, level,
+                                          static_cast<int32_t>(r[4]), static_cast<int32_t>(r[4]),
+                                          static_cast<uint32_t>(u3x_fam_content_complete()));   // fam MM-R1
+    Line l;
+    put(l.s(t_req).d(mm.row).s(t_req2).d(r[0]).s(t_req3).d(r[1] ? 1 : 0).s(t_req4).d(static_cast<uint32_t>(level)).s(t_req5).d(r[4]).s(t_req6).d(r[2]).s(t_region).x(r[1] ? u3x_svc_region(base) : 0u, 8));
+    if (ok < 0) return false;
+    u3h_onm_state(base, 6);
+    at<int32_t>(base + SEARCH_PHASE) = static_cast<int32_t>(2 * mm.row);
+    show(base, 1, 0);
+    return true;
+}
+
+// 3.4: create the room
+MM_FN bool host(uintptr_t base) {
+    uint8_t *m = manager(base);
+    if (!m) return false;
+    const uint8_t *me = own(base);
+    mm.wait_start = now(base) + HOST_WAIT;
+    const int64_t r = game_call<int64_t>(entry(m, E_CREATE), m, sess(base, MS), mm.max, 0u,
+                                         create_level(me ? me[M_DATA + 0xe] : 0),
+                                         static_cast<uint32_t>(u3x_fam_content_complete()));   // fam MM-R1
+    Line l;
+    put(l.s(t_create).d(mm.max));
+    at<uint8_t>(base + NET + 0x18) = 1;
+    return r >= 0;
+}
+
+// 3.1: every entry of 0x14 by a leader
+MM_FN void decide_now(uintptr_t base) {
+    const uint8_t *me = own(base);
+    const uint32_t nat = me ? me[M_NAT] : 0, party = party_size(base);
+    const uint8_t was = mm.host_next;
+    mm.host_next = decide(was, next(mm.seed) % (mm.max ? mm.max : 10) == 0, mm.rows_done, nat != 3, party >= mm.max);
+    Line l;
+    put(l.s(t_decide).s(mm.host_next ? t_host : t_search).s(t_why).d(was).s(t_rowsd).d(mm.rows_done).s(t_can).d(nat != 3).s(t_fills).d(party >= mm.max).s(t_cl));
+    mm.rows_done = 0;
+    mm.row = 0;
+    if (mm.host_next) {
+        if (host(base)) {
+            mm.until = now(base) + JOIN_T;
+            go(base, 0x03);
+        } else {
+            say(t_cfail);
+            go(base, 0x13);
+        }
+        return;
+    }
+    go(base, 0x04);
+}
+
+// 4.1 / 4.2: the result list in, the pick
+MM_FN void results(uintptr_t base) {
+    uint8_t *ms = sess(base, MS);
+    mm.n_rooms = rd<uint32_t>(ms, S_COUNT);
+    if (mm.n_rooms > ROOMS) mm.n_rooms = ROOMS;
+    mm.tried = 0;
+    const uint32_t t = now(base);
+    for (uint32_t i = 0; i < mm.n_rooms; i++) {
+        const uint8_t *r = ms + S_RES + i * R_SIZE;
+        Room &o = mm.rooms[i];
+        o.id = rd<uint64_t>(r, 0);
+        o.count = rd<uint32_t>(r, R_COUNT);
+        o.flags = rd<uint32_t>(r, R_FLAGS);
+        uint32_t rtt = 0;
+        const char *owner = reinterpret_cast<const char *>(r + R_NAME);
+        o.recent = fail_has(mm.fail, o.id, t) || o.id == room_of(base) ? 1 : 0;
+        o.bad = link_of(owner, &rtt) < 0 ? 1 : 0;
+        // content: a PC owner has every PC net game (the same import); a PS3 owner's mask is not in the result
+        o.same = o.covers = xp::is_ps3(owner) ? 0 : 1;
+        o.tried = 0;
+    }
+    Line l;
+    put(l.s(t_res).d(mm.row).s(t_res2).d(mm.n_rooms));
+}
+MM_FN void pick_now(uintptr_t base) {
+    uint8_t why[ROOMS];
+    uint32_t score[ROOMS];
+    for (uint32_t i = 0; i < mm.n_rooms; i++) mm.rooms[i].tried = (mm.tried >> i) & 1;
+    const int32_t k = pick(mm.rooms, mm.n_rooms, mm.max, party_size(base), true, why, score);
+    const uint8_t *ms = sess(base, MS);
+    for (uint32_t i = 0; i < mm.n_rooms && !mm.tried; i++) {   // R18: every room once per search
+        const Room &o = mm.rooms[i];
+        Line l;
+        l.s(t_room).x(o.id, 8).s(t_rmem).d(o.count).s(t_rfl).x(o.flags, 4).s(t_rown);
+        name(l, reinterpret_cast<const char *>(ms + S_RES + i * R_SIZE + R_NAME));
+        if (why[i]) {
+            const char *p = t_skip;
+            for (uint8_t w = 0; w < why[i]; w++) while (*p++) {}
+            l.s(t_rsk).s(p);
+        } else {
+            l.s(t_rsc).d(score[i]);
+        }
+        put(l);
+    }
+    if (k < 0) {
+        const uint32_t pause = TPS + next(mm.seed) % (2 * TPS + 1);
+        mm.until = now(base) + pause;
+        mm.row++;
+        Line l;
+        put(l.s(t_none).d(pause * 10u / 3u).s(t_none2).d(mm.row));
+        mm.n_rooms = 0;
+        mm.tried = ~0u;   // waiting: no list
+        return;
+    }
+    mm.tried |= 1u << k;
+    mm.target = mm.rooms[k].id;
+    mm.in_progress = mm.rooms[k].flags & 1;
+    const char *owner = reinterpret_cast<const char *>(ms + S_RES + static_cast<uint32_t>(k) * R_SIZE + R_NAME);
+    for (uint32_t c = 0; c < ID; c++) mm.owner[c] = owner[c];
+    mm.owner[ID - 1] = 0;
+    mm.until = now(base) + CONNECT_T;
+    Line l;
+    l.s(t_chose).x(mm.target, 8).s(t_rown);
+    name(l, mm.owner);
+    put(l);
+    go(base, 0x08);
+}
+}  // namespace mm254
+
+namespace mm254 {
+// 0x05 -> 0x15 (owner, 5.5 / 6.1 / 6.2): lock the room, two candidates by weight, the vote open (0x112 goes out with
+// the pm layer's open edge); false = no playable candidate
+MM_FN bool open_vote(uintptr_t base, void *s) {
+    const uint8_t *pl = playlist(base, s);
+    uint32_t n = 0, w[64];
+    int32_t idx[64];
+    const uint32_t *items = ng_list(pl, &n);
+    const uint32_t penalty = dc_value(s, SYM_VOTE_PENALTY, 1), floor = dc_value(s, SYM_VOTE_FLOOR, 1);
+    for (uint32_t k = 0; k < n; k++) {
+        idx[k] = ng_index(s, items[2 * k]);
+        w[k] = idx[k] < 0 ? 0 : u3x_cg_vote_weight(base, idx[k], items[2 * k + 1], penalty, floor);
+    }
+    int32_t a = -1, b = -1;
+    candidates(w, n, mm.seed, &a, &b);
+    if (a < 0) return false;
+    be_call(base, E_ATTR, 1, 0);   // hide / lock: no more search hits, no joins
+    uint8_t *v = reinterpret_cast<uint8_t *>(base + V);
+    u3x_vote_open(v);
+    *reinterpret_cast<int32_t *>(v + 4) = 2;
+    *reinterpret_cast<int32_t *>(v + 8) = idx[a];
+    *reinterpret_cast<int32_t *>(v + 0xc) = idx[b];
+    show(base, 3, MAP_VOTE);
+    if (u3h_active_page(base) != PAGE_MM) u3h_show(base, s, PAGE_MM, 0);
+    u3x_send_player_info(base);
+    Line l;
+    put(l.s(t_lock).d(static_cast<uint32_t>(idx[a])).s(t_and).d(static_cast<uint32_t>(idx[b])));
+    return true;
+}
+// 6.3 owner at the deadline: the winner (tie random) becomes both candidates, u3x_n04_close selects it (status 6,
+// 45 s, vote closed: 0x109 goes out with the pm layer's close edge)
+MM_FN void close_vote(uintptr_t base, void *s) {
+    uint8_t *v = reinterpret_cast<uint8_t *>(base + V);
+    const int32_t a = rd<int32_t>(v, 8), b = rd<int32_t>(v, 0xc), na = rd<int32_t>(v, 0x10), nb = rd<int32_t>(v, 0x14);
+    const int32_t win = map_winner(a, b, na, nb, next(mm.seed));
+    *reinterpret_cast<int32_t *>(v + 8) = *reinterpret_cast<int32_t *>(v + 0xc) = win;
+    u3x_n04_close(base, s);
+    Line l;
+    l.s(t_tally).d(static_cast<uint32_t>(a)).s(t_votes).d(static_cast<uint32_t>(na)).s(t_and).d(static_cast<uint32_t>(b)).s(t_votes).d(static_cast<uint32_t>(nb));
+    if (na == nb) l.s(t_tie);
+    put(l.s(t_win).d(static_cast<uint32_t>(win)));
+    const uint8_t *e = ng_entry(s, win);
+    mm.dv_due = e && u3x_difficulty_vote_for(base, rd<uint32_t>(e, 0xc)) ? 1 : 0;
+}
+// 6.4 owner at the difficulty deadline: 0x122 goes out with the pm layer's close edge
+MM_FN void close_diff(uintptr_t base) {
+    uint8_t *w = reinterpret_cast<uint8_t *>(base + W);
+    const int32_t c[4] = {rd<int32_t>(w, 8), rd<int32_t>(w, 0xc), rd<int32_t>(w, 0x10), rd<int32_t>(w, 0x14)};
+    const int32_t k = diff_winner(c);
+    at<uint8_t>(base + NGM + 0x6a48) = static_cast<uint8_t>(k + 1);
+    w[1] = 1;
+    show(base, 6, LATE_WAIT);
+    Line l;
+    l.s(t_dv);
+    for (int i = 0; i < 4; i++) l.d(static_cast<uint32_t>(c[i])).s(i < 3 ? xp::xt_sp : t_dv2);
+    put(l.d(static_cast<uint32_t>(k)));
+}
+
+// 5.3: room members grouped by party (member data +0: party id); the owner's party never goes
+MM_FN int balance_now(uintptr_t base, void *s, uint32_t count) {
+    const uint32_t n = teams_lcm(base, s, playlist(base, s));
+    uint8_t *ms = sess(base, MS);
+    uint64_t pid[10];
+    uint8_t size[10], of[10];
+    uint32_t parties = 0;
+    int32_t owner = -1;
+    for (uint32_t i = 0; i < 10; i++) {
+        const uint8_t *m = slot(ms, i);
+        of[i] = 0xff;
+        if (!m[M_USED]) continue;
+        const uint64_t p = rd<uint64_t>(m, M_DATA);   // 0 = no party: a party of its own
+        uint32_t k = 0;
+        while (k < parties && (pid[k] != p || !p)) k++;
+        if (k == parties) {
+            pid[k] = p;
+            size[k] = 0;
+            parties++;
+        }
+        of[i] = static_cast<uint8_t>(k);
+        size[k] = static_cast<uint8_t>(size[k] + (m[0x59] ? 2 : 1));
+        if (rd<uint32_t>(m, M_ID) == rd<uint32_t>(ms, S_OWN)) owner = static_cast<int32_t>(k);
+    }
+    uint32_t kick = 0;
+    const int r = balance(size, parties, owner, n, count, &kick);
+    if (r <= 0) return r;
+    be_call(base, E_ATTR, 1, 0);   // closed to new joins
+    for (uint32_t i = 0; i < 10; i++) {
+        const uint8_t *m = slot(ms, i);
+        if (!m[M_USED] || of[i] == 0xff || !(kick >> of[i] & 1)) continue;
+        be_call(base, E_KICK, rd<uint32_t>(m, M_ID), 0);
+        Line l;
+        l.s(t_kick).d(n).s(t_kick2).d(count).s(t_kick3);
+        name(l, reinterpret_cast<const char *>(m));
+        put(l);
+    }
+    return 1;
+}
+
+// 4.7: every queued 0x100 for my room: all or nothing, always answered with 0x101 {accepted, .., +0x28 room, +0x30
+// in progress}
+MM_FN void reservations(uintptr_t base) {
+    uint32_t conn = 0;
+    char from[17];
+    for (int guard = 0; guard < 8; guard++) {
+        const int32_t n = take(base, 0x100, &conn, from);
+        if (n < 0) return;
+        settle(base);
+        const uint64_t room = rd<uint64_t>(mm.buf, 0);
+        const uint32_t count = n >= 0xc ? rd<uint32_t>(mm.buf, 8) : 0;
+        const uint32_t members = static_cast<uint32_t>(u3x_party_players(sess(base, MS)));
+        const uint32_t free_slots = mm.max > members ? mm.max - members : 0;
+        const int ok = room == room_of(base) && count && count <= 12 && static_cast<uint32_t>(n) >= 0xc + count * ID &&
+                       reserve(mm.resv, mm.buf + 0xc, count, free_slots, now(base), RESV_LIFE);
+        uint8_t a[0x38];
+        for (uint8_t &c : a) c = 0;
+        a[0] = ok ? 1 : 0;
+        *reinterpret_cast<uint64_t *>(a + 0x28) = room_of(base);
+        a[0x30] = ps4_state(base) == 0x1d ? 1 : 0;
+        xp::send_to(base, conn, 0x101, a, 0x38, from);
+        Line l;
+        l.s(t_res_in);
+        name(l, from);
+        put(l.s(t_res_in2).d(count).s(t_out101).s(ok ? t_acc : t_ref));
+    }
+}
+
+// 0x103 (any state but the late join, whose own wait reads it): a leader forwards it, the target room's player leaves
+MM_FN void refusals(uintptr_t base) {
+    if (mm.st == 0x27) return;
+    uint32_t conn = 0;
+    char from[17];
+    const int32_t n = take(base, 0x103, &conn, from);
+    if (n < 8) return;
+    const uint64_t room = rd<uint64_t>(mm.buf, 0);
+    Line l;
+    l.s(t_103).x(room, 8);
+    if (leader(base)) {
+        send_103(base, room);
+        l.s(t_103f);
+    }
+    if (room && (room == mm.target || room == room_of(base))) {
+        l.s(t_left);
+        go(base, 0x26);
+    }
+    put(l);
+}
+
+// the back-out (7): a leader tells the party; the room is left; status 0
+MM_FN void back_out(uintptr_t base, bool by_leader_msg, bool menu) {
+    Line l;
+    l.s(t_back);
+    if (!by_leader_msg && leader(base)) {
+        to_party(base, 0x108, nullptr, 0, false);
+        l.s(t_back_l);
+    } else if (by_leader_msg) {
+        l.s(t_back_m);
+    }
+    put(l);
+    mm.backing = 0;
+    go(base, 0x26);
+    stop(base, menu);
+}
+
+// the start of matchmaking on this PC: a leader (or a player alone) after the popup, a member on 0x107
+MM_FN void begin(uintptr_t base, void *s, bool member) {
+    const uint32_t keep_seed = mm.seed, keep_next = mm.fail_next;
+    Fail keep[FAILS];
+    for (uint32_t k = 0; k < FAILS; k++) keep[k] = mm.fail[k];
+    volatile uint8_t *p = reinterpret_cast<volatile uint8_t *>(&mm);
+    for (uint32_t c = 0; c < sizeof mm; c++) p[c] = 0;
+    for (uint32_t k = 0; k < FAILS; k++) mm.fail[k] = keep[k];
+    mm.fail_next = keep_next;
+    mm.seed = keep_seed ? keep_seed : (static_cast<uint32_t>(v7252::tsc()) | 1u);
+    mm.on = 1;
+    mm.member = member ? 1 : 0;
+    mm.st = 0x14;
+    mm.t = now(base);
+    const uint8_t *pl = playlist(base, s);
+    const uint32_t mx = pl ? rd<uint32_t>(pl, 0x1c) : 10;
+    mm.max = mx < 2 ? 2 : mx > 10 ? 10 : mx;
+    mm.min = minimum(base, s, pl, mm.max);
+    mm.playlist = pl ? rd<uint32_t>(pl, 0) : 0;
+    // 3.2: the search criteria rows (DC table; three rows on 1.19), else three all-zero rows (today's single search)
+    const uint8_t *t = u3x_sym_table(s, SYM_ROWS);
+    const uint8_t *rows = t ? rd<const uint8_t *>(t, 8) : nullptr;
+    const int32_t nr = rows ? rd<int32_t>(t, 0) : 0;
+    mm.dc_rows = nr > 0 ? 1 : 0;
+    mm.rows = nr > 0 ? static_cast<uint8_t>(nr > 3 ? 3 : nr) : 3;
+    for (uint32_t r = 0; r < 3 && mm.dc_rows && r < mm.rows; r++)
+        for (uint32_t f = 0; f < 5; f++) mm.row_v[r][f] = rd<uint32_t>(rows, r * 0x14 + f * 4);
+    uint32_t *o = u3h_onm();
+    o[0] = 1;
+    o[1] = 1;
+    o[2] = 0x20;   // running, not the old driver's phase 1 (its 0x107 edge stays quiet)
+    const uint8_t *me = own(base);
+    Line l;
+    l.s(t_begin).x(mm.playlist, 8).s(t_min).d(mm.min).s(t_max).d(mm.max).s(t_rows).d(mm.rows).s(mm.dc_rows ? t_rows_dc : t_rows_def);
+    l.s(t_lvl).d(me ? me[M_DATA + 0xe] : 0).s(t_nat).d(me ? me[M_NAT] : 0).s(t_party).d(party_size(base));
+    if (member) l.s(t_member);
+    put(l);
+    if (!member) {
+        // 2.5: a leader that searches again from a match room tells the party (0x118) and leaves the room
+        if (const uint64_t r = room_of(base)) {
+            uint8_t d[8];
+            *reinterpret_cast<uint64_t *>(d) = r;
+            to_party(base, 0x118, d, 8, false);
+            leave(base);
+            Line q;
+            put(q.s(t_118).x(r, 8));
+        }
+        u3x_xp_search_started(base);   // 0x107 to the party (PS3 and v2 PCs), once
+    }
+    at<int32_t>(base + SEARCH_PHASE) = 0;
+    at<uint8_t>(base + NET + 0x18) = 0;
+    show(base, 1, 0);
+}
+
+// a joined room: 0x113 from a leader, then the lobby or the late join
+MM_FN void joined(uintptr_t base) {
+    Line l;
+    put(l.s(t_joined).x(mm.target, 8));
+    if (!mm.member) tell_party(base, false);
+    u3h_onm_state(base, 0x12);
+    if (!mm.member && mm.in_progress && party_size(base) == 1) {
+        say(t_late);
+        show(base, 5, LATE_WAIT);
+        mm.late_first = 1;
+        go(base, 0x27);
+        return;
+    }
+    go(base, 0x12);
+}
+
+// the owner's lobby wait (5.1 - 5.4)
+MM_FN void owner_wait(uintptr_t base, void *s) {
+    reservations(base);
+    const uint32_t t = now(base), count = players(base), pend = pending(base);
+    const uint32_t end = mm.wait_start + wait_ticks(mm.max, count);
+    const int32_t left = static_cast<int32_t>(end - t);
+    if (count != mm.last_count) {
+        mm.last_count = count;
+        Line l;
+        put(l.s(t_wait).d(count).s(t_wait2).d(left > 0 ? static_cast<uint32_t>(left) * 10u / 3u : 0).s(t_pend).d(pend));
+    }
+    status(base) = 1;
+    at<uint8_t>(base + NET + 0x18) = 1;
+    deadline(base) = u3x_net_clock(base) + (left > 0 ? left : 0);
+    if (left > 0 || pend) return;
+    if (count < mm.min) {
+        say(t_giveup);
+        send_103(base, room_of(base));
+        go(base, 0x26);   // host flag stays set: 0x14 searches next
+        return;
+    }
+    if (static_cast<int32_t>(t - mm.kick_t) < static_cast<int32_t>(2 * TPS)) return;   // kicks under way
+    const int b = balance_now(base, s, count);
+    if (b > 0) {
+        mm.kick_t = t;
+        return;
+    }
+    if (b < 0) {
+        say(t_nofit);
+        send_103(base, room_of(base));
+        go(base, 0x26);
+        return;
+    }
+    uint8_t *ms = sess(base, MS);
+    for (uint32_t i = 0; i < 10; i++) {
+        const uint8_t *m = slot(ms, i);
+        if (!m[M_USED] || rd<uint32_t>(m, M_ID) == rd<uint32_t>(ms, S_OWN) || v2(m)) continue;
+        Line l;
+        l.s(t_legacy);
+        name(l, reinterpret_cast<const char *>(m));
+        put(l.s(t_legacy2));
+        mm.on = 0;
+        mm.st = 0;
+        u3x_onm_ready(base, s, count);
+        return;
+    }
+    show(base, 2, COUNTDOWN);   // the pm layer sends 0x11e on this edge
+    Line l;
+    put(l.s(t_count).d(count));
+    go(base, 0x05);
+}
+
+// the guest page's start: the owner's settings event raised the start-load flag at 0x12 (fallback after 0.5 s)
+MM_FN void guest_start(uintptr_t base) {
+    uint8_t *ms = sess(base, MS);
+    const uint32_t t = now(base);
+    if (ps4_state(base) != 0x12 || !ms[S_START_LOAD]) {
+        mm.lobby_t = 0;
+        return;
+    }
+    if (!mm.lobby_t) {
+        mm.lobby_t = t | 1u;
+    } else if (t - mm.lobby_t >= TPS / 2) {
+        mm.lobby_t = 0;
+        ms[S_START_LOAD] = 0;
+        game_call<void, void *, int, int, int, int, int>(base + FN_LOAD_REQUEST, reinterpret_cast<void *>(base + NGM), 1, 1, 0, 0, 0);
+        u3h_onm_state(base, 0x2d);
+        say(t_fb);
+    }
+}
+
+// 4.6: a member in 0x14 takes the leader's 0x113 (no sender check)
+MM_FN void member_wait(uintptr_t base) {
+    status(base) = 1;
+    uint32_t conn = 0;
+    char from[17];
+    const int32_t n = take(base, 0x113, &conn, from);
+    if (n < 0x30 || !rd<uint64_t>(mm.buf, 0x28)) return;
+    mm.target = rd<uint64_t>(mm.buf, 0x28);
+    for (uint32_t c = 0; c < ID; c++) mm.owner[c] = static_cast<char>(mm.buf[c]);
+    mm.owner[ID - 1] = 0;
+    Line l;
+    l.s(t_113in);
+    name(l, from);
+    put(l.s(t_113in2).x(mm.target, 8));
+    if (room_of(base) == mm.target) {
+        joined(base);
+    } else if (join(base, mm.target)) {
+        mm.until = now(base) + JOIN_T;
+        go(base, 0x0f);
+    } else {
+        go(base, 0x13);
+    }
+}
+
+// 4.3: the link to the owner, the ping check, the reservation (a PC has no link before the join: straight to it)
+MM_FN void connect(uintptr_t base) {
+    const uint32_t t = now(base);
+    uint32_t rtt = 0;
+    const int lk = link_of(mm.owner, &rtt);
+    const int32_t conn = lk == 1 ? connection(base, mm.owner) : -1;
+    if (lk == 1 && too_far(rtt, mm.row_v[mm.row < 3 ? mm.row : 2][2])) {
+        Line l;
+        put(l.s(t_far).d(rtt));
+        go(base, 0x07);
+        return;
+    }
+    if (lk == 1 && conn >= 0 && !mm.member) {
+        uint8_t d[0x1c0];
+        for (uint8_t &c : d) c = 0;
+        *reinterpret_cast<uint64_t *>(d) = mm.target;
+        uint8_t *ps = sess(base, PS);
+        uint32_t k = 0;
+        if (const uint8_t *me = own(base)) {
+            for (uint32_t c = 0; c < ID; c++) d[0xc + c] = me[c];
+            k = 1;
+        }
+        for (uint32_t i = 0; i < 10 && rd<uint64_t>(ps, S_ROOM) && k < 12; i++) {
+            const uint8_t *m = slot(ps, i);
+            if (!m[M_USED] || rd<uint32_t>(m, M_ID) == rd<uint32_t>(ps, S_OWN)) continue;
+            for (uint32_t c = 0; c < ID; c++) d[0xc + k * ID + c] = m[c];
+            k++;
+        }
+        *reinterpret_cast<uint32_t *>(d + 8) = k;
+        xp::send_to(base, static_cast<uint32_t>(conn), 0x100, d, sizeof d, mm.owner);
+        Line l;
+        put(l.s(t_res_out).d(k));
+        mm.until = t + RESERVE_T;
+        go(base, 0x0a);
+        return;
+    }
+    if (!mm.nolink) {
+        mm.nolink = 1;
+        say(t_nolink);
+    }
+    Line l;
+    put(l.s(t_join).x(mm.target, 8));
+    if (!join(base, mm.target)) {
+        go(base, 0x13);
+        return;
+    }
+    mm.until = t + JOIN_T;
+    go(base, 0x0f);
+}
+
+// 4.4: the owner's 0x101
+MM_FN void reserve_wait(uintptr_t base) {
+    uint32_t conn = 0;
+    char from[17];
+    const int32_t n = take(base, 0x101, &conn, from);
+    if (n < 1) {
+        if (static_cast<int32_t>(now(base) - mm.until) >= 0) {
+            say(t_resv_to);
+            go(base, 0x07);
+        }
+        return;
+    }
+    Line l;
+    put(l.s(t_r101).s(mm.buf[0] ? t_acc : t_ref));
+    if (!mm.buf[0]) {
+        go(base, 0x07);
+        return;
+    }
+    if (n >= 0x31) mm.in_progress = mm.buf[0x30] ? 1 : 0;
+    if (!join(base, mm.target)) {
+        go(base, 0x13);
+        return;
+    }
+    mm.until = now(base) + JOIN_T;
+    go(base, 0x0f);
+}
+
+// 4.5: the join failed (no 305 in 30 s)
+MM_FN void join_failed(uintptr_t base) {
+    fail_add(mm.fail, mm.fail_next, mm.target, now(base));
+    Line l;
+    put(l.s(t_jfail).x(mm.target, 8));
+    if (mm.member) {
+        uint8_t d[8];
+        *reinterpret_cast<uint64_t *>(d) = mm.target;
+        if (uint8_t *ld = xp::leader_slot(base)) pmsg::send(base, ld, 0x103, d, 8);
+    } else {
+        send_103(base, mm.target);
+    }
+    go(base, 0x26);
+}
+
+MM_FN void tick(uintptr_t base, void *s) {
+    uint8_t *ms = sess(base, MS);
+    const uint32_t t = now(base), ns = ps4_state(base);
+    const uint64_t room = room_of(base);
+    const bool owner = pmsg::owns(ms);
+    refusals(base);
+    // the match flow runs: matchmaking is over on this PC
+    if ((ns >= 0x2c && ns <= 0x31) || ns == 0x1d) {   // also a late join, once its load runs
+        Line l;
+        put(l.s(t_done).x(ns, 2));
+        mm.on = 0;
+        mm.flow = 1;   // SPEC-open O7: this driver's match (it takes the room back after the result pages)
+        uint32_t *o = u3h_onm();
+        o[0] = o[1] = o[2] = 0;
+        return;
+    }
+    if (mm.backing && mm.st != 0x26) {
+        back_out(base, true, true);
+        return;
+    }
+    // lobby host migration (7): a guest that finds itself the owner; O7 R2: the owner back in its room after the match
+    if (owner && room && (mm.st == 0x12 || mm.st == 0x27)) {
+        Line l;
+        if (mm.after)
+            put(l.s(t_stay).x(room, 8).s(t_stay2).d(static_cast<uint32_t>(u3x_party_players(ms))));
+        else
+            put(l.s(t_mig).x(room, 8).s(t_mig2).x(mm.st, 2));
+        mm.after = 0;
+        mm.host_next = 1;
+        mm.wait_start = t;
+        for (Resv &r : mm.resv) r.until = 0;
+        mm.last_count = 0;
+        go(base, 0x11);
+    } else if (owner && room && mm.st == 0x16) {
+        go(base, 0x15);
+    }
+    const bool gone = !room && mm.st >= 0x11 && mm.st != 0x13 && mm.st != 0x14 && mm.st != 0x26;
+    if (gone) {
+        say(t_left_room);
+        go(base, 0x26);
+    }
+    switch (mm.st) {
+    case 0x14:
+        if (mm.member)
+            member_wait(base);
+        else
+            decide_now(base);
+        break;
+    case 0x04:
+        if (search(base)) {
+            mm.until = t + SEARCH_T;
+            go(base, 0x06);
+        } else {
+            go(base, 0x13);
+        }
+        break;
+    case 0x06:
+        if (rd<uint8_t>(ms, S_DONE)) {
+            if (rd<int32_t>(ms, S_RESULT) < 0) {
+                go(base, 0x13);
+                break;
+            }
+            results(base);
+        } else if (static_cast<int32_t>(t - mm.until) >= 0) {
+            say(t_res_t);
+            mm.n_rooms = 0;
+        } else {
+            break;
+        }
+        u3h_onm_state(base, 0x14);
+        go(base, 0x07);
+        pick_now(base);
+        break;
+    case 0x07:   // the pause after "none", then the next row (or 0x26: host)
+        if (mm.tried != ~0u) {
+            pick_now(base);
+            break;
+        }
+        if (static_cast<int32_t>(t - mm.until) < 0) break;
+        if (mm.row < mm.rows) {
+            go(base, 0x04);
+        } else {
+            mm.rows_done = 1;
+            go(base, 0x26);
+        }
+        break;
+    case 0x08: connect(base); break;
+    case 0x0a: reserve_wait(base); break;
+    case 0x0f:
+        if (room && room == mm.target)
+            joined(base);
+        else if (static_cast<int32_t>(t - mm.until) >= 0)
+            join_failed(base);
+        break;
+    case 0x03:   // 3.4 step 3: the room is there
+        if (room && owner) {
+            Line l;
+            put(l.s(t_created).x(room, 8));
+            for (Resv &r : mm.resv) r.until = 0;
+            mm.target = room;
+            tell_party(base, true);
+            u3h_onm_state(base, 0x12);
+            mm.last_count = 0;
+            go(base, 0x11);
+        } else if (static_cast<int32_t>(t - mm.until) >= 0) {
+            say(t_cfail);
+            go(base, 0x13);
+        }
+        break;
+    case 0x11: owner_wait(base, s); break;
+    case 0x05:
+        reservations(base);
+        if (!due(base)) break;
+        if (!open_vote(base, s)) {
+            say(t_novote);
+            send_103(base, room);
+            go(base, 0x26);
+            break;
+        }
+        go(base, 0x15);
+        break;
+    case 0x12:   // guest lobby: the owner's countdown / vote reach the page through the pm layer
+        if (room != mm.target) mm.target = room;
+        if (status(base) == 3) go(base, 0x16);
+        if (status(base) == 6) go(base, 0x18);
+        guest_start(base);
+        break;
+    case 0x15:
+    case 0x16:   // 6.3: one handler; the owner tallies at the deadline
+        if (owner) {
+            if (!due(base)) break;
+            close_vote(base, s);
+            go(base, 0x18);
+        } else if (status(base) == 4) {
+            go(base, 0x17);
+        } else if (status(base) == 6) {
+            go(base, 0x18);
+        }
+        break;
+    case 0x17:
+        if (owner) {
+            if (!due(base)) break;
+            close_diff(base);
+            go(base, 0x18);
+        } else if (status(base) == 6) {
+            go(base, 0x18);
+        }
+        guest_start(base);
+        break;
+    case 0x18:   // 6.5: the owner starts at the deadline; guests start on the owner's settings event
+        if (!owner) {
+            if (status(base) == 4) go(base, 0x17);
+            guest_start(base);
+            break;
+        }
+        if (mm.dv_due) {   // one frame after the map result (its 0x109 went out first)
+            mm.dv_due = 0;
+            if (u3x_n09_open(base, s)) go(base, 0x17);
+            break;
+        }
+        if (!due(base)) break;
+        say(t_start);
+        *u3h_mm_bg() = 1;
+        u3h_onm_state(base, 0x11);   // PS4's 0x11: the players, then 0x2c (the Custom Game start path)
+        mm.on = 0;
+        break;
+    case 0x27:   // 8: matchmaking late join; the joiner's wait and load are the late-join area's (u3x_jip_wait)
+        u3x_jip_wait(base, room, mm.late_first, nullptr);
+        mm.late_first = 0;
+        break;
+    case 0x26:   // 7: leave; then decide again
+        at<uint8_t>(base + V) = at<uint8_t>(base + V + 1) = 0;
+        at<uint8_t>(base + W) = at<uint8_t>(base + W + 1) = 0;
+        if (room) {
+            if (t - mm.t >= 5 * TPS) {
+                mm.t = t;
+                leave(base);
+            }
+            break;
+        }
+        mm.target = 0;
+        mm.nolink = 0;
+        u3h_onm_state(base, 0x14);
+        show(base, 1, 0);
+        go(base, 0x14);
+        break;
+    default:   // 0x13: the menu
+        stop(base, true);
+        break;
+    }
+}
+}  // namespace mm254
+
+extern "C" {
+// u3x_onm_tick: 1 = this driver runs online matchmaking (ec[2] bit 0x400 switches it off: today's driver)
+MM_FN int u3x_mm_v2_on(uintptr_t) { return (ext_ec()[2] & mm254::OFF_BIT) ? 0 : 1; }
+
+// u3x_onm_tick, every online frame when u3x_mm_v2_on: the start after the popup (net state 0x14 and the matchmaking
+// page, as the old driver's start), then the PS3 flow
+MM_FN void u3x_mm_tick(uintptr_t base, void *s) {
+    using namespace mm254;
+    uint32_t *o = u3h_onm();
+    if (!mm.on) {
+        if (!o[0] || o[1] || !leader(base)) return;
+        const uint32_t pg = u3h_active_page(base);
+        const uint8_t *top = u3h_active_page_object(base);
+        const bool page = pg == PAGE_MM || (top && rd<uint32_t>(top, 0x10) == PAGE_MM);
+        const bool armed = ps4_state(base) == 0x14 && static_cast<int32_t>(at<uint32_t>(base + NS + 4) - o[3]) >= 0;
+        if (armed && page)
+            begin(base, s, false);
+        else if (now(base) - o[3] > 4500)
+            o[0] = 0;
+        return;
+    }
+    const uint32_t pg = u3h_active_page(base);
+    if (pg == PAGE_MM) mm.page_seen = 1;
+    if (mm.page_seen && (pg == 0x0b7714b5u || pg == 0x53cbb5f2u || pg == 0x1e66a744u || pg == 0x37656388u)) {   // left the page
+        back_out(base, false, false);
+        return;
+    }
+    tick(base, s);
+}
+
+// pmsg::tick, the types this area acts on (taken there): 1 = handled
+MM_FN int u3x_mm_msg(uintptr_t base, uint32_t type) {
+    using namespace mm254;
+    if (type == 0x107) {   // R1: no sender check
+        if (u3h_onb_mode() != 1 || !u3x_mm_v2_on(base) || leader(base) || (mm.on && mm.member)) return 1;
+        void *s = u3h_fl_state();
+        if (!s) return 1;
+        if (u3h_active_page(base) != PAGE_MM) u3h_show(base, s, PAGE_MM, 0);
+        u3h_onm_state(base, 0x14);
+        begin(base, s, true);
+        say(t_107);
+        return 1;
+    }
+    if (type == 0x108) {   // R13: members back out with the leader
+        if (mm.on) mm.backing = 1;
+        return 1;
+    }
+    return type == 0x118 ? 1 : 0;   // 0x118 has no PS3 reader
+}
+
+// u3x_xp_md_out: the matchmaking v2 bit into an outgoing member data block (capability byte 2, the other bits kept)
+MM_FN void u3x_mm_md_mark(uint8_t *md) {
+    const uint8_t old = md[mm254::CAP2];
+    md[mm254::CAP2] = static_cast<uint8_t>(mm254::CAP2_MARK | ((old & 0xf0) == mm254::CAP2_MARK ? old & 0x0e : 0) | mm254::CAP2_MM);
+}
+
+// u3x_hs_frame: 1 = this driver runs the lobby of the match room (its migration is its own, not 0x12 -> 0x11)
+MM_FN int u3x_mm_lobby(uintptr_t base) {
+    using namespace mm254;
+    const uint8_t st = mm.st;
+    return mm.on && room_of(base) && (st == 0x11 || st == 0x12 || st == 0x05 || (st >= 0x15 && st <= 0x18) || st == 0x27) ? 1 : 0;
+}
+
+// for the late-join area: 1 = a matchmaking late join may start its load now (8 step 3: status 5 for 25 s first)
+MM_FN int u3x_mm_late_due(uintptr_t base) {
+    using namespace mm254;
+    return !mm.on || mm.st != 0x27 || due(base) ? 1 : 0;
+}
+
+// u3x_onm_tick's start watchdog (R17): one log line, no failure (PS3 has no limit)
+MM_FN void u3x_mm_watchdog(uintptr_t) {
+    if (mm254::mm.wd_said) return;
+    mm254::mm.wd_said = 1;
+    mm254::say(mm254::t_wd);
+}
+
+// SPEC-open O4: the playlist maximum of the last matchmaking start (0 = none this session)
+MM_FN uint32_t u3x_mm_max(void) { return mm254::mm.max; }
+
+// SPEC-open O4 R2: the late-join owner's 0x11b reservation in the same table as the 0x100 path: count ids (0x24 bytes
+// each), all or nothing, 10 s, capacity max minus the match room's players; 1 = reserved
+MM_FN int u3x_mm_reserve_ids(uintptr_t base, const uint8_t *ids, uint32_t count, uint32_t max) {
+    using namespace mm254;
+    settle(base);
+    const uint32_t members = static_cast<uint32_t>(u3x_party_players(sess(base, MS)));
+    return reserve(mm.resv, ids, count, max > members ? max - members : 0, now(base), RESV_LIFE);
+}
+
+// SPEC-open O7 R1 (C pm119, after the post-match handler u3x_pm119: the end of the result pages, which sent 0x105 to
+// the owner and, as the room owner, 318 in-progress 0 / lock 0): a matchmaking match this driver started goes back to
+// the lobby of the same room: the leave-game reset (votes, flags, start words; room kept), matchmaking active, net
+// state 0x12 CLIENT_LOBBY; the owner then takes 0x12 -> 0x11 (R2) in tick. No new search.
+MM_FN void u3x_mm_after_match(uintptr_t base) {
+    using namespace mm254;
+    const bool ours = mm.flow;
+    mm.flow = 0;
+    uint8_t *ms = sess(base, MS);
+    if (!ours || u3h_onb_mode() != 1 || !u3x_mm_v2_on(base) || at<uint8_t>(base + 0x16e7170) || !status(base) ||
+        !room_of(base))
+        return;
+    mm.on = 1;
+    mm.after = 1;
+    mm.lines = 0;
+    mm.page_seen = mm.backing = mm.dv_due = 0;
+    mm.lobby_t = 0;
+    mm.target = room_of(base);
+    at<uint8_t>(base + V) = at<uint8_t>(base + V + 1) = 0;
+    at<uint8_t>(base + W) = at<uint8_t>(base + W + 1) = 0;
+    at<uint8_t>(base + START_FLAG_A) = at<uint8_t>(base + START_FLAG_B) = 0;
+    ms[S_START_LOAD] = 0;
+    *u3h_mm_bg() = 0;
+    uint32_t *o = u3h_onm();
+    o[0] = 1;
+    o[1] = 1;
+    o[2] = 0x20;
+    show(base, 1, 0);
+    u3h_onm_state(base, 0x12);
+    Line l;
+    put(l.s(t_endgame).x(mm.target, 8).s(t_endgame2));
+    mm.st = 0;   // logged as a change to 0x12
+    go(base, 0x12);
+}
+}  // extern "C"
+#pragma clang section text=".text.ext" rodata=".rodata.ext"   // back to the file's default (region B)
+// ===== v7.254 mm end =====
+
+// ===== v7.254 svc: online services as PS3 1.19 (ps3net/SPEC-services.md, area A14: N1..N4, N8..N11, N13) =====
+// Written from the behaviour spec only; no game code. Region D (.text.d / .rodata.d). The service requests and their
+// reply parsers are the private part ("v7.254 svc private" in u3x_private.cpp, run on the RPCN thread); this block is
+// the game side: when to ask, what goes into the net block, what the player sees. No wire format between PCs changes.
+//  * Online = multiplayer active (0x17d5c61), not LAN (0x17d5c60), online backend (onb mode 1). At every online start
+//    (PS3 NetInit): location 0 / 0, counts 0, heartbeat due now, interval 180 s, clan-tag copies cleared; at every
+//    multiplayer start (LAN too) the can-host byte (R18).
+//  * R1 heartbeat (N2): at online start, then every 180 s or the interval the server gives (min 30 s): the line with all
+//    16 fields (activity matchmaking / playing in net state 0x1d / menu; split screen; party mode word; NAT type;
+//    location as whole degrees; country code). boot.log "services: heartbeat sent (<activity>), the server answered n
+//    byte(s)". R3 / N1: the heartbeat answer is read as master-server push text (playercount / dailycount / location /
+//    heartbeat next): counts kept as n + 1 ("services: players n, today n"), location and interval applied.
+//  * R2 location: while online and both net block floats (0x17d5c88 / 0x17d5c8c) are 0, every 5 s "get-location"; a
+//    '+' answer sets them (the 303 / 309 builders read them as the room's location words: u3x_onb_geo).
+//    boot.log "services: location <lat> <long> (<codes>)".
+//  * R10 clan tag (N3): each frame online, for local users 0 and 1 with a loaded profile: a tag (profile +0xac0, 4 bytes)
+//    other than the last checked copy is remembered; empty: the profile is saved; else one "filter" check at a time.
+//    An answer that is not '+' turns a non-empty tag into "*"; then the profile is saved and the player info sent again.
+//    No answer at all (no connection, no such service) keeps the tag (the PS3 would make it "*"; see IMPL).
+//  * R9 ban (N4): the sign-in's is-banned answer "+<n> <reason>" with a reason of the report-reason table (0xffac56f2)
+//    = banned: net +0x410 / +0x414 (0x17d6068 / 0x17d606c) = reason index / n. Play Online (C onb_play_online, after
+//    the rating) shows the ban popup 0x587a7162 and does not enter. An answer that arrives only after the entry is the
+//    multiplayer page's server notice (C u3h_server_notice when the online layer has none -> G31 server_notice):
+//    root page, then the ban popup, once per online entry.
+//  * R14 (N11): online, the RPCN session was ready and no longer is (link closed, server logout, re-login) -> the net
+//    error byte 0x17d5c80 = 1 within the frame: the multiplayer page's "Disconnected" path (0x61a3662e, root page).
+//    Cleared again when multiplayer ends if this block raised it.
+//  * R15 content rating (N10, Play Online step 4, checked before the entry): the launcher's
+//    /data/u3-account-rating.txt starting with '1' (the account is below the game's age) -> chat-restricted byte
+//    0x17d6041 = 1, dialog 0x817e4e50, no online start. Without the file (today's launchers): passes.
+//  * R18 bandwidth (N13): fixed 1250 / 1250 KB/s (10 Mbit/s each way, R18 allows a fixed generous value) -> can-host
+//    byte 0x17d6058 = 1 (online and LAN). boot.log "services: bandwidth 1250 / 1250 KB/s (fixed), can host 1".
+//  * Kept as they are (checked against the spec): R5 invites (G20: 10 rows, 24 h, version key, unseen, HUD line),
+//    R11 Add Friend (Players Met; RPCN AddFriend), R13 the "no second user" dialog 0x7c31f4d0, R12 View Profile hidden.
+// ===== v7.254 svc begin =====
+#ifndef SVC_FN
+#define SVC_FN [[gnu::section(".text.d"), gnu::noinline, clang::minsize]]
+#endif
+#ifndef SVC_RO
+#define SVC_RO [[gnu::section(".rodata.d")]]
+#endif
+#pragma clang section text=".text.d" rodata=".rodata.d"
+namespace svc {
+// what the game side and the private request part exchange
+enum : uint32_t { K_HEARTBEAT = 1, K_LOCATION = 2, K_FILTER = 3 };
+enum : uint32_t { ACT_MENU = 0, ACT_MATCHMAKING = 1, ACT_PLAYING = 2 };
+struct Hb { char me[17]; uint32_t activity; int32_t d[12]; char cc[5]; };   // the heartbeat's fields d1..d12
+struct Push { uint32_t got, players, daily, lat, lon, next; };              // got: 1 players, 2 daily, 4 location, 8 next
+struct Loc { uint32_t lat, lon; char code[3][5]; };                         // float patterns, three codes
+}  // namespace svc
+extern "C" {
+U3H_IMPORT int32_t u3h_rc_state(void);
+U3H_IMPORT int u3h_onb_mode_get(void);
+U3H_IMPORT uint8_t *u3h_lg_profile(uintptr_t base, uint32_t user);
+U3H_IMPORT int u3h_publish(uintptr_t base, void *s, uint8_t *profile);
+U3H_IMPORT void *u3h_fl_state(void);
+U3H_IMPORT void *u3h_rc_mem(void);
+U3H_IMPORT uint8_t *u3h_ext(void);   // the C part's ExtState (services 2 R2: the game's socket slots at +0x200)
+U3H_IMPORT void *u3h_rc(void *m, int field);
+U3H_IMPORT void u3h_so_note(const char *a, const char *name, int32_t v, const char *b);
+U3H_IMPORT void u3h_show_dialog(uintptr_t base, void *s, uint32_t body, uint32_t title, uint32_t action, int32_t buttons,
+                                uint32_t extra, uint32_t close);
+uint8_t *u3x_sym_table(void *s, uint32_t id);
+const char *u3x_report_reason(const uint8_t *table, uint32_t row);
+void u3x_send_player_info(uintptr_t base);
+int u3x_split_screen(uintptr_t base);
+uint32_t u3x_popup_id(uintptr_t base);
+void u3x_page_show(uintptr_t base, void *s, uint32_t page, int a);
+// the private part (u3x_private.cpp, "v7.254 svc private")
+int u3x_svc_post(uint32_t kind, const void *arg);
+int32_t u3x_svc_take(uint32_t *kind, uint8_t *reply, uint32_t cap);
+uint32_t u3x_svc_mm(void);
+uint32_t u3x_svc_push(const uint8_t *text, uint32_t n, svc::Push *push);
+int u3x_svc_location(const uint8_t *text, uint32_t n, svc::Loc *loc);
+int u3x_svc_ban(const uint8_t *text, uint32_t n, int32_t *count, char *reason, uint32_t cap);
+// this block
+void u3x_svc_tick(uintptr_t base, Log log);
+int32_t u3x_svc_ban_notice(uintptr_t base, int32_t *arg);
+int u3x_svc_play_gate(uintptr_t base, void *s);
+}
+namespace svc {
+// net block (PS3 net +X: low fields at 0x17d5c5c + X, the 0x3c0.. range at 0x17d5c68 + X)
+constexpr uintptr_t NET_LAN = 0x17d5c60, MP_ACTIVE = 0x17d5c61, NET_ERROR = 0x17d5c80, NET_LAT = 0x17d5c88,
+                    NET_LONG = 0x17d5c8c, NET_NAT = 0x17d5c90, NET_NAME = 0x17d6010, NET_MODE = 0x17d603c,
+                    NET_CHAT_RESTRICTED = 0x17d6041, NET_CAN_HOST = 0x17d6058, NET_BAN_REASON = 0x17d6068,
+                    NET_BAN_COUNT = 0x17d606c, NET_COUNTRY = 0x17d6080;
+constexpr uintptr_t NET_STATE = 0x1b68810, CLOCK = 0x17b4ba4;   // net state; game clock, 300 ticks a second
+constexpr int32_t TICKS = 300;
+constexpr uint32_t HB_SECONDS = 180, LOC_SECONDS = 5, STATE_PLAYING = 0x1d;
+constexpr uintptr_t PROFILE_TAG = 0xac0, PROFILE_LOAD_STATE = 0x7ae8;
+constexpr uint32_t PROFILE_LOADED = 3, USERS = 2, TAG = 4, LINES = 60;
+constexpr int32_t RC_READY = 5;
+constexpr int RC_BAN_LENGTH = 22, RC_BAN_REPLY = 23;
+constexpr uint32_t SYM_REASONS = 0xffac56f2, TXT_RATING = 0x817e4e50, TXT_TITLE = 0xc6467f2d, TXT_CLOSE = 0xe1e040aa;
+constexpr uint32_t PAGE_ROOT = 0x37656388, POPUP_NOTICE = 0x587a7162;   // the root page; the server-notice (ban) popup
+constexpr uintptr_t MENU = 0x17bd080, FN_SHOW_POPUP = 0x65a000;          // the menu object; ShowPopup(menu, page id)
+
+struct State {
+    uint8_t in_mp, ready_seen, raised, tag_busy;
+    int32_t hb_due, loc_next;
+    uint32_t hb_seconds, tag_user, lines, ban_given, players, daily;
+    uint8_t tag_last[USERS][TAG], tag_sent[TAG];
+    // services 2 R2: the 3232 socket (descriptor + 1; 0 = none), the keys read, packets taken / dropped
+    int32_t udp;
+    uint8_t keys_ok, keys_tried;
+    uint32_t push_in, push_bad;
+};
+U3X_BSS State st;
+// services 2: the daily count word of the net block that PS4's kind-0x1d text formatter reads (PS3 net +0x1c); the
+// 3232 push port; the key file the launcher writes from the player's EBOOT
+constexpr uintptr_t NET_DAILY = 0x17d5c78, EXT_NET = 0x200;
+constexpr uint16_t PUSH_PORT = 3232;
+enum : int { NETF_SOCKET = 0, NETF_CLOSE = 1, NETF_BIND = 2, NETF_RECVFROM = 4, NETF_SETSOCKOPT = 5 };
+SVC_RO const char t_key_path[] = "/data/u3-push.key", t_udp_name[] = "u3mp-3232";
+SVC_RO const char t_push_on[] = "3232 pushes: socket open (keys from u3-push.key)",
+                  t_push_nokey[] = "3232 pushes off: no /data/u3-push.key (the launcher writes it from the EBOOT)",
+                  t_push_nosock[] = "3232 pushes off: no UDP socket on port 3232 (error ",
+                  t_push_bad[] = "3232 packet dropped (digest), bytes ", t_push_in[] = "3232 push, bytes ";
+
+SVC_RO const char t_pfx[] = "services: ";
+SVC_RO const char t_bw[] = "bandwidth 1250 / 1250 KB/s (fixed), can host 1";
+SVC_RO const char t_hb[] = "heartbeat sent (", t_hb2[] = "), the server answered ", t_hb3[] = " byte(s)";
+SVC_RO const char t_act0[] = "menu", t_act1[] = "matchmaking", t_act2[] = "playing";
+SVC_RO const char t_players[] = "players ", t_today[] = ", today ", t_next[] = "heartbeat every ", t_s[] = " s";
+SVC_RO const char t_loc[] = "location ", t_noloc[] = "location: no answer";
+SVC_RO const char t_sp[] = " ", t_open[] = " (", t_close[] = ")", t_minus[] = "-";
+SVC_RO const char t_tag[] = "clan tag '", t_tag_ok[] = "' accepted", t_tag_no[] = "' refused: now '*'",
+                  t_tag_none[] = "' not checked (no answer from the filter service): kept";
+SVC_RO const char t_drop[] = "the RPCN session dropped (state ", t_drop2[] = "): net error raised (Disconnected)";
+SVC_RO const char t_ban[] = "banned (reason ", t_ban2[] = ", ", t_ban3[] = "): ban popup, back to the root page",
+                  t_ban4[] = "): ban popup, Play Online refused";
+SVC_RO const char t_rating[] = "services: content rating: the account is below the game's age (0x817e4e50), online refused";
+SVC_RO const char t_rating_path[] = "/data/u3-account-rating.txt";
+SVC_RO const char t_country[] = {'b', 'r', 0, 0};   // the v7.252 heartbeat's country field, kept when the net block has none
+
+[[gnu::always_inline]] inline int32_t now(uintptr_t base) { return at<int32_t>(base + CLOCK); }
+// SPEC-open O8 R1: the region word of the 303 / 309 requests: the account's country code (2 letters + 2 pad, the net
+// block's copy at 0x17d6080) read as a big-endian word; 0 without a code. (The second NP word PS3 ORs in, NID
+// 0x32200389, is not known: left out.)
+SVC_FN uint32_t region_word(const uint8_t *cc) {
+    if (!cc[0]) return 0;
+    return static_cast<uint32_t>(cc[0]) << 24 | static_cast<uint32_t>(cc[1]) << 16 | static_cast<uint32_t>(cc[2]) << 8 | cc[3];
+}
+
+// ---- services 2 R2 (SPEC-services2 1.1): the master server's UDP 3232 pushes. Every whole 8-byte block is decrypted
+// with standard Blowfish (16 rounds, ECB, each block two big-endian words); the last 20 bytes are an HMAC-SHA1 over
+// the rest (after decryption); a match gives the push text. Both keys are strings of the player's EBOOT: the launcher
+// copies them (as hex) to /data/u3-push.key; no key is in any source. Own C++ from the published algorithms.
+// the fractional hex digits of pi (the published start values of Blowfish: P-array, then the four S-boxes)
+SVC_RO const uint32_t bf_pi[18 + 4 * 256] = {
+    0x243f6a88, 0x85a308d3, 0x13198a2e, 0x03707344, 0xa4093822, 0x299f31d0, 0x082efa98, 0xec4e6c89,
+    0x452821e6, 0x38d01377, 0xbe5466cf, 0x34e90c6c, 0xc0ac29b7, 0xc97c50dd, 0x3f84d5b5, 0xb5470917,
+    0x9216d5d9, 0x8979fb1b, 0xd1310ba6, 0x98dfb5ac, 0x2ffd72db, 0xd01adfb7, 0xb8e1afed, 0x6a267e96,
+    0xba7c9045, 0xf12c7f99, 0x24a19947, 0xb3916cf7, 0x0801f2e2, 0x858efc16, 0x636920d8, 0x71574e69,
+    0xa458fea3, 0xf4933d7e, 0x0d95748f, 0x728eb658, 0x718bcd58, 0x82154aee, 0x7b54a41d, 0xc25a59b5,
+    0x9c30d539, 0x2af26013, 0xc5d1b023, 0x286085f0, 0xca417918, 0xb8db38ef, 0x8e79dcb0, 0x603a180e,
+    0x6c9e0e8b, 0xb01e8a3e, 0xd71577c1, 0xbd314b27, 0x78af2fda, 0x55605c60, 0xe65525f3, 0xaa55ab94,
+    0x57489862, 0x63e81440, 0x55ca396a, 0x2aab10b6, 0xb4cc5c34, 0x1141e8ce, 0xa15486af, 0x7c72e993,
+    0xb3ee1411, 0x636fbc2a, 0x2ba9c55d, 0x741831f6, 0xce5c3e16, 0x9b87931e, 0xafd6ba33, 0x6c24cf5c,
+    0x7a325381, 0x28958677, 0x3b8f4898, 0x6b4bb9af, 0xc4bfe81b, 0x66282193, 0x61d809cc, 0xfb21a991,
+    0x487cac60, 0x5dec8032, 0xef845d5d, 0xe98575b1, 0xdc262302, 0xeb651b88, 0x23893e81, 0xd396acc5,
+    0x0f6d6ff3, 0x83f44239, 0x2e0b4482, 0xa4842004, 0x69c8f04a, 0x9e1f9b5e, 0x21c66842, 0xf6e96c9a,
+    0x670c9c61, 0xabd388f0, 0x6a51a0d2, 0xd8542f68, 0x960fa728, 0xab5133a3, 0x6eef0b6c, 0x137a3be4,
+    0xba3bf050, 0x7efb2a98, 0xa1f1651d, 0x39af0176, 0x66ca593e, 0x82430e88, 0x8cee8619, 0x456f9fb4,
+    0x7d84a5c3, 0x3b8b5ebe, 0xe06f75d8, 0x85c12073, 0x401a449f, 0x56c16aa6, 0x4ed3aa62, 0x363f7706,
+    0x1bfedf72, 0x429b023d, 0x37d0d724, 0xd00a1248, 0xdb0fead3, 0x49f1c09b, 0x075372c9, 0x80991b7b,
+    0x25d479d8, 0xf6e8def7, 0xe3fe501a, 0xb6794c3b, 0x976ce0bd, 0x04c006ba, 0xc1a94fb6, 0x409f60c4,
+    0x5e5c9ec2, 0x196a2463, 0x68fb6faf, 0x3e6c53b5, 0x1339b2eb, 0x3b52ec6f, 0x6dfc511f, 0x9b30952c,
+    0xcc814544, 0xaf5ebd09, 0xbee3d004, 0xde334afd, 0x660f2807, 0x192e4bb3, 0xc0cba857, 0x45c8740f,
+    0xd20b5f39, 0xb9d3fbdb, 0x5579c0bd, 0x1a60320a, 0xd6a100c6, 0x402c7279, 0x679f25fe, 0xfb1fa3cc,
+    0x8ea5e9f8, 0xdb3222f8, 0x3c7516df, 0xfd616b15, 0x2f501ec8, 0xad0552ab, 0x323db5fa, 0xfd238760,
+    0x53317b48, 0x3e00df82, 0x9e5c57bb, 0xca6f8ca0, 0x1a87562e, 0xdf1769db, 0xd542a8f6, 0x287effc3,
+    0xac6732c6, 0x8c4f5573, 0x695b27b0, 0xbbca58c8, 0xe1ffa35d, 0xb8f011a0, 0x10fa3d98, 0xfd2183b8,
+    0x4afcb56c, 0x2dd1d35b, 0x9a53e479, 0xb6f84565, 0xd28e49bc, 0x4bfb9790, 0xe1ddf2da, 0xa4cb7e33,
+    0x62fb1341, 0xcee4c6e8, 0xef20cada, 0x36774c01, 0xd07e9efe, 0x2bf11fb4, 0x95dbda4d, 0xae909198,
+    0xeaad8e71, 0x6b93d5a0, 0xd08ed1d0, 0xafc725e0, 0x8e3c5b2f, 0x8e7594b7, 0x8ff6e2fb, 0xf2122b64,
+    0x8888b812, 0x900df01c, 0x4fad5ea0, 0x688fc31c, 0xd1cff191, 0xb3a8c1ad, 0x2f2f2218, 0xbe0e1777,
+    0xea752dfe, 0x8b021fa1, 0xe5a0cc0f, 0xb56f74e8, 0x18acf3d6, 0xce89e299, 0xb4a84fe0, 0xfd13e0b7,
+    0x7cc43b81, 0xd2ada8d9, 0x165fa266, 0x80957705, 0x93cc7314, 0x211a1477, 0xe6ad2065, 0x77b5fa86,
+    0xc75442f5, 0xfb9d35cf, 0xebcdaf0c, 0x7b3e89a0, 0xd6411bd3, 0xae1e7e49, 0x00250e2d, 0x2071b35e,
+    0x226800bb, 0x57b8e0af, 0x2464369b, 0xf009b91e, 0x5563911d, 0x59dfa6aa, 0x78c14389, 0xd95a537f,
+    0x207d5ba2, 0x02e5b9c5, 0x83260376, 0x6295cfa9, 0x11c81968, 0x4e734a41, 0xb3472dca, 0x7b14a94a,
+    0x1b510052, 0x9a532915, 0xd60f573f, 0xbc9bc6e4, 0x2b60a476, 0x81e67400, 0x08ba6fb5, 0x571be91f,
+    0xf296ec6b, 0x2a0dd915, 0xb6636521, 0xe7b9f9b6, 0xff34052e, 0xc5855664, 0x53b02d5d, 0xa99f8fa1,
+    0x08ba4799, 0x6e85076a, 0x4b7a70e9, 0xb5b32944, 0xdb75092e, 0xc4192623, 0xad6ea6b0, 0x49a7df7d,
+    0x9cee60b8, 0x8fedb266, 0xecaa8c71, 0x699a17ff, 0x5664526c, 0xc2b19ee1, 0x193602a5, 0x75094c29,
+    0xa0591340, 0xe4183a3e, 0x3f54989a, 0x5b429d65, 0x6b8fe4d6, 0x99f73fd6, 0xa1d29c07, 0xefe830f5,
+    0x4d2d38e6, 0xf0255dc1, 0x4cdd2086, 0x8470eb26, 0x6382e9c6, 0x021ecc5e, 0x09686b3f, 0x3ebaefc9,
+    0x3c971814, 0x6b6a70a1, 0x687f3584, 0x52a0e286, 0xb79c5305, 0xaa500737, 0x3e07841c, 0x7fdeae5c,
+    0x8e7d44ec, 0x5716f2b8, 0xb03ada37, 0xf0500c0d, 0xf01c1f04, 0x0200b3ff, 0xae0cf51a, 0x3cb574b2,
+    0x25837a58, 0xdc0921bd, 0xd19113f9, 0x7ca92ff6, 0x94324773, 0x22f54701, 0x3ae5e581, 0x37c2dadc,
+    0xc8b57634, 0x9af3dda7, 0xa9446146, 0x0fd0030e, 0xecc8c73e, 0xa4751e41, 0xe238cd99, 0x3bea0e2f,
+    0x3280bba1, 0x183eb331, 0x4e548b38, 0x4f6db908, 0x6f420d03, 0xf60a04bf, 0x2cb81290, 0x24977c79,
+    0x5679b072, 0xbcaf89af, 0xde9a771f, 0xd9930810, 0xb38bae12, 0xdccf3f2e, 0x5512721f, 0x2e6b7124,
+    0x501adde6, 0x9f84cd87, 0x7a584718, 0x7408da17, 0xbc9f9abc, 0xe94b7d8c, 0xec7aec3a, 0xdb851dfa,
+    0x63094366, 0xc464c3d2, 0xef1c1847, 0x3215d908, 0xdd433b37, 0x24c2ba16, 0x12a14d43, 0x2a65c451,
+    0x50940002, 0x133ae4dd, 0x71dff89e, 0x10314e55, 0x81ac77d6, 0x5f11199b, 0x043556f1, 0xd7a3c76b,
+    0x3c11183b, 0x5924a509, 0xf28fe6ed, 0x97f1fbfa, 0x9ebabf2c, 0x1e153c6e, 0x86e34570, 0xeae96fb1,
+    0x860e5e0a, 0x5a3e2ab3, 0x771fe71c, 0x4e3d06fa, 0x2965dcb9, 0x99e71d0f, 0x803e89d6, 0x5266c825,
+    0x2e4cc978, 0x9c10b36a, 0xc6150eba, 0x94e2ea78, 0xa5fc3c53, 0x1e0a2df4, 0xf2f74ea7, 0x361d2b3d,
+    0x1939260f, 0x19c27960, 0x5223a708, 0xf71312b6, 0xebadfe6e, 0xeac31f66, 0xe3bc4595, 0xa67bc883,
+    0xb17f37d1, 0x018cff28, 0xc332ddef, 0xbe6c5aa5, 0x65582185, 0x68ab9802, 0xeecea50f, 0xdb2f953b,
+    0x2aef7dad, 0x5b6e2f84, 0x1521b628, 0x29076170, 0xecdd4775, 0x619f1510, 0x13cca830, 0xeb61bd96,
+    0x0334fe1e, 0xaa0363cf, 0xb5735c90, 0x4c70a239, 0xd59e9e0b, 0xcbaade14, 0xeecc86bc, 0x60622ca7,
+    0x9cab5cab, 0xb2f3846e, 0x648b1eaf, 0x19bdf0ca, 0xa02369b9, 0x655abb50, 0x40685a32, 0x3c2ab4b3,
+    0x319ee9d5, 0xc021b8f7, 0x9b540b19, 0x875fa099, 0x95f7997e, 0x623d7da8, 0xf837889a, 0x97e32d77,
+    0x11ed935f, 0x16681281, 0x0e358829, 0xc7e61fd6, 0x96dedfa1, 0x7858ba99, 0x57f584a5, 0x1b227263,
+    0x9b83c3ff, 0x1ac24696, 0xcdb30aeb, 0x532e3054, 0x8fd948e4, 0x6dbc3128, 0x58ebf2ef, 0x34c6ffea,
+    0xfe28ed61, 0xee7c3c73, 0x5d4a14d9, 0xe864b7e3, 0x42105d14, 0x203e13e0, 0x45eee2b6, 0xa3aaabea,
+    0xdb6c4f15, 0xfacb4fd0, 0xc742f442, 0xef6abbb5, 0x654f3b1d, 0x41cd2105, 0xd81e799e, 0x86854dc7,
+    0xe44b476a, 0x3d816250, 0xcf62a1f2, 0x5b8d2646, 0xfc8883a0, 0xc1c7b6a3, 0x7f1524c3, 0x69cb7492,
+    0x47848a0b, 0x5692b285, 0x095bbf00, 0xad19489d, 0x1462b174, 0x23820e00, 0x58428d2a, 0x0c55f5ea,
+    0x1dadf43e, 0x233f7061, 0x3372f092, 0x8d937e41, 0xd65fecf1, 0x6c223bdb, 0x7cde3759, 0xcbee7460,
+    0x4085f2a7, 0xce77326e, 0xa6078084, 0x19f8509e, 0xe8efd855, 0x61d99735, 0xa969a7aa, 0xc50c06c2,
+    0x5a04abfc, 0x800bcadc, 0x9e447a2e, 0xc3453484, 0xfdd56705, 0x0e1e9ec9, 0xdb73dbd3, 0x105588cd,
+    0x675fda79, 0xe3674340, 0xc5c43465, 0x713e38d8, 0x3d28f89e, 0xf16dff20, 0x153e21e7, 0x8fb03d4a,
+    0xe6e39f2b, 0xdb83adf7, 0xe93d5a68, 0x948140f7, 0xf64c261c, 0x94692934, 0x411520f7, 0x7602d4f7,
+    0xbcf46b2e, 0xd4a20068, 0xd4082471, 0x3320f46a, 0x43b7d4b7, 0x500061af, 0x1e39f62e, 0x97244546,
+    0x14214f74, 0xbf8b8840, 0x4d95fc1d, 0x96b591af, 0x70f4ddd3, 0x66a02f45, 0xbfbc09ec, 0x03bd9785,
+    0x7fac6dd0, 0x31cb8504, 0x96eb27b3, 0x55fd3941, 0xda2547e6, 0xabca0a9a, 0x28507825, 0x530429f4,
+    0x0a2c86da, 0xe9b66dfb, 0x68dc1462, 0xd7486900, 0x680ec0a4, 0x27a18dee, 0x4f3ffea2, 0xe887ad8c,
+    0xb58ce006, 0x7af4d6b6, 0xaace1e7c, 0xd3375fec, 0xce78a399, 0x406b2a42, 0x20fe9e35, 0xd9f385b9,
+    0xee39d7ab, 0x3b124e8b, 0x1dc9faf7, 0x4b6d1856, 0x26a36631, 0xeae397b2, 0x3a6efa74, 0xdd5b4332,
+    0x6841e7f7, 0xca7820fb, 0xfb0af54e, 0xd8feb397, 0x454056ac, 0xba489527, 0x55533a3a, 0x20838d87,
+    0xfe6ba9b7, 0xd096954b, 0x55a867bc, 0xa1159a58, 0xcca92963, 0x99e1db33, 0xa62a4a56, 0x3f3125f9,
+    0x5ef47e1c, 0x9029317c, 0xfdf8e802, 0x04272f70, 0x80bb155c, 0x05282ce3, 0x95c11548, 0xe4c66d22,
+    0x48c1133f, 0xc70f86dc, 0x07f9c9ee, 0x41041f0f, 0x404779a4, 0x5d886e17, 0x325f51eb, 0xd59bc0d1,
+    0xf2bcc18f, 0x41113564, 0x257b7834, 0x602a9c60, 0xdff8e8a3, 0x1f636c1b, 0x0e12b4c2, 0x02e1329e,
+    0xaf664fd1, 0xcad18115, 0x6b2395e0, 0x333e92e1, 0x3b240b62, 0xeebeb922, 0x85b2a20e, 0xe6ba0d99,
+    0xde720c8c, 0x2da2f728, 0xd0127845, 0x95b794fd, 0x647d0862, 0xe7ccf5f0, 0x5449a36f, 0x877d48fa,
+    0xc39dfd27, 0xf33e8d1e, 0x0a476341, 0x992eff74, 0x3a6f6eab, 0xf4f8fd37, 0xa812dc60, 0xa1ebddf8,
+    0x991be14c, 0xdb6e6b0d, 0xc67b5510, 0x6d672c37, 0x2765d43b, 0xdcd0e804, 0xf1290dc7, 0xcc00ffa3,
+    0xb5390f92, 0x690fed0b, 0x667b9ffb, 0xcedb7d9c, 0xa091cf0b, 0xd9155ea3, 0xbb132f88, 0x515bad24,
+    0x7b9479bf, 0x763bd6eb, 0x37392eb3, 0xcc115979, 0x8026e297, 0xf42e312d, 0x6842ada7, 0xc66a2b3b,
+    0x12754ccc, 0x782ef11c, 0x6a124237, 0xb79251e7, 0x06a1bbe6, 0x4bfb6350, 0x1a6b1018, 0x11caedfa,
+    0x3d25bdd8, 0xe2e1c3c9, 0x44421659, 0x0a121386, 0xd90cec6e, 0xd5abea2a, 0x64af674e, 0xda86a85f,
+    0xbebfe988, 0x64e4c3fe, 0x9dbc8057, 0xf0f7c086, 0x60787bf8, 0x6003604d, 0xd1fd8346, 0xf6381fb0,
+    0x7745ae04, 0xd736fccc, 0x83426b33, 0xf01eab71, 0xb0804187, 0x3c005e5f, 0x77a057be, 0xbde8ae24,
+    0x55464299, 0xbf582e61, 0x4e58f48f, 0xf2ddfda2, 0xf474ef38, 0x8789bdc2, 0x5366f9c3, 0xc8b38e74,
+    0xb475f255, 0x46fcd9b9, 0x7aeb2661, 0x8b1ddf84, 0x846a0e79, 0x915f95e2, 0x466e598e, 0x20b45770,
+    0x8cd55591, 0xc902de4c, 0xb90bace1, 0xbb8205d0, 0x11a86248, 0x7574a99e, 0xb77f19b6, 0xe0a9dc09,
+    0x662d09a1, 0xc4324633, 0xe85a1f02, 0x09f0be8c, 0x4a99a025, 0x1d6efe10, 0x1ab93d1d, 0x0ba5a4df,
+    0xa186f20f, 0x2868f169, 0xdcb7da83, 0x573906fe, 0xa1e2ce9b, 0x4fcd7f52, 0x50115e01, 0xa70683fa,
+    0xa002b5c4, 0x0de6d027, 0x9af88c27, 0x773f8641, 0xc3604c06, 0x61a806b5, 0xf0177a28, 0xc0f586e0,
+    0x006058aa, 0x30dc7d62, 0x11e69ed7, 0x2338ea63, 0x53c2dd94, 0xc2c21634, 0xbbcbee56, 0x90bcb6de,
+    0xebfc7da1, 0xce591d76, 0x6f05e409, 0x4b7c0188, 0x39720a3d, 0x7c927c24, 0x86e3725f, 0x724d9db9,
+    0x1ac15bb4, 0xd39eb8fc, 0xed545578, 0x08fca5b5, 0xd83d7cd3, 0x4dad0fc4, 0x1e50ef5e, 0xb161e6f8,
+    0xa28514d9, 0x6c51133c, 0x6fd5c7e7, 0x56e14ec4, 0x362abfce, 0xddc6c837, 0xd79a3234, 0x92638212,
+    0x670efa8e, 0x406000e0, 0x3a39ce37, 0xd3faf5cf, 0xabc27737, 0x5ac52d1b, 0x5cb0679e, 0x4fa33742,
+    0xd3822740, 0x99bc9bbe, 0xd5118e9d, 0xbf0f7315, 0xd62d1c7e, 0xc700c47b, 0xb78c1b6b, 0x21a19045,
+    0xb26eb1be, 0x6a366eb4, 0x5748ab2f, 0xbc946e79, 0xc6a376d2, 0x6549c2c8, 0x530ff8ee, 0x468dde7d,
+    0xd5730a1d, 0x4cd04dc6, 0x2939bbdb, 0xa9ba4650, 0xac9526e8, 0xbe5ee304, 0xa1fad5f0, 0x6a2d519a,
+    0x63ef8ce2, 0x9a86ee22, 0xc089c2b8, 0x43242ef6, 0xa51e03aa, 0x9cf2d0a4, 0x83c061ba, 0x9be96a4d,
+    0x8fe51550, 0xba645bd6, 0x2826a2f9, 0xa73a3ae1, 0x4ba99586, 0xef5562e9, 0xc72fefd3, 0xf752f7da,
+    0x3f046f69, 0x77fa0a59, 0x80e4a915, 0x87b08601, 0x9b09e6ad, 0x3b3ee593, 0xe990fd5a, 0x9e34d797,
+    0x2cf0b7d9, 0x022b8b51, 0x96d5ac3a, 0x017da67d, 0xd1cf3ed6, 0x7c7d2d28, 0x1f9f25cf, 0xadf2b89b,
+    0x5ad6b472, 0x5a88f54c, 0xe029ac71, 0xe019a5e6, 0x47b0acfd, 0xed93fa9b, 0xe8d3c48d, 0x283b57cc,
+    0xf8d56629, 0x79132e28, 0x785f0191, 0xed756055, 0xf7960e44, 0xe3d35e8c, 0x15056dd4, 0x88f46dba,
+    0x03a16125, 0x0564f0bd, 0xc3eb9e15, 0x3c9057a2, 0x97271aec, 0xa93a072a, 0x1b3f6d9b, 0x1e6321f5,
+    0xf59c66fb, 0x26dcf319, 0x7533d928, 0xb155fdf5, 0x03563482, 0x8aba3cbb, 0x28517711, 0xc20ad9f8,
+    0xabcc5167, 0xccad925f, 0x4de81751, 0x3830dc8e, 0x379d5862, 0x9320f991, 0xea7a90c2, 0xfb3e7bce,
+    0x5121ce64, 0x774fbe32, 0xa8b6e37e, 0xc3293d46, 0x48de5369, 0x6413e680, 0xa2ae0810, 0xdd6db224,
+    0x69852dfd, 0x09072166, 0xb39a460a, 0x6445c0dd, 0x586cdecf, 0x1c20c8ae, 0x5bbef7dd, 0x1b588d40,
+    0xccd2017f, 0x6bb4e3bb, 0xdda26a7e, 0x3a59ff45, 0x3e350a44, 0xbcb4cdd5, 0x72eacea8, 0xfa6484bb,
+    0x8d6612ae, 0xbf3c6f47, 0xd29be463, 0x542f5d9e, 0xaec2771b, 0xf64e6370, 0x740e0d8d, 0xe75b1357,
+    0xf8721671, 0xaf537d5d, 0x4040cb08, 0x4eb4e2cc, 0x34d2466a, 0x0115af84, 0xe1b00428, 0x95983a1d,
+    0x06b89fb4, 0xce6ea048, 0x6f3f3b82, 0x3520ab82, 0x011a1d4b, 0x277227f8, 0x611560b1, 0xe7933fdc,
+    0xbb3a792b, 0x344525bd, 0xa08839e1, 0x51ce794b, 0x2f32c9b7, 0xa01fbac9, 0xe01cc87e, 0xbcc7d1f6,
+    0xcf0111c3, 0xa1e8aac7, 0x1a908749, 0xd44fbd9a, 0xd0dadecb, 0xd50ada38, 0x0339c32a, 0xc6913667,
+    0x8df9317c, 0xe0b12b4f, 0xf79e59b7, 0x43f5bb3a, 0xf2d519ff, 0x27d9459c, 0xbf97222c, 0x15e6fc2a,
+    0x0f91fc71, 0x9b941525, 0xfae59361, 0xceb69ceb, 0xc2a86459, 0x12baa8d1, 0xb6c1075e, 0xe3056a0c,
+    0x10d25065, 0xcb03a442, 0xe0ec6e0e, 0x1698db3b, 0x4c98a0be, 0x3278e964, 0x9f1f9532, 0xe0d392df,
+    0xd3a0342b, 0x8971f21e, 0x1b0a7441, 0x4ba3348c, 0xc5be7120, 0xc37632d8, 0xdf359f8d, 0x9b992f2e,
+    0xe60b6f47, 0x0fe3f11d, 0xe54cda54, 0x1edad891, 0xce6279cf, 0xcd3e7e6f, 0x1618b166, 0xfd2c1d05,
+    0x848fd2c5, 0xf6fb2299, 0xf523f357, 0xa6327623, 0x93a83531, 0x56cccd02, 0xacf08162, 0x5a75ebb5,
+    0x6e163697, 0x88d273cc, 0xde966292, 0x81b949d0, 0x4c50901b, 0x71c65614, 0xe6c6c7bd, 0x327a140a,
+    0x45e1d006, 0xc3f27b9a, 0xc9aa53fd, 0x62a80f00, 0xbb25bfe2, 0x35bdd2f6, 0x71126905, 0xb2040222,
+    0xb6cbcf7c, 0xcd769c2b, 0x53113ec0, 0x1640e3d3, 0x38abbd60, 0x2547adf0, 0xba38209c, 0xf746ce76,
+    0x77afa1c5, 0x20756060, 0x85cbfe4e, 0x8ae88dd8, 0x7aaaf9b0, 0x4cf9aa7e, 0x1948c25c, 0x02fb8a8c,
+    0x01c36ae4, 0xd6ebe1f9, 0x90d4f869, 0xa65cdea0, 0x3f09252d, 0xc208e69f, 0xb74e6132, 0xce77e25b,
+    0x578fdfe3, 0x3ac372e6,
+};
+struct Bf { uint32_t p[18], s[4][256]; };
+SVC_FN uint32_t bf_f(const Bf &b, uint32_t x) {
+    return ((b.s[0][x >> 24] + b.s[1][(x >> 16) & 0xff]) ^ b.s[2][(x >> 8) & 0xff]) + b.s[3][x & 0xff];
+}
+SVC_FN void bf_enc(const Bf &b, uint32_t &l, uint32_t &r) {
+    for (int i = 0; i < 16; i++) {
+        l ^= b.p[i];
+        r ^= bf_f(b, l);
+        const uint32_t t = l;
+        l = r;
+        r = t;
+    }
+    const uint32_t t = l;
+    l = r ^ b.p[17];
+    r = t ^ b.p[16];
+}
+SVC_FN void bf_dec(const Bf &b, uint32_t &l, uint32_t &r) {
+    for (int i = 17; i > 1; i--) {
+        l ^= b.p[i];
+        r ^= bf_f(b, l);
+        const uint32_t t = l;
+        l = r;
+        r = t;
+    }
+    const uint32_t t = l;
+    l = r ^ b.p[0];
+    r = t ^ b.p[1];
+}
+// the key schedule (key of 1..56 bytes)
+SVC_FN void bf_key(Bf &b, const uint8_t *k, uint32_t n) {
+    for (uint32_t i = 0; i < 18; i++) b.p[i] = bf_pi[i];
+    for (uint32_t i = 0; i < 4 * 256; i++) b.s[i >> 8][i & 0xff] = bf_pi[18 + i];
+    for (uint32_t i = 0, j = 0; i < 18 && n; i++) {
+        uint32_t w = 0;
+        for (int c = 0; c < 4; c++, j = (j + 1) % n) w = w << 8 | k[j];
+        b.p[i] ^= w;
+    }
+    uint32_t l = 0, r = 0;
+    for (uint32_t i = 0; i < 18; i += 2) {
+        bf_enc(b, l, r);
+        b.p[i] = l;
+        b.p[i + 1] = r;
+    }
+    for (uint32_t s = 0; s < 4; s++)
+        for (uint32_t i = 0; i < 256; i += 2) {
+            bf_enc(b, l, r);
+            b.s[s][i] = l;
+            b.s[s][i + 1] = r;
+        }
+}
+[[gnu::always_inline]] inline uint32_t be32(const uint8_t *p) {
+    return static_cast<uint32_t>(p[0]) << 24 | static_cast<uint32_t>(p[1]) << 16 | static_cast<uint32_t>(p[2]) << 8 | p[3];
+}
+[[gnu::always_inline]] inline void put_be32(uint8_t *p, uint32_t v) {
+    p[0] = static_cast<uint8_t>(v >> 24);
+    p[1] = static_cast<uint8_t>(v >> 16);
+    p[2] = static_cast<uint8_t>(v >> 8);
+    p[3] = static_cast<uint8_t>(v);
+}
+// SHA-1 (FIPS 180) and HMAC (RFC 2104)
+struct Sha1 { uint32_t h[5]; uint8_t buf[64]; uint32_t used; uint64_t len; };
+SVC_RO const uint32_t sha1_iv[5] = {0x67452301u, 0xefcdab89u, 0x98badcfeu, 0x10325476u, 0xc3d2e1f0u};
+SVC_FN void sha1_init(Sha1 &c) {
+    for (int i = 0; i < 5; i++) c.h[i] = sha1_iv[i];   // (a copy loop: no constant pool outside .rodata.d)
+    c.used = 0;
+    c.len = 0;
+}
+[[gnu::always_inline]] inline uint32_t rol(uint32_t v, int n) { return v << n | v >> (32 - n); }
+SVC_FN void sha1_block(Sha1 &c, const uint8_t *p) {
+    uint32_t w[80];
+    for (int i = 0; i < 16; i++) w[i] = be32(p + 4 * i);
+    for (int i = 16; i < 80; i++) w[i] = rol(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1);
+    uint32_t a = c.h[0], b = c.h[1], d = c.h[3], e = c.h[4], cc = c.h[2];
+    for (int i = 0; i < 80; i++) {
+        uint32_t f, k;
+        if (i < 20) {
+            f = (b & cc) | (~b & d);
+            k = 0x5a827999u;
+        } else if (i < 40) {
+            f = b ^ cc ^ d;
+            k = 0x6ed9eba1u;
+        } else if (i < 60) {
+            f = (b & cc) | (b & d) | (cc & d);
+            k = 0x8f1bbcdcu;
+        } else {
+            f = b ^ cc ^ d;
+            k = 0xca62c1d6u;
+        }
+        const uint32_t t = rol(a, 5) + f + e + k + w[i];
+        e = d;
+        d = cc;
+        cc = rol(b, 30);
+        b = a;
+        a = t;
+    }
+    c.h[0] += a;
+    c.h[1] += b;
+    c.h[2] += cc;
+    c.h[3] += d;
+    c.h[4] += e;
+}
+SVC_FN void sha1_add(Sha1 &c, const uint8_t *p, uint32_t n) {
+    c.len += n;
+    for (uint32_t k = 0; k < n; k++) {
+        c.buf[c.used++] = p[k];
+        if (c.used == 64) {
+            sha1_block(c, c.buf);
+            c.used = 0;
+        }
+    }
+}
+SVC_FN void sha1_end(Sha1 &c, uint8_t *out) {
+    const uint64_t bits = c.len * 8;
+    const uint8_t one = 0x80, zero = 0;
+    sha1_add(c, &one, 1);
+    while (c.used != 56) sha1_add(c, &zero, 1);
+    uint8_t l[8];
+    for (int i = 0; i < 8; i++) l[i] = static_cast<uint8_t>(bits >> (56 - 8 * i));
+    sha1_add(c, l, 8);
+    for (int i = 0; i < 5; i++) put_be32(out + 4 * i, c.h[i]);
+}
+SVC_FN void hmac_sha1(const uint8_t *key, uint32_t kn, const uint8_t *m, uint32_t n, uint8_t *out) {
+    uint8_t k[64], d[20];
+    for (int i = 0; i < 64; i++) k[i] = 0;
+    Sha1 c;
+    if (kn > 64) {
+        sha1_init(c);
+        sha1_add(c, key, kn);
+        sha1_end(c, k);
+    } else {
+        for (uint32_t i = 0; i < kn; i++) k[i] = key[i];
+    }
+    for (int i = 0; i < 64; i++) k[i] ^= 0x36;
+    sha1_init(c);
+    sha1_add(c, k, 64);
+    sha1_add(c, m, n);
+    sha1_end(c, d);
+    for (int i = 0; i < 64; i++) k[i] ^= 0x36 ^ 0x5c;
+    sha1_init(c);
+    sha1_add(c, k, 64);
+    sha1_add(c, d, 20);
+    sha1_end(c, out);
+}
+// one 3232 packet of n bytes, in place: the push text's length (n - 20), or -1 (too short or the digest differs)
+SVC_FN int32_t push_open(const Bf &b, const uint8_t *hkey, uint32_t hn, uint8_t *p, uint32_t n) {
+    if (n < 20) return -1;
+    for (uint32_t k = 0; k + 8 <= n; k += 8) {
+        uint32_t l = be32(p + k), r = be32(p + k + 4);
+        bf_dec(b, l, r);
+        put_be32(p + k, l);
+        put_be32(p + k + 4, r);
+    }
+    uint8_t d[20];
+    hmac_sha1(hkey, hn, p, n - 20, d);
+    uint8_t diff = 0;
+    for (int i = 0; i < 20; i++) diff |= static_cast<uint8_t>(d[i] ^ p[n - 20 + i]);
+    return diff ? -1 : static_cast<int32_t>(n - 20);
+}
+// the key file text: line 1 the Blowfish key, line 2 the HMAC key, both as hex digits; 1 = both read
+struct PushKeys { uint8_t bf[56], hm[128]; uint32_t bfn, hmn; };
+SVC_FN int hex_line(const uint8_t *&t, const uint8_t *e, uint8_t *o, uint32_t cap, uint32_t &n) {
+    n = 0;
+    int half = -1;
+    for (; t < e && *t != '\n'; t++) {
+        const uint8_t c = *t;
+        const int v = c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
+        if (v < 0) {
+            if (c == '\r' || c == ' ') continue;
+            return 0;
+        }
+        if (half < 0) {
+            half = v;
+        } else {
+            if (n >= cap) return 0;
+            o[n++] = static_cast<uint8_t>(half << 4 | v);
+            half = -1;
+        }
+    }
+    if (t < e) t++;
+    return half < 0 && n > 0;
+}
+SVC_FN int push_keys(const uint8_t *text, uint32_t n, PushKeys &k) {
+    const uint8_t *t = text, *e = text + n;
+    return hex_line(t, e, k.bf, sizeof k.bf, k.bfn) && hex_line(t, e, k.hm, sizeof k.hm, k.hmn);
+}
+SVC_FN void say(uintptr_t base, Log log, Line &l) {
+    if (st.lines >= LINES || !log) return;
+    st.lines++;
+    Line o;
+    o.s(t_pfx).s(l.z());
+    log(base, o.z());
+}
+SVC_FN void sdec(Line &l, int32_t v) {
+    if (v < 0) {
+        l.s(t_minus);
+        v = -v;
+    }
+    l.d(static_cast<uint32_t>(v));
+}
+SVC_FN void tag_text(Line &l, const uint8_t *t) {
+    char c[TAG + 1];
+    uint32_t k = 0;
+    for (; k < TAG && t[k]; k++) c[k] = static_cast<char>(t[k]);
+    c[k] = 0;
+    l.s(c);
+}
+SVC_FN uint8_t *profile(uintptr_t base, uint32_t user) {
+    uint8_t *p = u3h_lg_profile(base, user);
+    return p && rd<uint32_t>(p, PROFILE_LOAD_STATE) == PROFILE_LOADED ? p : nullptr;
+}
+SVC_FN void save(uintptr_t base, uint8_t *p) {
+    if (void *s = u3h_fl_state()) u3h_publish(base, s, p);
+}
+
+// ---- services 2 R2: the 3232 socket on the game's own socket functions (ExtState net slots, sceNet semantics)
+U3X_BSS Bf bf;
+U3X_BSS PushKeys pk;
+[[gnu::always_inline]] inline uintptr_t *xnet() { return reinterpret_cast<uintptr_t *>(u3h_ext() + EXT_NET); }
+SVC_FN void keys_load(uintptr_t base, Log log) {
+    if (st.keys_tried) return;
+    st.keys_tried = 1;
+    void *s = u3h_fl_state();
+    uint8_t t[400];
+    int64_t r = -1;
+    if (s) {
+        const int64_t fd = reinterpret_cast<int64_t (*)(const char *, int, int)>(state_fn(s, 4))(t_key_path, 0, 0);
+        if (fd >= 0) {
+            r = reinterpret_cast<int64_t (*)(int, void *, uint64_t)>(state_fn(s, 5))(static_cast<int>(fd), t, sizeof t);
+            reinterpret_cast<int64_t (*)(int)>(state_fn(s, 7))(static_cast<int>(fd));
+        }
+    }
+    st.keys_ok = r > 0 && push_keys(t, static_cast<uint32_t>(r), pk) ? 1 : 0;
+    for (uint8_t &c : t) c = 0;
+    if (st.keys_ok) {
+        bf_key(bf, pk.bf, pk.bfn);
+    } else {
+        Line l;
+        say(base, log, l.s(t_push_nokey));
+    }
+}
+SVC_FN void udp_close() {
+    if (st.udp > 0 && xnet()[NETF_CLOSE]) reinterpret_cast<int32_t (*)(int)>(xnet()[NETF_CLOSE])(st.udp - 1);
+    st.udp = 0;
+}
+SVC_FN void udp_open(uintptr_t base, Log log) {
+    keys_load(base, log);
+    if (!st.keys_ok || st.udp > 0 || !xnet()[NETF_SOCKET]) return;
+    const int32_t fd = reinterpret_cast<int32_t (*)(const char *, int, int, int)>(xnet()[NETF_SOCKET])(t_udp_name, 2, 2, 0);
+    int32_t e = fd;
+    if (fd >= 0) {
+        // SceSockaddrIn {len 16, family 2 (INET), port 3232 big-endian, any address}: two immediate stores
+        uint64_t a[2];
+        a[0] = 0x10u | 0x02u << 8 | static_cast<uint64_t>(PUSH_PORT >> 8) << 16 | static_cast<uint64_t>(PUSH_PORT & 0xff) << 24;
+        a[1] = 0;
+        e = reinterpret_cast<int32_t (*)(int, const void *, uint32_t)>(xnet()[NETF_BIND])(fd, a, 16);
+        const int32_t on = 1;
+        if (e >= 0)
+            reinterpret_cast<int32_t (*)(int, int, int, const void *, uint32_t)>(xnet()[NETF_SETSOCKOPT])(fd, 0xffff, 0x1200, &on, 4);
+        else
+            reinterpret_cast<int32_t (*)(int)>(xnet()[NETF_CLOSE])(fd);
+    }
+    Line l;
+    if (fd >= 0 && e >= 0) {
+        st.udp = fd + 1;
+        say(base, log, l.s(t_push_on));
+    } else {
+        say(base, log, l.s(t_push_nosock).x(static_cast<uint32_t>(e), 8).s(t_close));
+    }
+}
+
+// every multiplayer start (PS3 NetInit; the bandwidth result and the can-host byte also on LAN)
+SVC_FN void start(uintptr_t base, Log log, bool online) {
+    at<uint8_t>(base + NET_CAN_HOST) = 1;   // R18: the fixed speeds are above any server threshold
+    Line l;
+    l.s(t_bw);
+    say(base, log, l);
+    if (!online) return;
+    at<uint32_t>(base + NET_LAT) = 0;
+    at<uint32_t>(base + NET_LONG) = 0;
+    at<uint32_t>(base + NET_DAILY) = 0;   // services 2 R5 (NetInit clears the counts)
+    udp_open(base, log);                  // services 2 R2
+    st.players = st.daily = 0;
+    st.hb_seconds = HB_SECONDS;
+    st.hb_due = st.loc_next = now(base);
+    for (uint32_t u = 0; u < USERS; u++)
+        for (uint32_t k = 0; k < TAG; k++) st.tag_last[u][k] = 0;
+    st.ready_seen = u3h_rc_state() == RC_READY;
+    st.ban_given = 0;
+}
+
+SVC_FN void heartbeat(uintptr_t base) {
+    Hb h;
+    uint32_t n = 0;
+    for (const char *p = &at<const char>(base + NET_NAME); n < 16 && p[n]; n++) h.me[n] = p[n];
+    h.me[n] = 0;
+    if (!n) return;
+    const uint32_t ns = at<uint32_t>(base + NET_STATE);
+    h.activity = u3x_svc_mm() ? ACT_MATCHMAKING : ns == STATE_PLAYING ? ACT_PLAYING : ACT_MENU;
+    const int32_t nat = at<int32_t>(base + NET_NAT);
+    h.d[0] = 0;                                    // d1: session-layer byte (meaning not settled)
+    h.d[1] = u3x_split_screen(base) ? 1 : 0;       // d2: more than one local player
+    h.d[2] = at<int32_t>(base + NET_MODE);         // d3: party mode word
+    h.d[3] = ns == STATE_PLAYING ? 0 : -1;         // d4: a match value, -1 outside a match
+    h.d[4] = nat ? nat : 2;                        // d5: NAT type (v7.252's 2 while nothing set one)
+    h.d[5] = -1;                                   // d6: the party-mode-1 session word (not mapped on PS4)
+    h.d[6] = 0;                                    // d7: no second user on PC
+    h.d[7] = 0;                                    // d8: voice-layer byte (meaning not settled)
+    h.d[8] = 1;                                    // d9: video height >= 720
+    h.d[9] = 1;                                    // d10: wired
+    h.d[10] = f_to_int(at<uint32_t>(base + NET_LAT));
+    h.d[11] = f_to_int(at<uint32_t>(base + NET_LONG));
+    const uint8_t *cc = &at<const uint8_t>(base + NET_COUNTRY);
+    if (!cc[0]) cc = reinterpret_cast<const uint8_t *>(t_country);
+    for (uint32_t k = 0; k < 4; k++) h.cc[k] = static_cast<char>(cc[k]);
+    h.cc[4] = 0;
+    if (u3x_svc_post(K_HEARTBEAT, &h)) st.hb_due = now(base) + static_cast<int32_t>(st.hb_seconds) * TICKS;
+}
+
+SVC_FN void set_location(uintptr_t base, Log log, uint32_t lat, uint32_t lon, const Loc *codes) {
+    at<uint32_t>(base + NET_LAT) = lat;
+    at<uint32_t>(base + NET_LONG) = lon;
+    Line l;
+    l.s(t_loc);
+    sdec(l, f_to_int(lat));
+    l.s(t_sp);
+    sdec(l, f_to_int(lon));
+    if (codes) {
+        l.s(t_open);
+        for (uint32_t k = 0; k < 3; k++) {
+            if (k) l.s(t_sp);
+            l.s(codes->code[k]);
+        }
+        l.s(t_close);
+    }
+    say(base, log, l);
+}
+
+// the clan tag check's answer (got <= 0: none)
+SVC_FN void filter_done(uintptr_t base, Log log, int32_t got, const uint8_t *reply) {
+    st.tag_busy = 0;
+    uint8_t *p = profile(base, st.tag_user);
+    Line l;
+    l.s(t_tag);
+    tag_text(l, st.tag_sent);
+    if (got <= 0) {
+        l.s(t_tag_none);
+    } else if (reply[0] == '+') {
+        l.s(t_tag_ok);
+    } else {
+        l.s(t_tag_no);
+        bool same = p != nullptr;
+        for (uint32_t k = 0; k < TAG && same; k++) same = p[PROFILE_TAG + k] == st.tag_sent[k];
+        if (same) {
+            p[PROFILE_TAG] = '*';
+            for (uint32_t k = 1; k < TAG; k++) p[PROFILE_TAG + k] = 0;
+            for (uint32_t k = 0; k < TAG; k++) st.tag_last[st.tag_user][k] = p[PROFILE_TAG + k];
+        }
+    }
+    say(base, log, l);
+    if (p) save(base, p);
+    u3x_send_player_info(base);
+}
+
+SVC_FN void clan_tags(uintptr_t base) {
+    if (st.tag_busy) return;
+    for (uint32_t u = 0; u < USERS; u++) {
+        uint8_t *p = profile(base, u);
+        if (!p) continue;
+        const uint8_t *tag = p + PROFILE_TAG;
+        bool same = true, empty = true;
+        for (uint32_t k = 0; k < TAG; k++) {
+            if (tag[k] != st.tag_last[u][k]) same = false;
+            if (tag[k]) empty = false;
+        }
+        if (same) continue;
+        if (empty) {
+            for (uint32_t k = 0; k < TAG; k++) st.tag_last[u][k] = 0;
+            save(base, p);
+            continue;
+        }
+        if (!u3x_svc_post(K_FILTER, tag)) return;   // the service is busy: next frame
+        for (uint32_t k = 0; k < TAG; k++) st.tag_last[u][k] = st.tag_sent[k] = tag[k];
+        st.tag_user = u;
+        st.tag_busy = 1;
+        return;
+    }
+}
+
+SVC_FN void apply_push(uintptr_t base, Log log, const uint8_t *text, uint32_t n);
+SVC_FN void answer(uintptr_t base, Log log, uint32_t kind, int32_t got, const uint8_t *reply) {
+    if (kind == K_FILTER) {
+        filter_done(base, log, got, reply);
+        return;
+    }
+    if (kind == K_LOCATION) {
+        Loc loc;
+        if (got > 0 && u3x_svc_location(reply, static_cast<uint32_t>(got), &loc)) {
+            set_location(base, log, loc.lat, loc.lon, &loc);
+        } else {
+            Line l;
+            l.s(t_noloc);
+            say(base, log, l);
+        }
+        return;
+    }
+    if (kind != K_HEARTBEAT) return;
+    const uint32_t ns = at<uint32_t>(base + NET_STATE);
+    Line l;
+    l.s(t_hb).s(u3x_svc_mm() ? t_act1 : ns == STATE_PLAYING ? t_act2 : t_act0).s(t_hb2);
+    sdec(l, got);
+    l.s(t_hb3);
+    say(base, log, l);
+    if (got > 0) apply_push(base, log, reply, static_cast<uint32_t>(got));
+}
+
+// a push text (the heartbeat's answer, the PC form; or a decoded 3232 packet): counts, location, interval
+SVC_FN void apply_push(uintptr_t base, Log log, const uint8_t *text, uint32_t n) {
+    Push push;
+    if (!u3x_svc_push(text, n, &push)) return;
+    if (push.got & 3) {
+        if (push.got & 1) st.players = push.players;
+        if (push.got & 2) {
+            st.daily = push.daily;
+            at<uint32_t>(base + NET_DAILY) = push.daily;   // services 2 R5: the kind-0x1d text shows it
+        }
+        Line c;
+        c.s(t_players).d(st.players).s(t_today).d(st.daily);
+        say(base, log, c);
+    }
+    if (push.got & 4) set_location(base, log, push.lat, push.lon, nullptr);
+    if (push.got & 8) {
+        st.hb_seconds = push.next;
+        st.hb_due = now(base) + static_cast<int32_t>(push.next) * TICKS;
+        Line c;
+        c.s(t_next).d(push.next).s(t_s);
+        say(base, log, c);
+    }
+}
+
+// the sign-in's is-banned answer: the reason's row in the report-reason table, -1 = not banned (or not known)
+SVC_FN int32_t ban_reason(void *s, int32_t *count) {
+    void *m = u3h_rc_mem();
+    if (!m || !s) return -1;
+    const uint32_t n = *static_cast<const uint32_t *>(u3h_rc(m, RC_BAN_LENGTH));
+    if (!n || n > 0xff) return -1;
+    char reason[64];
+    if (!u3x_svc_ban(static_cast<const uint8_t *>(u3h_rc(m, RC_BAN_REPLY)), n, count, reason, sizeof reason)) return -1;
+    const uint8_t *table = u3x_sym_table(s, SYM_REASONS);
+    for (uint32_t k = 0; k < 64; k++) {
+        const char *name = u3x_report_reason(table, k);
+        if (!name) return -1;
+        uint32_t i = 0;
+        while (name[i] && name[i] == reason[i]) i++;
+        if (name[i] == reason[i]) return static_cast<int32_t>(k);
+    }
+    return -1;
+}
+
+// every frame (u3x_ring_tick)
+SVC_FN void tick(uintptr_t base, Log log) {
+    const bool mp = at<uint8_t>(base + MP_ACTIVE) != 0;
+    const bool online = mp && !at<uint8_t>(base + NET_LAN) && u3h_onb_mode_get() == 1;
+    if (mp && !st.in_mp) start(base, log, online);
+    if (!mp && st.in_mp && st.raised) {
+        at<uint8_t>(base + NET_ERROR) = 0;
+        st.raised = 0;
+    }
+    if (!mp && st.in_mp) udp_close();   // services 2 R2: NetShutdown closes the 3232 socket
+    st.in_mp = mp;
+    if (online && st.udp > 0) {   // services 2 R2: one receive every online frame
+        uint8_t p[256];
+        const int32_t n = reinterpret_cast<int32_t (*)(int, void *, uint32_t, int, void *, uint32_t *)>(xnet()[NETF_RECVFROM])(
+            st.udp - 1, p, 255, 0, nullptr, nullptr);
+        if (n > 0) {
+            const int32_t m = push_open(bf, pk.hm, pk.hmn, p, static_cast<uint32_t>(n));
+            Line l;
+            if (m < 0) {
+                if (st.push_bad++ < 5) say(base, log, l.s(t_push_bad).d(static_cast<uint32_t>(n)));
+            } else {
+                if (st.push_in++ < 5) say(base, log, l.s(t_push_in).d(static_cast<uint32_t>(n)));
+                apply_push(base, log, p, static_cast<uint32_t>(m));
+            }
+        }
+    }
+
+    uint8_t reply[260];
+    uint32_t kind = 0;
+    const int32_t got = u3x_svc_take(&kind, reply, sizeof reply);
+    if (got != -2) answer(base, log, kind, got, reply);
+    if (!online) return;
+
+    // R14: the RPCN session went away while online
+    const int32_t rs = u3h_rc_state();
+    if (rs == RC_READY) {
+        st.ready_seen = 1;
+    } else if (st.ready_seen && !st.raised && !at<uint8_t>(base + NET_ERROR)) {
+        at<uint8_t>(base + NET_ERROR) = 1;
+        st.raised = 1;
+        Line l;
+        l.s(t_drop).d(static_cast<uint32_t>(rs)).s(t_drop2);
+        say(base, log, l);
+    }
+
+    const int32_t t = now(base);
+    if (t - st.hb_due >= 0) heartbeat(base);
+    if (!at<uint32_t>(base + NET_LAT) && !at<uint32_t>(base + NET_LONG) && t - st.loc_next >= 0 &&
+        u3x_svc_post(K_LOCATION, nullptr))
+        st.loc_next = t + static_cast<int32_t>(LOC_SECONDS) * TICKS;
+    clan_tags(base);
+}
+
+// the ban: the reason and count into net +0x410 / +0x414, a boot.log line
+SVC_FN void ban_fields(uintptr_t base, int32_t k, int32_t count, const char *what) {
+    at<int32_t>(base + NET_BAN_REASON) = k;
+    at<int32_t>(base + NET_BAN_COUNT) = count;
+    Line l;
+    l.s(t_ban);
+    sdec(l, k);
+    l.s(t_ban2);
+    sdec(l, count);
+    l.s(what);
+    u3h_so_note(t_pfx, nullptr, -1, l.z());
+}
+
+// the server notice (C u3h_server_notice, read by the multiplayer page's G31 server_notice when the online layer has
+// none): the ban once per online entry while no popup is up; the root page first (the multiplayer entry stops), G31
+// then shows the ban popup. -1 = none.
+SVC_FN int32_t ban_notice(uintptr_t base, int32_t *arg) {
+    void *s = u3h_fl_state();
+    if (st.ban_given || !st.in_mp || at<uint8_t>(base + NET_LAN) || u3h_onb_mode_get() != 1 || u3x_popup_id(base) || !s)
+        return -1;
+    int32_t count = 0;
+    const int32_t k = ban_reason(s, &count);
+    if (k < 0) return -1;
+    st.ban_given = 1;
+    ban_fields(base, k, count, t_ban3);
+    u3x_page_show(base, s, PAGE_ROOT, 1);
+    if (arg) *arg = count;
+    return k;
+}
+
+// Play Online (C onb_play_online, before the entry): PS3 step 4 content rating, then the ban NetInit would find;
+// 1 = refused (dialog / popup shown)
+SVC_FN int play_gate(uintptr_t base, void *s) {
+    if (!s) return 0;
+    char t[8];
+    int64_t r = -1;
+    const int64_t fd = reinterpret_cast<int64_t (*)(const char *, int, int)>(state_fn(s, 4))(t_rating_path, 0, 0);
+    if (fd >= 0) {
+        r = reinterpret_cast<int64_t (*)(int, void *, uint64_t)>(state_fn(s, 5))(static_cast<int>(fd), t, sizeof t);
+        reinterpret_cast<int64_t (*)(int)>(state_fn(s, 7))(static_cast<int>(fd));
+    }
+    int64_t i = 0;
+    while (i < r && (t[i] == ' ' || t[i] == '\t' || t[i] == '\r' || t[i] == '\n')) i++;
+    if (i < r && t[i] == '1') {
+        at<uint8_t>(base + NET_CHAT_RESTRICTED) = 1;
+        u3h_show_dialog(base, s, TXT_RATING, TXT_TITLE, 0, 0, 0, 0);   // services 2 R12: no button text, as PS3
+        u3h_so_note(t_rating, nullptr, -1, nullptr);
+        return 1;
+    }
+    int32_t count = 0;
+    const int32_t k = ban_reason(s, &count);
+    if (k < 0) return 0;
+    ban_fields(base, k, count, t_ban4);
+    game_call<int>(base + FN_SHOW_POPUP, reinterpret_cast<void *>(base + MENU), POPUP_NOTICE);
+    return 1;
+}
+
+}  // namespace svc
+
+extern "C" {
+SVC_FN void u3x_svc_tick(uintptr_t base, Log log) { svc::tick(base, log); }
+SVC_FN int32_t u3x_svc_ban_notice(uintptr_t base, int32_t *arg) { return svc::ban_notice(base, arg); }
+SVC_FN int u3x_svc_play_gate(uintptr_t base, void *s) { return svc::play_gate(base, s); }
+// SPEC-open O8: the region word for the 303 / 309 builders (G14 slots 4 / 5)
+SVC_FN uint32_t u3x_svc_region(uintptr_t base) { return svc::region_word(&at<const uint8_t>(base + svc::NET_COUNTRY)); }
+}  // extern "C"
+#pragma clang section text=".text.ext" rodata=".rodata.ext"   // back to the file's default (region B)
+// ===== v7.254 svc end =====
+
+// ===== v7.254 gaps: small send points PS4 lost inside existing areas (ps3net/SPEC-gaps.md G1..G5) =====
+// Own C++ from SPEC-gaps.md, which is written from the research files only (COVERAGE / COVERAGE-resolved,
+// SPEC-party-messages 3, SPEC-inmatch-sync 1.2 / 4.5, SPEC-join-in-progress E2); no game code.
+//  * G2: PS3's map vote result (on the match room owner, when the vote's winner is applied; the same step sends 0x109
+//    and the owner's player info) also sends the team descriptions, event 24 AssignTeamDesc, to every player of the
+//    match. PS4 lost that send. Here u3x_n04_close (the winner applied) calls u3x_gaps_vote_result, which on the owner
+//    calls PS4's 24 sender (the one PS4's match start, late join and the helper's film bookmark use: one 24 per team
+//    description, to all). A guest that applies a received 0x109 sends nothing (PS3's 0x109 reader does not). No gate:
+//    every PC reads 24 (PS4 handler), a PS3 peer gets it in its layout (xp).
+//  * G1 (117) and G5 (lab-multi): settled by SPEC-open O1 / O3, nothing to send. G3 (152): SPEC-open O2, below.
+//  * G3 (116) and G4 (the player info pairs): already as PS3 (IMPL-v7.254-gaps.md).
+// boot.log: "U3MP gaps:" lines.
+// ===== v7.254 gaps pure begin =====
+namespace gaps254 {
+constexpr uintptr_t FN_TEAM_DESC = 0x6b1dc0;   // PS4's AssignTeamDesc (24) sender, no arguments
+constexpr uintptr_t S_ROOM = 0x18, S_OWN_ID = 0x12e4, S_OWNER_ID = 0x12e8;   // match session
+// G2: the vote result sends 24 only on the owner of a match room, and only when a winner was applied
+inline bool vote_result_sends_24(const uint8_t *ms, int32_t winner) {
+    return winner >= 0 && rd<uint64_t>(ms, S_ROOM) && rd<uint32_t>(ms, S_OWN_ID) == rd<uint32_t>(ms, S_OWNER_ID);
+}
+// G3 / SPEC-open O2 R2: the Elimination one-shot fired in this frame (the wait flag went from clear to set while the
+// round end was held) on the owner of the match room: one 152 to the others
+inline bool alert_sends(const uint8_t *ms, bool was_set, bool now_set) {
+    return !was_set && now_set && rd<uint64_t>(ms, S_ROOM) && rd<uint32_t>(ms, S_OWN_ID) == rd<uint32_t>(ms, S_OWNER_ID);
+}
+}  // namespace gaps254
+// ===== v7.254 gaps pure end =====
+U3X_RO const char gaps_t_24[] = "U3MP gaps: map vote result: AssignTeamDesc (24) to the match (room owner), net game ";
+extern "C" {
+U3X_FN void u3x_gaps_vote_result(uintptr_t base, int32_t winner) {
+    if (!gaps254::vote_result_sends_24(v7252::session(base, v7252::MATCH), winner)) return;
+    game_call<void>(base + gaps254::FN_TEAM_DESC);
+    if (v7252::st.log && v7252::st.base) {
+        Line l;
+        v7252::st.log(v7252::st.base, l.s(gaps_t_24).d(static_cast<uint32_t>(winner)).z());
+    }
+}
+}  // extern "C"
+
+// ---- G3 / SPEC-open O2: event 152 Alert. The round end hold itself is G35's (u3x_elim_round_end_hold, kind 101 =
+// the reference image's call-site value stub at 0x7259af: no builder sub needed): a late joiner (mark set) not yet synced
+// skips the Elimination round end this frame and, once per round start, sets the manager's wait flag (+0x354, PS4 clears
+// it at each round start). Here: on the match owner, that moment sends one 152 (empty, reliable) to every remote player
+// that reads it (a PS3 player, or a PC with the capability byte 2 mark: v7.254 and later); a 152 from any peer (xp
+// block's handle) raises the wait on this machine once (G35's received flag: wait flag + deadline, no send), and G35's
+// text function keeps the notice 0x02277bd7 on the HUD until the flag is cleared.
+extern "C" {
+volatile uint8_t *u3h_elim_received(void);
+int u3x_elim_round_end_hold(uintptr_t base, uint64_t *r);
+void u3x_elim_wait_text(uintptr_t base);
+}
+namespace gaps254 {
+constexpr uintptr_t NGM = 0x17cb060, F_WAIT = 0x354;
+constexpr uint32_t LINES = 60;
+U3X_BSS uint32_t alert_seen, lines;
+U3X_RO const char t_152[] = "U3MP gaps: Elimination round end held for a late joiner (match owner): 152 out to ",
+                  t_152b[] = " player(s), record mask 0x", t_152none[] = "U3MP gaps: Elimination round end held for a late joiner (match owner): no PS3 / v7.254 player to tell, 152 not sent",
+                  t_152bad[] = "U3MP gaps: 152 not made (factory hook missing)",
+                  t_152in[] = "U3MP gaps: 152 in: the Elimination wait notice (0x02277bd7) is up until the next round";
+U3X_FN void say(const char *text) {
+    if (!v7252::st.log || !v7252::st.base || lines >= LINES) return;
+    lines++;
+    v7252::st.log(v7252::st.base, text);
+}
+U3X_FN void send_alert(uintptr_t base) {
+    uint32_t mask = 0, n = 0;
+    for (int i = 0; i < 10; i++) {
+        const uint8_t *rec = sync253::record(base, i);
+        if (!rec[sync253::R_IN_USE] || rec[sync253::R_GONE] || rd<int32_t>(rec, sync253::R_SCREEN) != 0 ||
+            v7252::is_local(base, rec))
+            continue;
+        const uint8_t *m = jip2::member_of(base, rec);
+        if (!m || !mm254::v2(m)) continue;
+        mask |= 1u << i;
+        n++;
+    }
+    if (!mask) return say(t_152none);
+    uint8_t *ev = xp::make152(base);
+    if (!ev) return say(t_152bad);
+    ev[9] = 0;   // reliable, header flags as PS3's builder
+    ev[0xb] = 0;
+    ev[0xc] = 0;
+    sync253::send_mask(base, ev, mask);
+    sync253::release(ev);
+    Line l;
+    say(l.s(t_152).d(n).s(t_152b).x(mask, 3).z());
+}
+}  // namespace gaps254
+extern "C" {
+// kind 101 (agc_port.inc elim_round_end_hold): G35's hold, then the owner's 152 (R1 / R2)
+U3X_FN int u3x_gaps_elim_hold(uintptr_t base, uint64_t *r) {
+    const uint8_t *ngm = reinterpret_cast<const uint8_t *>(base + gaps254::NGM);
+    const bool was = ngm[gaps254::F_WAIT] != 0;
+    const int held = u3x_elim_round_end_hold(base, r);
+    if (held && gaps254::alert_sends(v7252::session(base, v7252::MATCH), was, ngm[gaps254::F_WAIT] != 0))
+        gaps254::send_alert(base);
+    return held;
+}
+// kind 102 (agc_port.inc elim_wait_text, every net task frame): a 152 handled since the last frame raises G35's
+// received flag (R3), then G35's notice (R4)
+U3X_FN void u3x_gaps_elim_text(uintptr_t base) {
+    using namespace gaps254;
+    if (xp::st.alert_in != alert_seen) {
+        alert_seen = xp::st.alert_in;
+        if (!at<uint8_t>(base + NGM + F_WAIT)) say(t_152in);
+        *u3h_elim_received() = 1;
+    }
+    u3x_elim_wait_text(base);
+}
+}  // extern "C"
+// ===== v7.254 gaps end =====
+
+// ===== v7.254 recent: the players of online matches, for the launcher's "Recently played" list =====
+// At match setup (kind 10, the C part's fr_match_players, before the players-met upkeep) every remote player of an
+// online match goes into /data/u3-recent-players.txt (the launcher's user folder): the net player records 0..9 that are
+// in use (+0xe1) and not a local player's, with an RPCN name at +0x5b8 (3..16 of A-Z a-z 0-9 _ -). LAN matches and
+// matches without such a player write nothing. The file is text, one line per player, oldest first:
+//     YYYY-MM-DDTHH:MM:SSZ<TAB>name<LF>      (UTC)
+// A player met again loses the old line and gets a new one at the end; the newest 100 lines are kept, lines that do not
+// look like ours are dropped. The whole file is written to u3-recent-players.txt.tmp and renamed over the old one, so a
+// reader never sees half a file. Nothing is kept in memory between matches (no BSS: region C high is nearly full); the
+// old file is read twice in 256-byte pieces (count, then copy). Code and texts in region D.
+// boot.log: "U3MP online: recent players: <n> written (u3-recent-players.txt)" or "... not written (...)".
+// ===== v7.254 recent begin =====
+#ifndef RP_FN
+#define RP_FN [[gnu::section(".text.d"), gnu::noinline, clang::minsize]]   // region D (helpers v7.254 and later)
+#endif
+#ifndef RP_RO
+#define RP_RO [[gnu::section(".rodata.d")]]
+#endif
+#pragma clang section text=".text.d" rodata=".rodata.d"
+extern "C" {
+U3H_IMPORT void u3h_utc(uint16_t *st);
+U3H_IMPORT void u3h_so_note(const char *a, const char *name, int32_t v, const char *b);
+}
+namespace recent {
+constexpr uint32_t KEEP = 100, NAME = 16, LINE = 64, PLAYERS = 10;
+constexpr uintptr_t NET_LAN = 0x17d5c60, NET_MULTIPLAYER = 0x17d5c61;   // u8: LAN / not online; multiplayer active
+constexpr uintptr_t NGM = 0x17cb060;                                     // the net game manager
+constexpr uintptr_t LOCAL_A = NGM + 0x370, LOCAL_B = NGM + 0x378;      // pointers: the local players' records
+constexpr uintptr_t RECORDS = NGM + 0x390, RECORD_SIZE = 0x9c0, IN_USE = 0xe1, ID = 0x5b8;
+RP_RO const char path[] = "/data/u3-recent-players.txt";
+RP_RO const char tmp[] = "/data/u3-recent-players.txt.tmp";
+RP_RO const char t_head[] = "recent players: ";
+RP_RO const char t_ok[] = " written (u3-recent-players.txt)";
+RP_RO const char t_bad[] = " not written (u3-recent-players.txt could not be written)";
+
+struct Names { char n[PLAYERS][NAME + 1]; uint32_t count; };
+struct Reader { int64_t fd; uint32_t have, at; uint8_t piece[256]; };
+
+RP_FN int64_t f_open(void *s, const char *p, int flags) {
+    return reinterpret_cast<int64_t (*)(const char *, int, int)>(state_fn(s, 4))(p, flags, 0600);
+}
+RP_FN void f_close(void *s, int64_t fd) { reinterpret_cast<int64_t (*)(int)>(state_fn(s, 7))(static_cast<int>(fd)); }
+RP_FN bool f_write(void *s, int64_t fd, const char *b, uint32_t n) {
+    return reinterpret_cast<int64_t (*)(int, const void *, uint64_t)>(state_fn(s, 6))(static_cast<int>(fd), b, n) ==
+           static_cast<int64_t>(n);
+}
+
+// the length of an RPCN name (3..16 of A-Z a-z 0-9 _ -, then NUL), 0 when `p` holds none
+RP_FN uint32_t name_length(const char *p) {
+    uint32_t n = 0;
+    while (n <= NAME && p[n]) {
+        const char c = p[n];
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-')) return 0;
+        n++;
+    }
+    return n >= 3 && n <= NAME ? n : 0;
+}
+RP_FN bool same(const char *a, const char *b, uint32_t bn) {   // NUL-ended a equals b[0..bn)
+    for (uint32_t i = 0; i < bn; i++)
+        if (a[i] != b[i]) return false;
+    return a[bn] == 0;
+}
+RP_FN bool listed(const Names &m, const char *p, uint32_t n) {
+    for (uint32_t i = 0; i < m.count; i++)
+        if (same(m.n[i], p, n)) return true;
+    return false;
+}
+
+// the remote players of the match: in use, not local, with a name, each once
+RP_FN void collect(uintptr_t base, Names &m) {
+    m.count = 0;
+    for (uint32_t i = 0; i < PLAYERS; i++) {
+        const uint8_t *r = reinterpret_cast<const uint8_t *>(base + RECORDS + i * RECORD_SIZE);
+        if (r == at<const uint8_t *>(base + LOCAL_A) || r == at<const uint8_t *>(base + LOCAL_B) || !r[IN_USE]) continue;
+        const char *p = reinterpret_cast<const char *>(r + ID);
+        const uint32_t n = name_length(p);
+        if (!n || listed(m, p, n)) continue;
+        for (uint32_t k = 0; k < n; k++) m.n[m.count][k] = p[k];
+        m.n[m.count][n] = 0;
+        m.count++;
+    }
+}
+
+// the next line of the file (without its LF) in `line`; its length, LINE when it is too long; false at the end
+RP_FN bool next_line(void *s, Reader &in, char *line, uint32_t &len) {
+    len = 0;
+    bool any = false;
+    for (;;) {
+        if (in.at == in.have) {
+            if (in.fd < 0) return any;
+            const int64_t got = reinterpret_cast<int64_t (*)(int, void *, uint64_t)>(state_fn(s, 5))(
+                static_cast<int>(in.fd), in.piece, sizeof in.piece);
+            if (got <= 0) return any;
+            in.have = static_cast<uint32_t>(got);
+            in.at = 0;
+        }
+        const char c = static_cast<char>(in.piece[in.at++]);
+        any = true;
+        if (c == '\n') return true;
+        if (len < LINE) line[len++] = c;
+    }
+}
+
+// a line worth keeping: ours in form (time, TAB, name) and not one of this match's players
+RP_FN bool keep(const Names &m, const char *line, uint32_t len) {
+    if (len < 2 || len >= LINE) return false;
+    uint32_t tab = 0;
+    while (tab < len && line[tab] != '\t') tab++;
+    if (tab == 0 || tab + 1 >= len) return false;
+    return !listed(m, line + tab + 1, len - tab - 1);
+}
+
+RP_FN uint32_t put2(char *o, uint32_t v) {
+    o[0] = static_cast<char>('0' + v / 10 % 10);
+    o[1] = static_cast<char>('0' + v % 10);
+    return 2;
+}
+
+// "YYYY-MM-DDTHH:MM:SSZ" of now (UTC)
+RP_FN uint32_t stamp(char *o) {
+    uint16_t st[8];
+    for (int i = 0; i < 8; i++) st[i] = 0;
+    u3h_utc(st);
+    uint32_t n = put2(o, st[0] / 100u);
+    n += put2(o + n, st[0]);
+    o[n++] = '-'; n += put2(o + n, st[1]);
+    o[n++] = '-'; n += put2(o + n, st[3]);
+    o[n++] = 'T'; n += put2(o + n, st[4]);
+    o[n++] = ':'; n += put2(o + n, st[5]);
+    o[n++] = ':'; n += put2(o + n, st[6]);
+    o[n++] = 'Z';
+    return n;
+}
+
+// the file with this match's players written at the end; false when it could not be written
+RP_FN bool write_file(void *s, const Names &m) {
+    char line[LINE + 1];
+    uint32_t len;
+    Reader in;
+    in.fd = f_open(s, path, 0);
+    in.have = in.at = 0;
+    uint32_t old = 0;
+    while (next_line(s, in, line, len))
+        if (keep(m, line, len)) old++;
+    if (in.fd >= 0) f_close(s, in.fd);
+    uint32_t skip = old + m.count > KEEP ? old + m.count - KEEP : 0;
+
+    const int64_t out = f_open(s, tmp, 0x601);
+    if (out < 0) return false;
+    bool ok = true;
+    in.fd = f_open(s, path, 0);
+    in.have = in.at = 0;
+    while (ok && next_line(s, in, line, len)) {
+        if (!keep(m, line, len)) continue;
+        if (skip) { skip--; continue; }
+        line[len] = '\n';
+        ok = f_write(s, out, line, len + 1);
+    }
+    if (in.fd >= 0) f_close(s, in.fd);
+    char t[24];
+    const uint32_t tn = stamp(t);
+    for (uint32_t i = 0; ok && i < m.count; i++) {
+        uint32_t n = 0;
+        for (uint32_t k = 0; k < tn; k++) line[n++] = t[k];
+        line[n++] = '\t';
+        for (uint32_t k = 0; m.n[i][k]; k++) line[n++] = m.n[i][k];
+        line[n++] = '\n';
+        ok = f_write(s, out, line, n);
+    }
+    f_close(s, out);
+    if (!ok) return false;
+    if (reinterpret_cast<int64_t (*)(const char *, const char *)>(state_fn(s, 8))(tmp, path) >= 0) return true;
+    // the rename can fail while a reader holds the file (Windows): the new text is copied over it in place
+    in.fd = f_open(s, tmp, 0);
+    if (in.fd < 0) return false;
+    const int64_t to = f_open(s, path, 0x601);
+    if (to >= 0) {
+        in.have = in.at = 0;
+        while (ok && next_line(s, in, line, len)) {
+            line[len] = '\n';
+            ok = f_write(s, to, line, len + 1);
+        }
+        f_close(s, to);
+    }
+    f_close(s, in.fd);
+    return ok && to >= 0;
+}
+
+}  // namespace recent
+
+extern "C" {
+
+// kind 10 (match setup): this online match's remote players go to the recent players file
+RP_FN void u3x_recent_match(uintptr_t base, void *s) {
+    using namespace recent;
+    if (!base || !s || at<uint8_t>(base + NET_LAN) != 0 || at<uint8_t>(base + NET_MULTIPLAYER) == 0) return;
+    Names m;
+    collect(base, m);
+    if (m.count == 0) return;
+    const bool ok = write_file(s, m);
+    u3h_so_note(t_head, nullptr, static_cast<int32_t>(m.count), ok ? t_ok : t_bad);
+}
+
+}  // extern "C"
+#pragma clang section text=".text.ext" rodata=".rodata.ext"   // back to the file default (region B)
+// ===== v7.254 recent end =====
+
+// ===== v7.254 svc hooks: builder subs 37 / 38, the services' wait popup handlers (ps3net/IMPL-v7.254.md) =====
+// Own C++ from SPEC-services 3.1 / 7.1 and IMPL-v7.254-svc.md ("builder requests"); no game code.
+//  * The builder (region-D images, v7.254 on) writes two popup page handler stubs into D x-stub slots and their image
+//    offsets into X.ea[150] (sub 37) / X.ea[151] (sub 38). The game calls a registered handler with the popup page's
+//    event as its first argument (6 = the page's per-frame update, as the "Creating Party..." handler reads it); the
+//    stub passes kind 244 with r[0] = sub, r[1..3] = the handler's three arguments (r[1] low 32 bits = the event).
+//  * Sub 37 (R8): picking a report reason (C rpt_pick) shows the wait popup 0xceba0940 when a report was queued and the
+//    image has the stub; the first page update after the report thread is done (u3h_rpt_busy() == 0) closes it, only
+//    while that popup (the popup page with our text) is still the one up.
+//  * Sub 38 (services 2 R11, the sign-in wait popup 0x64b1c3be on the same wait page 0x471007a1): PS3 shows it while
+//    the system's network-start dialog runs and acts when that dialog closes. On PC the RPCN sign-in stands for the
+//    dialog: Play Online's sign-in wait (G13 u3x_signin_wait) shows the popup once while the sign-in runs; each page
+//    update (event 6) watches the sign-in; when it ends: signed in -> the popup closes and Play Online goes on (its
+//    startup continues: PS3's "Play Online again"); not signed in -> the popup closes and the wait ends at once (no
+//    30-s give-up, no failure dialog: PS3 stays in the menu).
+#pragma clang section text=".text.d" rodata=".rodata.d"
+namespace svchk {
+constexpr int EA_REPORT_WAIT = 150, EA_SIGNIN_WAIT = 151;
+constexpr uint32_t TXT_REPORT_WAIT = 0xceba0940u, TXT_SIGNIN_WAIT = 0x64b1c3beu, PAGE_POPUP = 0x471007a1u, EV_UPDATE = 6;
+constexpr uintptr_t MENU = 0x17bd080, FN_POPUP_CLOSE = 0x652200;
+constexpr int32_t RC_READY = 5;
+U3X_BSS uint8_t report_up, signin_up, signin_was, signin_fail;
+U3X_RO const char t_signin[] = "services: sign-in wait popup 0x64b1c3be (the RPCN sign-in runs)",
+                  t_signin_ok[] = "services: sign-in done: popup closed, Play Online goes on",
+                  t_signin_no[] = "services: sign-in ended without an RPCN session: popup closed, Play Online stops (no dialog)";
+}  // namespace svchk
+extern "C" {
+U3H_IMPORT uint32_t u3h_rpt_busy(void);
+U3H_IMPORT int u3h_rc_signing_in(void);
+U3H_IMPORT int32_t u3h_rc_state(void);
+U3H_IMPORT void u3h_so_note(const char *a, const char *name, int32_t v, const char *b);
+void u3x_wait_popup(uintptr_t base, uint32_t text_id, uintptr_t callback);
+uint32_t u3x_popup_id(uintptr_t base);
+// G13 u3x_signin_wait, while the RPCN sign-in runs: the sign-in wait popup, once per wait (only with the sub-38 stub)
+[[gnu::section(".text.d"), gnu::noinline]] void u3x_svc_signin_popup(uintptr_t base) {
+    const uint32_t h = ext_ea()[svchk::EA_SIGNIN_WAIT];
+    if (!h || svchk::signin_up || u3x_popup_id(base) == svchk::PAGE_POPUP) return;
+    svchk::signin_up = svchk::signin_was = 1;
+    svchk::signin_fail = 0;
+    u3x_wait_popup(base, svchk::TXT_SIGNIN_WAIT, base + h);
+    u3h_so_note(svchk::t_signin, nullptr, -1, nullptr);
+}
+// G13 u3x_signin_wait: 1 = the sign-in ended unsigned while the popup was up (the wait stops now; taken once)
+[[gnu::section(".text.d"), gnu::noinline]] int u3x_svc_signin_failed(void) {
+    if (!svchk::signin_fail) return 0;
+    svchk::signin_fail = 0;
+    return 1;
+}
+// C rpt_pick, after the report was queued
+[[gnu::section(".text.d"), gnu::noinline]] void u3x_svc_report_wait(uintptr_t base) {
+    const uint32_t h = ext_ea()[svchk::EA_REPORT_WAIT];
+    if (!h || !u3h_rpt_busy()) return;
+    svchk::report_up = 1;
+    u3x_wait_popup(base, svchk::TXT_REPORT_WAIT, base + h);
+}
+// n_kind, kind 244 subs 37 / 38
+[[gnu::section(".text.d"), gnu::noinline]] int u3x_svc_hook(uintptr_t base, uint64_t *r) {
+    using namespace svchk;
+    if ((r[0] != 37 && r[0] != 38) || static_cast<int32_t>(r[1]) != static_cast<int32_t>(EV_UPDATE)) return 0;
+    const uint32_t txt = r[0] == 37 ? TXT_REPORT_WAIT : TXT_SIGNIN_WAIT;
+    if (r[0] == 37) {
+        if (!report_up || u3h_rpt_busy()) return 0;
+        report_up = 0;
+    } else {
+        if (!signin_up) return 0;
+        const bool now = u3h_rc_signing_in() != 0;
+        const bool ended = signin_was && !now;
+        signin_was = now;
+        if (!ended) return 0;
+        signin_up = 0;
+        const bool ok = u3h_rc_state() == RC_READY;
+        signin_fail = ok ? 0 : 1;
+        u3h_so_note(ok ? t_signin_ok : t_signin_no, nullptr, -1, nullptr);
+    }
+    const uintptr_t menu = base + MENU;
+    const uintptr_t text = at<uintptr_t>(menu + 0x1498);
+    if (u3x_popup_id(base) == PAGE_POPUP && text && at<uint32_t>(text + 8) == txt)
+        game_call<void>(base + FN_POPUP_CLOSE, reinterpret_cast<void *>(menu), 0);
+    return 0;
+}
+}  // extern "C"
+#pragma clang section text=".text.ext" rodata=".rodata.ext"   // back to the file default (region B)
+// ===== v7.254 svc hooks end =====
+
+// ===== v7.254 fam: the PS3 1.19 online families without a PS4 twin (ps3net/SPEC-families.md F1, F2, F4, F5) =====
+// Written from the behaviour spec SPEC-families.md only (no game code). Region D (.text.d / .rodata.d), state in U3X_BSS.
+// Nothing here changes what goes on the wire for other helpers (no gate bit); the host's join answers (PL-R1) and the
+// owner's kick requests (F1-R1, F1-R4) only change when this PC answers / asks.
+//  * F1-R1 (u3x_fam_member_kick, from u3x_members_check on the owner's toggle frames): a match member is kicked only when
+//    its connection entry exists and is marked dropped, or when it has no entry and the link layer holds no signaling
+//    record for it at all (lnk: no record of that name). A member whose link is still being set up stays. LAN: PS3's
+//    status query reports "connected" there, so a member without an entry is never kicked on LAN.
+//  * F1-R4 (u3x_fam_silent, from u3x_players_check): the owner asks the backend to kick a member that was silent for more
+//    than 20 s every frame (PS3), no 10-s spacing; a guest keeps marking the entry dropped (once).
+//  * F1-R2 / F1-R3 (u3x_fam_gone, from u3x_players_check, every frame, before the link check; SPEC-families2 1): with
+//    the net game manager in match mode 2 (NGM +0x6808 = 0x17d1868) and the post-match byte (NGM +0x6cb0) clear, a gone
+//    non-local record has its character process killed (PS4 0x11a6250 after the handle test) and, in the menus (net
+//    state below 0x19), a gone record that is not the host player is reset by index (PS4 0x72ebd0(NGM, i)).
+//  * F2 MM-R1 (lobby entry = net state 0x11 / 0x12 entered): "required content complete" = this PC's usable PS3 pack
+//    mask (cg R1) is full; kept for the matchmaking search (u3x_fam_content_complete) and logged.
+//  * F2 MM-R2 (SPEC-motd-tips 2, R6): the lobby "tips" are YouTube videos of the dead YouTube data API v2; PS3 shows
+//    nothing today, so nothing is fetched or shown here either (the lobby video panel stays empty).
+//  * Final round (SPEC-families2): MM-R3 team-list mute rows (u3x_fam_team_mute), NP-R4 owned-content word, NP-R5 the
+//    page after connecting + the restored MOTD page, NP-R6 emblem reset (first connect, server notice 1), NP-R8 legacy
+//    mark, N18 the `net-command` native, builder subs 43 / 44 (rename action, PAGE_LOADOUTS).
+//  * MOTD text (SPEC-motd-tips 1, R2..R5): no request; the body is PS3's: the texts of net18.bin's *motd-text-0* ..
+//    *motd-text-9* (one text id each) from the downloaded networking text bank (/data/u3-networking.bin), appended,
+//    at most 2047 bytes, "UNKNOWN STRING!!!" for an id the bank lacks, empty without data; the rest of the page's
+//    requests go to PS4's twin source 0x761bd0 (title 0xc6467f2d, OK 0xab58f9da).
+//  * F2 MM-R5 / F5 NP-R3 (u3x_fam_tick, once per connect, when the startup reaches the lobby): the leaderboard week
+//    (data 0x8466d21a, first word, as u3x_lb_week_board reads it) is logged; when it is there and the profile's stored
+//    week (record +0x1f20) differs, the nine weekly counters (+0x1c54 +0x1c58 +0x1eac +0x1f24 .. +0x1f38) are zeroed,
+//    the week stored, the profile published. Without the data nothing is reset (PS3 always has the value).
+//  * F2 MM-R6 (u3x_fam_action_note, the catch-all's default): each action id no handler took, logged once (32 ids).
+//  * F5 NP-R1 (kind 244 sub 43 = PS4's empty binding of action 0x4a698897, builder request): the system keyboard titled
+//    0xd3c13a7e, prefilled with the name of the loadout being edited (0..4; record +8 + 0x30 slot, 16 bytes); OK stores
+//    at most 15 characters, '|' and '\' become '*', then the profile is published; cancel keeps the name. The keyboard
+//    is polled in u3x_fam_tick (and in sub 44, the page 0x3192a5ea binding, when the builder adds it).
+//  * F4 PL-R1 (u3x_fam_join_rule, the host's held join requests; u3x_join_host_answer for new ones): a 0x10b is answered
+//    only in party state 6 (room, byte; 0 in lobby mode 1) or handed to the game in state 0 (refused there in lobby mode
+//    1 or with the busy flag); every other state holds it, with no 5-s refusal: a held request is dropped unanswered
+//    after the joiner's 20 s. A PS3 requester is no longer refused while this PC is in a match room. The party lock
+//    refusal stays (PC-only setting, owner decision recorded in IMPL-v7.254-fam.md).
+//  * F4 PL-R2 (G21 part B): no "fresh party" retry when the friend sent no 0x1f0 info (a PS3 host): one 20-s window.
+#ifndef U3X_FN_D
+#define U3X_FN_D [[gnu::section(".text.d"), gnu::noinline]]
+#define U3X_RO_D [[gnu::section(".rodata.d")]]
+#endif
+#define FAM_FN [[gnu::section(".text.d"), gnu::noinline, clang::minsize]]   // region D (helpers v7.254 and later)
+#define FAM_RO [[gnu::section(".rodata.d")]]
+#pragma clang section text=".text.d" rodata=".rodata.d"
+// ===== v7.254 fam pure begin =====
+namespace fam {
+// F1-R1: true = kick: the entry exists and is dropped, or there is no entry and no signaling record (online only)
+FAM_FN bool member_kick(bool has_entry, bool dropped, bool has_link, bool lan) {
+    if (has_entry) return dropped;
+    return !lan && !has_link;
+}
+// F1-R2 / F1-R3: the monitor's step for one non-local record this frame (bit 0: release its object, bit 1: reset it)
+constexpr uint32_t GONE_RELEASE = 1, GONE_RESET = 2, ST_MENUS_END = 0x19;
+constexpr int32_t MODE_MATCH = 2;
+FAM_FN uint32_t gone_step(int32_t match_mode, bool post_match, bool gone, bool host_player, uint32_t net_state) {
+    if (match_mode != MODE_MATCH || post_match || !gone) return 0;
+    return GONE_RELEASE | (!host_player && net_state < ST_MENUS_END ? GONE_RESET : 0);
+}
+// NP-R3: the weekly reset of a multiplayer record (PS3 layout); true = changed (the caller publishes)
+constexpr uintptr_t REC_WEEK = 0x1f20;
+FAM_RO const uint16_t weekly[9] = {0x1c54, 0x1c58, 0x1eac, 0x1f24, 0x1f28, 0x1f2c, 0x1f30, 0x1f34, 0x1f38};
+FAM_FN bool weekly_reset(uint8_t *rec, uint32_t week) {
+    uint32_t *stored = reinterpret_cast<uint32_t *>(rec + REC_WEEK);
+    if (*stored == week) return false;
+    *stored = week;
+    for (uint32_t k = 0; k < 9; k++) *reinterpret_cast<uint32_t *>(rec + weekly[k]) = 0;
+    return true;
+}
+// NP-R1: the typed name (UTF-16 units) -> the 16-byte loadout name: 15 characters at most, '|' and '\' -> '*', the
+// first unit outside printable ASCII ends it, the rest zero
+constexpr uint32_t NAME_BYTES = 16, NAME_CHARS = 15;
+FAM_FN void loadout_name(const uint16_t *text, uint8_t *out) {
+    uint32_t n = 0;
+    while (n < NAME_CHARS && text[n] >= 0x20 && text[n] <= 0x7e) {
+        const uint16_t c = text[n];
+        out[n++] = static_cast<uint8_t>(c == '|' || c == '\\' ? '*' : c);
+    }
+    while (n < NAME_BYTES) out[n++] = 0;
+}
+// PL-R1: what the host does with a join request now (the party lock is tested before)
+enum : int { J_HOLD, J_ANSWER, J_TO_GAME, J_REFUSE };
+FAM_FN int join_rule(uint32_t lobby_mode, bool busy, uint32_t state, bool in_party) {
+    if (state == 0) return lobby_mode == 1 || busy ? J_REFUSE : J_TO_GAME;
+    if (state == 6 && in_party) return J_ANSWER;   // {room, byte}; {0, byte} in lobby mode 1 (the answer reads the mode)
+    return J_HOLD;                                 // 1, 2, 5, 7 (and 3, 4, 8): waits in the queue
+}
+// MM-R6: true the first time an id is seen (ids[] holds n of at most cap)
+FAM_FN bool seen_once(uint32_t *ids, uint32_t &n, uint32_t cap, uint32_t id) {
+    for (uint32_t i = 0; i < n; i++)
+        if (ids[i] == id) return false;
+    if (n < cap) ids[n++] = id;
+    return true;
+}
+
+// ---- v7.254 final round (SPEC-families2.md); little-endian words of the PS4 record / blocks
+FAM_FN uint32_t le32(const uint8_t *p) { return p[0] | p[1] << 8 | p[2] << 16 | static_cast<uint32_t>(p[3]) << 24; }
+FAM_FN void put32(uint8_t *p, uint32_t v) {
+    for (int k = 0; k < 4; k++) p[k] = static_cast<uint8_t>(v >> (8 * k));
+}
+// MM-R3 (SPEC-families2 3): the stats block (in-match or post-match): count u32 at +0, the member keys (0xa4 bytes,
+// team byte +7) at +0x50e4, the stat entries (0x130 bytes, in-team position u16 +0) at +0x60cc. The first index whose
+// team is t and whose position is row + 1, -1 = none. The PS4 field offsets are the helper's G30 ones (team) and the
+// spec's candidate (position): a live check prints the result.
+constexpr uint32_t SB_KEYS = 0x50e4, SB_KEY = 0xa4, SB_TEAM = 7, SB_STATS = 0x60cc, SB_STAT = 0x130, SB_MAX = 10;
+FAM_FN int32_t team_row_stats(const uint8_t *block, uint32_t t, uint32_t row) {
+    const uint32_t count = le32(block);
+    for (uint32_t i = 0; i < count && i < SB_MAX; i++) {
+        const uint8_t *s = block + SB_STATS + SB_STAT * i;
+        if (block[SB_KEYS + SB_KEY * i + SB_TEAM] == t && static_cast<uint32_t>(s[0] | s[1] << 8) == row + 1)
+            return static_cast<int32_t>(i);
+    }
+    return -1;
+}
+// the fallback (spec 3.2): row r = the (r+1)th net record of team t in record order; team[i] = 0xff for a free record
+FAM_FN int32_t team_row_records(const uint8_t *team, uint32_t t, uint32_t row) {
+    for (uint32_t i = 0; i < SB_MAX; i++)
+        if (team[i] == t && row-- == 0) return static_cast<int32_t>(i);
+    return -1;
+}
+// NP-R4 (SPEC-families2 4.2): the ten owned-content flags (settings words, 4-byte stride per user) -> the record word;
+// in order, so the ninth (bit 0x80 again) decides that bit
+FAM_RO const uint16_t owned_at[10] = {0x521c, 0x5224, 0x522c, 0x4c50, 0x4c58, 0x4cd8, 0x523c, 0x4cb8, 0x4cc0, 0x4cd0};
+FAM_RO const uint16_t owned_bit[10] = {0x1, 0x2, 0x4, 0x8, 0x10, 0x20, 0x40, 0x80, 0x80, 0x100};
+FAM_FN uint32_t owned_word(const uint8_t *settings, uint32_t user) {
+    uint32_t w = 0;
+    for (uint32_t k = 0; k < 10; k++) {
+        const bool on = le32(settings + owned_at[k] + 4 * user) != 0;
+        w = on ? w | owned_bit[k] : w & ~static_cast<uint32_t>(owned_bit[k]);
+    }
+    return w;
+}
+// NP-R6 (6.2): the default emblem (4 layers x 8 bytes: all zero except layer 2 {+0 3, +2 0xff, +4 10, +5 0xff, +6 0xff})
+constexpr uint32_t REC_EMBLEM = 0x12c8, EMBLEM_BYTES = 32, REC_EMBLEM_DONE = 0x1608;
+FAM_FN void emblem_default(uint8_t *e) {
+    for (uint32_t k = 0; k < EMBLEM_BYTES; k++) e[k] = 0;
+    e[16] = 3;
+    e[18] = 0xff;
+    e[20] = 10;
+    e[21] = 0xff;
+    e[22] = 0xff;
+}
+// the first online connect of a profile (+0x1608 clear): default emblem, +0x1608 set; true = changed
+FAM_FN bool emblem_first(uint8_t *rec) {
+    if (le32(rec + REC_EMBLEM_DONE)) return false;
+    emblem_default(rec + REC_EMBLEM);
+    put32(rec + REC_EMBLEM_DONE, 1);
+    return true;
+}
+// NP-R8 (6.4): the legacy mark, once per profile (+0x1f18 clear): XP (+0x500, signed) above 0 -> +0x1f1c = 1
+constexpr uint32_t REC_XP = 0x500, REC_LEGACY = 0x1f1c, REC_LEGACY_DONE = 0x1f18;
+FAM_FN bool legacy_mark(uint8_t *rec) {
+    if (le32(rec + REC_LEGACY_DONE)) return false;
+    if (static_cast<int32_t>(le32(rec + REC_XP)) > 0) put32(rec + REC_LEGACY, 1);
+    put32(rec + REC_LEGACY_DONE, 1);
+    return true;
+}
+// NP-R5 (5.2 / 5.3): the page after connecting. Online with an EULA row whose version is not the accepted one -> EULA;
+// Online Pass counts as owned (owner); else MOTD online, MULTIPLAYER on LAN
+constexpr uint32_t PG_MULTIPLAYER = 0x53cbb5f2, PG_EULA = 0xda1f28d9, PG_MOTD = 0xd6f98d11;
+FAM_FN uint32_t page_after_connect(bool lan, bool eula_row, uint32_t eula_version, uint32_t accepted) {
+    if (!lan && eula_row && accepted != eula_version) return PG_EULA;
+    return lan ? PG_MULTIPLAYER : PG_MOTD;
+}
+// N18 (SPEC-services2 5.1): (net-command <symbol>): symbol 0x69d69b6e with more than 2 players -> stat 0x778, more than 3
+// -> also 0x78c (for users 0 and 1); returns how many stats are in out[]
+constexpr uint32_t NC_SYMBOL = 0x69d69b6eu, NC_STAT3 = 0x778, NC_STAT4 = 0x78c;
+FAM_FN uint32_t net_command_stats(uint32_t symbol, uint32_t players, uint32_t *out) {
+    uint32_t n = 0;
+    if (symbol != NC_SYMBOL) return 0;
+    if (players > 2) out[n++] = NC_STAT3;
+    if (players > 3) out[n++] = NC_STAT4;
+    return n;
+}
+// ---- SPEC-motd-tips 1 (MOTD body, PS3 rule): net18.bin's ten symbols *motd-text-0* .. *motd-text-9* (a symbol's
+// value = one text id), each id looked up in the downloaded "networking" text bank, the texts appended in order
+// the name ids of *motd-text-0* .. *motd-text-9* (the name-id CRC; fam_test computes them from the names)
+FAM_RO const uint32_t motd_sym[10] = {0x548bd230, 0x869213ec, 0xf4794c3f, 0x26608de3, 0x11aff399,
+                                      0xc3b63245, 0xb15d6d96, 0x6344ac4a, 0xdec39162, 0x0cda50be};
+FAM_RO const char motd_unknown[] = "UNKNOWN STRING!!!";   // the text of an id the bank does not have
+constexpr uint32_t MOTD_BYTES = 0x800;                     // PS3's body buffer: 2047 bytes and the NUL
+constexpr uint32_t DC_COUNT = 0x14, DC_SYMBOLS = 0x18, DC_SYMBOL = 12, DC_TYPE_SYMBOL = 0xc4ab6121u;
+FAM_FN uint32_t be32_at(const uint8_t *p) {
+    return static_cast<uint32_t>(p[0]) << 24 | static_cast<uint32_t>(p[1]) << 16 | static_cast<uint32_t>(p[2]) << 8 | p[3];
+}
+// net18.bin (DC00, big endian): the symbol count at +0x14, symbols {name id, type, offset} from +0x18; the first symbol
+// `name` of type symbol whose 4-byte value lies in the file gives the text id; false = no such symbol
+FAM_FN bool dc_text_id(const uint8_t *f, uint32_t size, uint32_t name, uint32_t &id) {
+    if (!f || size < DC_SYMBOLS) return false;
+    const uint32_t count = be32_at(f + DC_COUNT);
+    for (uint32_t i = 0; i < count && DC_SYMBOLS + static_cast<uint64_t>(DC_SYMBOL) * (i + 1) <= size; i++) {
+        const uint8_t *s = f + DC_SYMBOLS + DC_SYMBOL * i;
+        const uint32_t at = be32_at(s + 8);
+        if (be32_at(s) != name || be32_at(s + 4) != DC_TYPE_SYMBOL || static_cast<uint64_t>(at) + 4 > size) continue;
+        id = be32_at(f + at);
+        return true;
+    }
+    return false;
+}
+// the text bank, read front to back: read(ctx, buf, n) -> bytes (<= 0 = the end); rewind(ctx) starts it again
+// (false = no bank)
+struct Reader {
+    int64_t (*read)(void *ctx, uint8_t *buf, uint32_t n);
+    bool (*rewind)(void *ctx);
+    void *ctx;
+    uint32_t at, n;
+    uint8_t buf[0x400];
+};
+FAM_FN int next_byte(Reader &r) {
+    if (r.at >= r.n) {
+        const int64_t got = r.read(r.ctx, r.buf, sizeof r.buf);
+        if (got <= 0) return -1;
+        r.at = 0;
+        r.n = got > static_cast<int64_t>(sizeof r.buf) ? static_cast<uint32_t>(sizeof r.buf) : static_cast<uint32_t>(got);
+    }
+    return r.buf[r.at++];
+}
+FAM_FN bool next_be32(Reader &r, uint32_t &v) {
+    v = 0;
+    for (int k = 0; k < 4; k++) {
+        const int c = next_byte(r);
+        if (c < 0) return false;
+        v = v << 8 | static_cast<uint32_t>(c);
+    }
+    return true;
+}
+// the bank from its first byte (big endian: u32 count, count x {u32 id, u32 offset}, then the NUL-ended texts, offsets
+// from the first text): text `id` appended to out (n bytes used, at most cap - 1, NUL-ended); false = not in the bank
+FAM_FN bool bank_append(Reader &r, uint32_t id, char *out, uint32_t &n, uint32_t cap) {
+    uint32_t count = 0, key = 0, off = 0, want = 0;
+    bool found = false;
+    if (!next_be32(r, count)) return false;
+    for (uint32_t i = 0; i < count; i++) {
+        if (!next_be32(r, key) || !next_be32(r, off)) return false;
+        if (!found && key == id) {
+            found = true;
+            want = off;
+        }
+    }
+    if (!found) return false;
+    for (uint32_t k = 0; k < want; k++)
+        if (next_byte(r) < 0) return false;
+    for (int c; n + 1 < cap && (c = next_byte(r)) > 0;) out[n++] = static_cast<char>(c);
+    out[n] = 0;
+    return true;
+}
+// the body (R2 / R4): for N = 0..9 the text of *motd-text-N*: a missing symbol skipped, an id the bank does not have
+// (or no bank) gives "UNKNOWN STRING!!!"; appended in order, at most cap - 1 bytes (cut); empty without net18. Texts
+// are kept as they are (UTF-8, the backslash line marks). found = symbols present, unknown = of those not in the bank.
+FAM_FN uint32_t motd_body(const uint8_t *n18, uint32_t size, Reader &bank, char *out, uint32_t cap, uint32_t &found,
+                          uint32_t &unknown) {
+    uint32_t n = 0;
+    out[0] = 0;
+    found = unknown = 0;
+    for (uint32_t k = 0; k < 10; k++) {
+        uint32_t id = 0;
+        if (!dc_text_id(n18, size, motd_sym[k], id)) continue;
+        found++;
+        bank.at = bank.n = 0;
+        if (bank.rewind(bank.ctx) && bank_append(bank, id, out, n, cap)) continue;
+        unknown++;
+        for (uint32_t j = 0; motd_unknown[j] && n + 1 < cap; j++) out[n++] = motd_unknown[j];
+        out[n] = 0;
+    }
+    return n;
+}
+}  // namespace fam
+// ===== v7.254 fam pure end =====
+
+namespace fam {   // (every function used below is declared earlier in this file)
+// image offsets (SPEC-families F1 / SPEC-families2 Evidence and the helper's existing names)
+constexpr uintptr_t NET_LAN = 0x17d5c60, MATCH_MODE = 0x17d1868, POST_MATCH = 0x17d1d10, NET_STATE = 0x1b68810,
+                    LOADOUT = 0x17d9988, NGM = 0x17cb060, NGM_PLAYERS = 0x17cb060 + 0x6a48,
+                    SETTINGS = 0x17b6368, STATS = 0x17dd778, MENU_UI_STATE = 0x17bd080 + 8;
+constexpr uintptr_t FN_KILL_PROCESS = 0x11a6250, FN_RECORD_RESET = 0x72ebd0, FN_EULA_ROW = 0x6a8010;
+constexpr uintptr_t FN_MOTD_SOURCE = 0x761bd0;   // PS4's MOTD text source (source 0x59; the reduced twin of PS3 0x34b890)
+constexpr uintptr_t STATS_IN_MATCH = 8, STATS_POST_MATCH = 0xac10;
+constexpr uintptr_t R_CHAR = 0x10, R_IN_USE = 0xe1, R_TEAM = 0x21c, R_CONNECTION = 0x5b4, R_GONE = 0x5e4, R_KEY = 0x5b8,
+                    R_STRIDE = 0x9c0, R_FIRST = 0x390, P_LOAD_STATE = 0x7ae8, REC_EULA = 0x530, REC_OWNED = 0x162c;
+constexpr uintptr_t S_STARTUP = 680;   // the startup phase of the profile state (G39: 1 NetInit, 2 net level, 3 lobby)
+constexpr uint32_t ST_LOBBY_HOST = 0x11, ST_LOBBY_GUEST = 0x12, DC_WEEK = 0x8466d21a,
+                   TEXT_RENAME = 0xd3c13a7e, KB_RENAME = 12, SLOTS = 5;
+constexpr uint32_t ACT_OWN_TEAM_LIST = 0xb04c828bu, ACT_OTHER_TEAM_LIST = 0xb48d9f3cu;
+constexpr uint32_t MOTD_OK = 0xab58f9dau, TEXT_MOTD_TITLE = 0xc6467f2du, SRC_HELPER = 0xcf, MOTD_TAG = 0x4c414d44u,
+                   ITEM_BYTES = 0x68;
+constexpr uintptr_t REC_LOADOUTS = 8, LOADOUT_SIZE = 0x30;
+constexpr int RC_N18_STATE = 24, RC_N18 = 41, RC_N18_SIZE = 42;   // u3h_rc fields: the RPCN block's net18.bin copy
+FAM_RO const char t_gone[] = "monitor: gone record ";
+FAM_RO const char t_gone_rel[] = ": game object released (F1-R2, PS4 kill 0x11a6250), character handle was valid ";
+FAM_RO const char t_gone_res[] = ": record reset by index (F1-R3, PS4 0x72ebd0), slot ";
+FAM_RO const char t_lobby[] = "lobby entry (net state ", t_content[] = "): content complete ", t_mask[] = " (usable PS3 pack mask ",
+                  t_close[] = ")";
+FAM_RO const char t_motd_body[] = "MOTD: body ", t_motd_syms[] = " bytes, *motd-text-N* symbols ",
+                  t_motd_n18[] = " of 10 (net18.bin ", t_motd_unknown[] = " bytes), not in the text bank ",
+                  t_motd_bank[] = " (/data/u3-networking.bin ", t_motd_open[] = "read)", t_motd_none[] = "missing)",
+                  t_motd_unused[] = "not read: no symbols)";
+FAM_RO const char t_week[] = "connect: leaderboard week ";
+FAM_RO const char t_week_none[] = "connect: no week data (0x8466d21a): leaderboard week 0, weekly counters kept";
+FAM_RO const char t_reset[] = "connect: weekly counters reset, week ", t_to[] = " -> ";
+FAM_RO const char t_owned[] = "connect: owned-content word (record +0x162c) ";
+FAM_RO const char t_emblem[] = "connect: first online connect: default emblem stored (user ";
+FAM_RO const char t_legacy[] = "connect: legacy mark set once (XP > 0 -> +0x1f1c = 1), +0x1f1c = ";
+FAM_RO const char t_next[] = "connect: next page ", t_next_fail[] = " not shown (page not in the menu data): stays on PAGE_MULTIPLAYER";
+FAM_RO const char t_action[] = "menu action without a handler (catch-all): ";
+FAM_RO const char t_rename[] = "loadout rename: slot ", t_saved[] = " named ";
+FAM_RO const char t_kb_fail[] = "loadout rename: keyboard not opened, slot ";
+FAM_RO const char t_mute[] = "team list mute: row ", t_mute_team[] = " team ", t_mute_stats[] = " -> stats index ",
+                  t_mute_rec[] = ", record order ", t_mute_used[] = ", used record ", t_mute_now[] = ", muted ",
+                  t_mute_name[] = " ", t_mute_none[] = ": nobody (no player, no connection or the local player)";
+FAM_RO const char t_notice[] = "server notice 1 (emblem moderation): both users' emblems reset to default";
+FAM_RO const char t_netcmd[] = "net-command: symbol ", t_netcmd_players[] = ", players ", t_netcmd_stats[] = ", challenge stats bumped ";
+FAM_RO const char t_motd_items[] = "MOTD page: items ", t_motd_tagged[] = ", BUTTON_MULTIPLAYER_MOTD_OK (0xab58f9da) to the helper, its source was ";
+FAM_RO const char n_net_command_c[] = "DcNetCommand", n_net_command[] = "net-command";
+FAM_RO const char t_bank_path[] = "/data/u3-networking.bin";   // the server's text1/<lang>.networking, unsealed (launcher)
+struct State {
+    uint32_t last_state, phase_was, n_actions, gone_said, reset_said;
+    uint8_t content, entered, kb_slot;
+    uint32_t actions[32];
+    uint8_t after_pending, motd_seen, motd_dirty;
+};
+U3X_BSS State st;
+U3X_BSS char motd_text[MOTD_BYTES];   // the body the MOTD text items show (set_text keeps the pointer)
+struct BankFile { void *s; int64_t fd; };
+U3X_BSS BankFile bank_file;
+U3X_BSS Reader bank_reader;
+struct NativeRec { uint64_t fn, cname; uint32_t csid, pad0; uint64_t sname; uint32_t ssid, pad1; uint64_t next; };
+static_assert(sizeof(NativeRec) == 0x30, "PS4 native record");
+U3X_BSS NativeRec net_rec;
+
+FAM_FN void say(const char *a, int32_t v) { u3h_so_note(a, nullptr, v, nullptr); }
+// a record's 16-byte key into a line
+FAM_FN void key16(Line &l, const uint8_t *key) {
+    for (int k = 0; k < 16 && key[k] && l.n < 190; k++) l.b[l.n++] = static_cast<char>(key[k]);
+}
+FAM_FN uint8_t *net_record(uintptr_t base, uint32_t i) { return &at<uint8_t>(base + NGM + R_FIRST + R_STRIDE * i); }
+FAM_FN uint8_t *loadout_name_at(uint8_t *rec, uint32_t slot) { return rec + REC_LOADOUTS + LOADOUT_SIZE * slot; }
+FAM_FN uint8_t *menu_rec(uintptr_t base, void *s) {
+    uint8_t *p = r2_G33::g33a::menu_profile(base);
+    if (!p || rd<uint32_t>(p, P_LOAD_STATE) != 3) return nullptr;
+    return u3h_lg_rec(base, s, p);
+}
+FAM_FN uint8_t *user_rec(uintptr_t base, void *s, uint32_t user, uint8_t **profile) {
+    uint8_t *p = u3h_lg_profile(base, user);
+    *profile = p;
+    return p && rd<uint32_t>(p, P_LOAD_STATE) == 3 ? u3h_lg_rec(base, s, p) : nullptr;
+}
+// NP-R1: the keyboard is done: store the name, publish
+FAM_FN void rename_poll(uintptr_t base, void *s) {
+    using namespace r2_G33::g33a;
+    if (!s || word(s, S_KB_PHASE) != KB_RENAME) return;
+    if (rd<KeyboardStatus>(s, S_KB_STATUS)() != static_cast<int>(KB_FINISHED)) return;
+    uint32_t outcome = 1;   // 0 = confirmed
+    const int result = rd<KeyboardResult>(s, S_KB_RESULT)(&outcome);
+    rd<KeyboardClose>(s, S_KB_CLOSE)();
+    word(s, S_KB_PHASE) = KB_FREE;
+    uint8_t *rec = result >= 0 && outcome == 0 ? menu_rec(base, s) : nullptr;
+    if (!rec || st.kb_slot >= SLOTS) return;
+    uint8_t *name = loadout_name_at(rec, st.kb_slot);
+    loadout_name(units(s, S_KB_TEXT), name);
+    u3h_publish(base, s, menu_profile(base));
+    Line l;
+    l.s(t_rename).d(st.kb_slot).s(t_saved);
+    key16(l, name);
+    say(l.z(), -1);
+}
+// NP-R1: action 0x4a698897: open the keyboard on the loadout being edited
+FAM_FN void rename_open(uintptr_t base, void *s) {
+    using namespace r2_G33::g33a;
+    const int32_t slot = at<int32_t>(base + LOADOUT);
+    uint8_t *rec = s ? menu_rec(base, s) : nullptr;
+    if (!rec || slot < 0 || slot >= static_cast<int32_t>(SLOTS) || word(s, S_KB_PHASE) != KB_FREE || !rd<KeyboardOpen>(s, S_KB_OPEN))
+        return say(t_kb_fail, slot);
+    const char *title_text = u3h_text(base, s, TEXT_RENAME);
+    uint16_t *title = units(s, S_KB_TITLE);
+    int n = 0;
+    while (title_text && n < KB_TITLE_CHARS && title_text[n]) {
+        title[n] = static_cast<uint8_t>(title_text[n]);
+        n++;
+    }
+    title[n] = 0;
+    uint16_t *text = units(s, S_KB_TEXT);
+    const uint8_t *name = loadout_name_at(rec, static_cast<uint32_t>(slot));
+    for (int i = 0; i < KB_TEXT_UNITS; i++) text[i] = i < static_cast<int>(NAME_CHARS) ? name[i] : 0;
+    KeyboardRequest request;
+    uint8_t *raw = reinterpret_cast<uint8_t *>(&request);
+    for (uintptr_t i = 0; i < sizeof request; i++) raw[i] = 0;
+    request.user = 1;   // as the clan tag keyboard
+    request.max_length = NAME_CHARS;
+    request.text = text;
+    request.title = title;
+    if (rd<KeyboardOpen>(s, S_KB_OPEN)(&request, nullptr) < 0) {
+        word(s, S_KB_ERROR) = KB_ERROR_OPEN;
+        return say(t_kb_fail, slot);
+    }
+    st.kb_slot = static_cast<uint8_t>(slot);
+    word(s, S_KB_PHASE) = KB_RENAME;
+}
+// the first Connecting step's record work for one user (NP-R4 user 0 only, NP-R6 first connect user 0, NP-R8 both)
+FAM_FN void connect_user(uintptr_t base, void *s, uint32_t user) {
+    uint8_t *p = nullptr;
+    uint8_t *rec = user_rec(base, s, user, &p);
+    if (!rec) return;
+    bool changed = false;
+    if (user == 0) {
+        const uint32_t w = owned_word(&at<uint8_t>(base + SETTINGS), 0);
+        changed = le32(rec + REC_OWNED) != w;
+        put32(rec + REC_OWNED, w);
+        Line l;
+        say(l.s(t_owned).x(w, 3).z(), -1);
+        if (emblem_first(rec)) {
+            changed = true;
+            say(t_emblem, 0);
+        }
+    }
+    if (legacy_mark(rec)) {
+        changed = true;
+        say(t_legacy, static_cast<int32_t>(le32(rec + REC_LEGACY)));
+    }
+    if (changed) u3h_publish(base, s, p);
+}
+// MM-R5 / NP-R3 (+ NP-R4, NP-R6, NP-R8): once per connect
+FAM_FN void connect_step(uintptr_t base, void *s) {
+    connect_user(base, s, 0);
+    connect_user(base, s, 1);
+    const uint8_t *week = u3x_sym_table(s, DC_WEEK);
+    if (!week) return say(t_week_none, -1);
+    const uint32_t w = rd<uint32_t>(week, 0);
+    say(t_week, static_cast<int32_t>(w));
+    uint8_t *p = nullptr;
+    uint8_t *rec = user_rec(base, s, 0, &p);
+    if (!rec) return;
+    const uint32_t old = rd<uint32_t>(rec, REC_WEEK);
+    if (!weekly_reset(rec, w)) return;
+    u3h_publish(base, s, p);
+    Line l;
+    l.s(t_reset).d(old).s(t_to).d(w);
+    say(l.z(), -1);
+}
+// NP-R5: the page after connecting (over PAGE_MULTIPLAYER, which the startup has just shown)
+FAM_FN void after_connect(uintptr_t base, void *s) {
+    const bool lan = at<uint8_t>(base + NET_LAN) != 0;
+    const uint8_t *row = lan ? nullptr : game_call<const uint8_t *>(base + FN_EULA_ROW);
+    uint8_t *p = nullptr;
+    const uint8_t *rec = user_rec(base, s, 0, &p);
+    const uint32_t page = page_after_connect(lan, row && rec, row ? rd<uint32_t>(row, 0xc) : 0, rec ? le32(rec + REC_EULA) : 0);
+    Line l;
+    l.s(t_next).x(page, 8);
+    if (page == PG_MULTIPLAYER) return say(l.z(), -1);
+    if (!u3h_show(base, s, page, 0)) l.s(t_next_fail);
+    else if (page == PG_MOTD) st.motd_seen = 1;
+    say(l.z(), -1);
+}
+// MM-R1: the lobby was (re)entered (the lobby video panel stays empty, as on PS3 today: SPEC-motd-tips 2.5 R6)
+FAM_FN void lobby_entry(uint32_t state) {
+    const uint32_t mask = u3x_cg_own_mask() & 0xff;
+    st.content = mask == 0xff ? 1 : 0;
+    st.entered = 1;
+    Line l;
+    l.s(t_lobby).x(state, 2).s(t_content).d(st.content).s(t_mask).x(mask, 2).s(t_close);
+    say(l.z(), -1);
+}
+// the MOTD text bank file, through the profile state's open / read / close
+FAM_FN int64_t bank_read(void *c, uint8_t *b, uint32_t n) {
+    const BankFile &f = *static_cast<const BankFile *>(c);
+    if (f.fd < 0) return -1;
+    return reinterpret_cast<int64_t (*)(int, void *, uint64_t)>(state_fn(f.s, 5))(static_cast<int>(f.fd), b, n);
+}
+FAM_FN void bank_close(BankFile &f) {
+    if (f.fd >= 0) reinterpret_cast<int64_t (*)(int)>(state_fn(f.s, 7))(static_cast<int>(f.fd));
+    f.fd = -1;
+}
+FAM_FN bool bank_rewind(void *c) {
+    BankFile &f = *static_cast<BankFile *>(c);
+    bank_close(f);
+    f.fd = reinterpret_cast<int64_t (*)(const char *, int, int)>(state_fn(f.s, 4))(t_bank_path, 0, 0);
+    return f.fd >= 0;
+}
+// SPEC-motd-tips 1.2: the body from the loaded data: net18.bin as the RPCN block read it (the same copy the server
+// table comes from) and the text bank file. False = net18.bin not read yet (asked again at the next body request).
+FAM_FN bool motd_build(void *s) {
+    void *m = u3h_rc_mem();
+    const uint8_t *n18 = nullptr;
+    uint32_t size = 0;
+    if (m) {
+        if (!__atomic_load_n(static_cast<const volatile uint32_t *>(u3h_rc(m, RC_N18_STATE)), __ATOMIC_ACQUIRE)) return false;
+        n18 = static_cast<const uint8_t *>(u3h_rc(m, RC_N18));
+        size = *static_cast<const uint32_t *>(u3h_rc(m, RC_N18_SIZE));
+    }
+    bank_file.s = s;
+    bank_file.fd = -1;
+    bank_reader.read = bank_read;
+    bank_reader.rewind = bank_rewind;
+    bank_reader.ctx = &bank_file;
+    uint32_t found = 0, unknown = 0;
+    const uint32_t n = motd_body(n18, size, bank_reader, motd_text, MOTD_BYTES, found, unknown);
+    const bool bank = bank_file.fd >= 0;
+    bank_close(bank_file);
+    Line l;
+    l.s(t_motd_body).d(n).s(t_motd_syms).d(found).s(t_motd_n18).d(size).s(t_motd_unknown).d(unknown);
+    say(l.s(t_motd_bank).s(found ? (bank ? t_motd_open : t_motd_none) : t_motd_unused).z(), -1);
+    return true;
+}
+// MM-R3: toggle the voice mute of the player on a connection entry (the voice block's name list); nothing is sent
+FAM_FN int mute_toggle(uintptr_t base, const uint8_t *entry) {
+    const uint32_t h = vc::entry_hash(entry);
+    if (!h) return -1;
+    const int slot = vc::mute_slot(h);
+    int now = 0;
+    if (slot >= 0) {
+        vc::muted_names[slot] = 0;
+    } else {
+        const int free_slot = vc::mute_slot(0);
+        if (free_slot < 0) return 0;
+        vc::muted_names[free_slot] = h;
+        now = 1;
+    }
+    vc::fix_texts(base);
+    return now;
+}
+}  // namespace fam
+
+extern "C" {
+// F1-R1 (members check): 1 = kick this member
+FAM_FN int u3x_fam_member_kick(uintptr_t base, const uint8_t *member, const uint8_t *entry) {
+    const bool lan = at<uint8_t>(base + fam::NET_LAN) != 0;
+    const bool link = !lan && lnk::find(reinterpret_cast<const char *>(member)) != nullptr;
+    return fam::member_kick(entry != nullptr, entry && rd<uint8_t>(entry, 5), link, lan) ? 1 : 0;
+}
+// F1-R4 (players check): 1 = the entry was silent for more than 20 s; the owner without the 10-s spacing
+FAM_FN int u3x_fam_silent(uintptr_t base, uint8_t *entry, int owner) {
+    if (!owner) return u3h_link_timeout(base, entry);
+    int32_t fresh[32] = {};   // no earlier kick: the 20-s test alone
+    return u3x_link_timeout(base, entry, fresh);
+}
+// F1-R2 / F1-R3 (players check, every non-local record, every frame, before the link check), as PS3's manager update:
+// match mode 2 and the post-match byte clear; gone -> the character process is killed (handle test first, so only the
+// first frame acts); gone, not the host player, net state below 0x19 -> the record is reset by index (which clears gone)
+FAM_FN void u3x_fam_gone(uintptr_t base, uint8_t *np, uint32_t i, const uint8_t *main_player) {
+    using namespace fam;
+    const uint32_t bit = 1u << (i & 31);
+    const bool host = main_player && u3x_net_player_id(main_player) == u3x_net_player_id(np);
+    const bool gone = rd<uint8_t>(np, R_IN_USE) && rd<uint8_t>(np, R_GONE);   // a free slot's stale byte is not a player
+    const uint32_t step = gone_step(at<int32_t>(base + MATCH_MODE), at<uint8_t>(base + POST_MATCH) != 0, gone, host,
+                                    at<uint32_t>(base + NET_STATE));
+    if (!(step & GONE_RELEASE)) {
+        st.gone_said &= ~bit;
+    } else {
+        uint8_t *process = u3x_handle_obj(np + R_CHAR);
+        if (process) game_call<void, uint8_t *>(base + FN_KILL_PROCESS, process);
+        if (!(st.gone_said & bit)) {
+            st.gone_said |= bit;
+            Line l;
+            l.s(t_gone);
+            key16(l, np + R_KEY);
+            say(l.s(t_gone_rel).z(), process ? 1 : 0);
+        }
+    }
+    if (!(step & GONE_RESET)) {
+        st.reset_said &= ~bit;
+    } else {
+        Line l;
+        l.s(t_gone);
+        key16(l, np + R_KEY);
+        if (!(st.reset_said & bit)) say(l.s(t_gone_res).z(), static_cast<int32_t>(i));
+        st.reset_said |= bit;
+        game_call<void, void *, uint32_t>(base + FN_RECORD_RESET, reinterpret_cast<void *>(base + NGM), i);
+    }
+}
+// MM-R1: the content flag of the last lobby entry; before the first one (mm's first search runs from 0x14) the same
+// rule on the usable mask, which cg loads once at start
+FAM_FN int u3x_fam_content_complete(void) {
+    return fam::st.entered ? fam::st.content : (u3x_cg_own_mask() & 0xff) == 0xff ? 1 : 0;
+}
+// PL-R1: the host's rule for a join request (fam::J_*)
+FAM_FN int u3x_fam_join_rule(uint32_t lobby_mode, int busy, uint32_t state, int in_party) {
+    return fam::join_rule(lobby_mode, busy != 0, state, in_party != 0);
+}
+// MM-R6: the catch-all's default (ids the voice rows and the team-list rows take are not logged)
+FAM_FN void u3x_fam_action_note(uint32_t action) {
+    if (action == 0x6547d63cu || action == 0x7273924cu) return;
+    if (action == fam::ACT_OWN_TEAM_LIST || action == fam::ACT_OTHER_TEAM_LIST) return;
+    if (!fam::seen_once(fam::st.actions, fam::st.n_actions, 32, action)) return;
+    Line l;
+    l.s(fam::t_action).x(action, 8);
+    fam::say(l.z(), -1);
+}
+// MM-R3 (from the voice block's action hook, every catch-all action): the in-match team lists' rows. Row r of the own
+// (0xb04c828b) or the other (0xb48d9f3c) team list -> the player with that team and in-team position r + 1 (the stats
+// block: in-match while the match mode is 1 or 2, else post-match) -> its connection entry -> its voice mute toggled.
+// Nothing is sent. The PS4 stats offsets are not confirmed: when the stats rule finds nobody, the record-order rule
+// (spec 3.2 fallback) is used; the line shows both for the live check.
+FAM_FN void u3x_fam_team_mute(uintptr_t base, uint32_t action, int32_t row) {
+    using namespace fam;
+    if ((action != ACT_OWN_TEAM_LIST && action != ACT_OTHER_TEAM_LIST) || row < 0) return;
+    const uint8_t *me = at<const uint8_t *>(base + NGM + 0x370);
+    Line l;
+    l.s(t_mute).d(static_cast<uint32_t>(row));
+    if (!me || !ptr_ok(me)) return say(l.s(t_mute_none).z(), -1);
+    uint32_t t = rd<uint32_t>(me, R_TEAM) & 1;
+    if (action == ACT_OTHER_TEAM_LIST) t = 1 - t;
+    const int32_t mode = at<int32_t>(base + MATCH_MODE);
+    const uint8_t *block = &at<uint8_t>(base + STATS + (mode == 1 || mode == 2 ? STATS_IN_MATCH : STATS_POST_MATCH));
+    const int32_t by_stats = team_row_stats(block, t, static_cast<uint32_t>(row));
+    uint8_t teams[SB_MAX];
+    for (uint32_t i = 0; i < SB_MAX; i++) {
+        const uint8_t *np = net_record(base, i);
+        teams[i] = rd<uint8_t>(np, R_IN_USE) && !rd<uint8_t>(np, R_GONE) ? static_cast<uint8_t>(rd<uint32_t>(np, R_TEAM)) : 0xff;
+    }
+    const int32_t by_order = team_row_records(teams, t, static_cast<uint32_t>(row));
+    const int32_t i = by_stats >= 0 ? by_stats : by_order;
+    l.s(t_mute_team).d(t).s(t_mute_stats).d(static_cast<uint32_t>(by_stats)).s(t_mute_rec).d(static_cast<uint32_t>(by_order));
+    uint8_t *np = i >= 0 ? net_record(base, static_cast<uint32_t>(i)) : nullptr;
+    const int32_t connection = np && np != me ? rd<int32_t>(np, R_CONNECTION) : -1;
+    const uint8_t *entry = connection != -1 ? u3x_entry_by_id(base, connection) : nullptr;
+    if (!entry) return say(l.s(t_mute_none).z(), -1);
+    const int now = mute_toggle(base, entry);
+    l.s(t_mute_used).d(static_cast<uint32_t>(i)).s(t_mute_name);
+    key16(l, np + R_KEY);
+    say(l.s(t_mute_now).z(), now);
+}
+// kind 244 subs 43..47 (builder subs 43 / 44, v7.254 images): 43 the Rename action 0x4a698897 (r[1] = the action
+// event), 44 the PAGE_LOADOUTS binding 0x3192a5ea (r[1] = the page event: +0 type, 6 = frame)
+FAM_FN int u3x_fam_hook(uintptr_t base, void *s, uint64_t *r) {
+    if (r[0] == 43) fam::rename_open(base, s);
+    else if (r[0] == 44 && r[1] && rd<uint32_t>(reinterpret_cast<const void *>(r[1]), 0) == 6) fam::rename_poll(base, s);
+    return 0;
+}
+// N18 / NP-R7 (SPEC-services2 5.1, owner decision 2026-11-24): PS3's `net-command` effect, done by the helper itself.
+// Symbol 0x69d69b6e: local users 0 and 1 get +1 on challenge stat 0x778 with more than 2 players in the match (net game
+// manager +0x6a48, the PS4 place of PS3's +0x555c) and on 0x78c with more than 3; G22's u3x_pm_challenge applies a
+// bump only when the challenge row (table 0xb630d01c) exists and is active (and the profile is not excluded). Meant to
+// run at the moment PS3 1.19's ss-coop-adv-airport calls `(net-command 0x69d69b6e)` (its new state 0x5c78e9ca); PS4's
+// Airport script stays as it is and has no such call, and that moment is not yet a helper hook (IMPL-v7.254.md). Returns
+// the number of stats bumped per user.
+FAM_FN uint32_t u3x_fam_net_command_effect(uintptr_t base, uint32_t symbol) {
+    using namespace fam;
+    const uint32_t players = at<uint8_t>(base + NGM_PLAYERS);
+    uint32_t stats[2];
+    const uint32_t n = net_command_stats(symbol, players, stats);
+    void *s = u3h_fl_state();
+    for (uint32_t k = 0; k < n && s; k++)
+        for (uint32_t u = 0; u < 2; u++) u3x_pm_challenge(base, s, u, stats[k], 1, 0);
+    Line l;
+    l.s(t_netcmd).x(symbol, 8).s(t_netcmd_players).d(players).s(t_netcmd_stats);
+    say(l.z(), static_cast<int32_t>(n));
+    return n;
+}
+// the script native `net-command` (one symbol argument, returns #f), registered as on PS3; PS4 scripts never call it
+FAM_FN int64_t u3x_fam_net_command(int32_t argc, uint64_t *argv, void *) {
+    const uintptr_t base = at<uintptr_t>(reinterpret_cast<uintptr_t>(u3h_ext()) + 0x21b0);   // the natives' image base
+    if (!base || argc < 1 || !argv) return 0;
+    u3x_fam_net_command_effect(base, static_cast<uint32_t>(argv[0]));
+    return 0;
+}
+// kind 44 (C natives_link, before the game copies its native list 0x1b3b4b0): `net-command` joins the list once
+FAM_FN void u3x_fam_natives_link(uintptr_t base) {
+    using namespace fam;
+    uint64_t *head = &at<uint64_t>(base + 0x1b3b4b0);
+    for (uint64_t r = *head; r; r = reinterpret_cast<const NativeRec *>(r)->next)
+        if (r == reinterpret_cast<uint64_t>(&net_rec)) return;
+    net_rec.fn = reinterpret_cast<uint64_t>(&u3x_fam_net_command);
+    net_rec.cname = reinterpret_cast<uint64_t>(n_net_command_c);
+    net_rec.csid = 0x4dc768f4u;   // "net-command"
+    net_rec.sname = reinterpret_cast<uint64_t>(n_net_command);
+    net_rec.ssid = 0x4dc768f4u;
+    net_rec.next = *head;
+    *head = reinterpret_cast<uint64_t>(&net_rec);
+}
+// NP-R6: server notice 1 (C u3h_server_notice): both users' emblems to the default, stored, profile published
+FAM_FN void u3x_fam_notice1(uintptr_t base) {
+    using namespace fam;
+    void *s = u3h_fl_state();
+    if (!s) return;
+    for (uint32_t u = 0; u < 2; u++) {
+        uint8_t *p = nullptr;
+        uint8_t *rec = user_rec(base, s, u, &p);
+        if (!rec) continue;
+        emblem_default(rec + REC_EMBLEM);
+        u3h_publish(base, s, p);
+    }
+    say(t_notice, -1);
+}
+// NP-R5: PAGE_MULTIPLAYER_MOTD opened. The import's page (recipe 1.32.3, converted from PS3 1.19) has one element,
+// BUTTON_MULTIPLAYER_MOTD_OK 0xab58f9da (OK -> PAGE_MULTIPLAYER, G32), and no text ids: PS3's MOTD text source sits on
+// that element (its source word +0x34 holds PS3's enum 0x5a = PS4 0x59, the source 0x761bd0). The element goes to the
+// helper (source 0xcf, tag 'LAMD'; C retag list at page show), which fills the title and the body. The body is built
+// again from the loaded data at the next body request (SPEC-motd-tips 1.2: nothing kept apart from the downloaded files).
+FAM_FN void u3x_fam_motd_retag(uint8_t *page) {
+    using namespace fam;
+    if (rd<uint32_t>(page, 8) != PG_MOTD) return;
+    st.motd_seen = 1;
+    st.motd_dirty = 1;
+    const uint8_t *list = rd<const uint8_t *>(page, 0x48);
+    uint8_t *items = list ? rd<uint8_t *>(list, 8) : nullptr;
+    const uint32_t count = list ? rd<uint32_t>(list, 0) : 0;
+    int32_t was = -1;
+    for (uint32_t i = 0; items && i < count && i < 64; i++) {
+        uint8_t *item = items + ITEM_BYTES * i;
+        if (rd<uint32_t>(item, 8) != MOTD_OK) continue;
+        if (rd<uint32_t>(item, 0x34) != SRC_HELPER) was = static_cast<int32_t>(rd<uint32_t>(item, 0x34));
+        *reinterpret_cast<uint32_t *>(item + 0x34) = SRC_HELPER;
+        *reinterpret_cast<uint32_t *>(item + 0x40) = MOTD_TAG;
+    }
+    Line l;
+    say(l.s(t_motd_items).d(count).s(t_motd_tagged).z(), was);   // -1: no such element (or already the helper's)
+}
+// the MOTD element's requests (SPEC-motd-tips 1.2): the body (op 1) is PS3's ten-symbol body (motd_body), built once per
+// page show from the loaded files (they change only at NetInit); empty without data, no fallback text. The title (op 2)
+// is text 0xc6467f2d. The rest (layout op 4, op 6, the default button OK 0xab58f9da op 0x13) is PS4's own MOTD source
+// 0x761bd0, which answers them as PS3 does.
+FAM_FN int u3x_fam_motd_source(uintptr_t base, int32_t *ev, void *s) {
+    using namespace fam;
+    const uint8_t *source = rd<const uint8_t *>(ev, 0x98);
+    if (!source || rd<uint32_t>(source, 0x1c) != MOTD_TAG) return 0;
+    if (ev[0] == 1) {
+        if (st.motd_dirty && s && motd_build(s)) st.motd_dirty = 0;
+        u3h_set_text(ev, motd_text);
+    } else if (ev[0] == 2) {
+        if (const char *t = s ? u3h_text(base, s, TEXT_MOTD_TITLE) : nullptr) u3h_set_text(ev, t);
+    } else {
+        game_call<void, int32_t *>(base + FN_MOTD_SOURCE, ev);
+    }
+    return 1;
+}
+// x060 (C): the helper's own MOTD dialog only when the MOTD page was not shown in this session
+FAM_FN int u3x_fam_motd_seen(void) { return fam::st.motd_seen; }
+// every frame (ring tick): lobby entry, the connect step, the page after connecting, the rename keyboard
+FAM_FN void u3x_fam_tick(uintptr_t base, Log) {
+    using namespace fam;
+    void *s = u3h_fl_state();
+    const uint32_t state = at<uint32_t>(base + NET_STATE);
+    const bool lobby = state == ST_LOBBY_HOST || state == ST_LOBBY_GUEST;
+    const bool was = st.last_state == ST_LOBBY_HOST || st.last_state == ST_LOBBY_GUEST;
+    if (lobby && !was) lobby_entry(state);
+    st.last_state = state ? state : 1;
+    if (!s) return;
+    const uint32_t phase = rd<uint32_t>(s, S_STARTUP);
+    if (phase == 1 && st.phase_was != 1) st.motd_seen = 0;   // NetInit: a new session for the x060 test
+    if (phase == 3 && (st.phase_was == 1 || st.phase_was == 2)) {
+        connect_step(base, s);
+        st.after_pending = 1;
+    }
+    st.phase_was = phase;
+    if (st.after_pending && phase == 3) {
+        const uint32_t ui = at<uint32_t>(base + MENU_UI_STATE);
+        if (ui != 7 && ui != 8) {
+            st.after_pending = 0;
+            after_connect(base, s);
+        }
+    }
+    rename_poll(base, s);
+}
+}  // extern "C"
+#pragma clang section text=".text.ext" rodata=".rodata.ext"   // back to the file default (region B)
+// ===== v7.254 fam end =====

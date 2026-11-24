@@ -376,6 +376,11 @@ __attribute__((visibility("hidden"))) int32_t u3x_queue_post(uintptr_t base,cons
 __attribute__((visibility("hidden"))) int32_t u3x_queue_send(uintptr_t base,const uint8_t *id,uint32_t type,const void *data,uint32_t length);
 __attribute__((visibility("hidden"))) uint64_t u3x_network_usec(void);
 __attribute__((visibility("hidden"))) void u3x_retag_net_profile(uint8_t *page);
+__attribute__((visibility("hidden"))) void u3x_fam_motd_retag(uint8_t *page);   /* v7.254 fam final round (C++): restored MOTD page */
+__attribute__((visibility("hidden"))) int u3x_fam_motd_source(uintptr_t base,int32_t *ev,void *s);
+__attribute__((visibility("hidden"))) int u3x_fam_motd_seen(void);
+__attribute__((visibility("hidden"))) void u3x_fam_natives_link(uintptr_t base);   /* N18 net-command */
+__attribute__((visibility("hidden"))) void u3x_fam_notice1(uintptr_t base);   /* NP-R6 server notice 1 */
 __attribute__((visibility("hidden"))) int u3x_net_profile_source(uintptr_t base,int32_t *ev,void *s);
 __attribute__((visibility("hidden"))) int u3x_film_select(uintptr_t base,void *s,int idx);
 __attribute__((visibility("hidden"))) int u3x_film_protect(uintptr_t base,void *s,int on);
@@ -534,6 +539,7 @@ __attribute__((visibility("hidden"))) void u3x_history_thread(uintptr_t base,voi
 __attribute__((visibility("hidden"))) void u3x_players_met_add(uintptr_t base,void *s,const uint8_t *names,uint32_t n,int flag);
 __attribute__((visibility("hidden"))) void u3x_players_met_fetch(uintptr_t base,void *s);
 __attribute__((visibility("hidden"))) void u3x_match_players(uintptr_t base,void *s);
+__attribute__((visibility("hidden"))) void u3x_recent_match(uintptr_t base,void *s);   /* v7.254 recent (u3x_fixes.cpp "v7.254 recent" block) */
 __attribute__((visibility("hidden"))) void u3x_friend_events(uintptr_t base);
 /* v7.164: next batch, part 13 (u3x_fixes.cpp) */
 __attribute__((visibility("hidden"))) int u3x_h01_loaded(uintptr_t base,uint32_t sid);
@@ -552,6 +558,8 @@ __attribute__((visibility("hidden"))) int u3x_round_start(uintptr_t base,const u
 __attribute__((visibility("hidden"))) void u3x_time_sample(uintptr_t base,int32_t t0,int32_t th);
 __attribute__((visibility("hidden"))) int u3x_jip_wait(uintptr_t base,uint64_t room,int start,void (*log)(uintptr_t,const char*));   /* v7.252 */
 __attribute__((visibility("hidden"))) int u3x_sync_gate(uintptr_t base,const uint8_t *host_member);   /* v7.252 */
+__attribute__((visibility("hidden"))) int u3x_jip2_md_skip(uintptr_t base,uint8_t *leader,uint64_t room);   /* v7.254 jip (A7 R13) */
+__attribute__((visibility("hidden"))) int u3x_jip2_info_skip(uintptr_t base,const uint8_t *from);
 /* v7.253 start (u3x_fixes.cpp, SPEC-custom-start A5): the PS3 Custom Game start sequence */
 __attribute__((visibility("hidden"))) int u3x_start_hook(uintptr_t base,uint64_t *r);   /* kind 244 subs 28 / 29 */
 __attribute__((visibility("hidden"))) int u3x_start_on(uintptr_t base);
@@ -772,6 +780,11 @@ __attribute__((visibility("hidden"))) void u3x_presence_swap(uint8_t *d);
 __attribute__((visibility("hidden"))) void u3x_ox_fetch(void *m,uint32_t ip);
 __attribute__((visibility("hidden"))) uint32_t u3x_report_line(char *line,const char *me,const char *who,const char *why);
 __attribute__((visibility("hidden"))) uint32_t u3x_heartbeat_line(char *line,const char *me,int matchmaking);
+__attribute__((visibility("hidden"))) void u3x_svc_rc_tick(void *m,uint32_t matchmaking);   /* v7.254 svc (private C++) */
+__attribute__((visibility("hidden"))) int u3x_svc_play_gate(uintptr_t base,void *s);   /* v7.254 svc */
+__attribute__((visibility("hidden"))) int32_t u3x_svc_ban_notice(uintptr_t base,int32_t *arg);
+__attribute__((visibility("hidden"))) void u3x_svc_report_wait(uintptr_t base);   /* v7.254 svc hooks (builder sub 37) */
+__attribute__((visibility("hidden"))) int u3x_svc_hook(uintptr_t base,uint64_t *r);
 __attribute__((visibility("hidden"))) uint32_t u3x_lbs_get_line(char *line,uint32_t board,const char *names,uint32_t n);
 __attribute__((visibility("hidden"))) uint32_t u3x_lbs_range_line(char *line,uint32_t board,uint32_t first,uint32_t last);
 __attribute__((visibility("hidden"))) uint32_t u3x_lbs_update_line(char *line,uint32_t board,const char *name,int64_t score,const uint8_t *blob64);
@@ -821,6 +834,8 @@ __attribute__((visibility("hidden"))) int u3x_latejoin_closed(uintptr_t base,voi
 __attribute__((visibility("hidden"))) void u3x_elim_wait_set(uintptr_t base);   /* G35 */
 __attribute__((visibility("hidden"))) int u3x_elim_round_end_hold(uintptr_t base,uint64_t *r);   /* G35 */
 __attribute__((visibility("hidden"))) void u3x_elim_wait_text(uintptr_t base);   /* G35 */
+__attribute__((visibility("hidden"))) int u3x_gaps_elim_hold(uintptr_t base,uint64_t *r);   /* v7.254 open O2 */
+__attribute__((visibility("hidden"))) void u3x_gaps_elim_text(uintptr_t base);   /* v7.254 open O2 */
 __attribute__((visibility("hidden"))) int u3x_m03_startmatch(uintptr_t base,void *s);   /* G36 */
 __attribute__((visibility("hidden"))) int u3x_onb_startmatch(uintptr_t base,void *s);   /* G36 */
 __attribute__((visibility("hidden"))) int u3x_n04_close(uintptr_t base,void *s);   /* G36 */
@@ -1199,6 +1214,7 @@ __attribute__((visibility("hidden"))) int u3x_pm_map_is(uintptr_t base,void *s,u
 __attribute__((visibility("hidden"))) void u3x_pm_challenge(uintptr_t base,void *s,uint32_t u,uint32_t id,int32_t v,int bit);
 __attribute__((visibility("hidden"))) int u3x_n13_on(void);
 __attribute__((visibility("hidden"))) void u3x_pm119(uintptr_t base,void *s,uint8_t *param);
+__attribute__((visibility("hidden"))) void u3x_mm_after_match(uintptr_t base);   /* v7.254 open O7 */
 /* v7.211: fourth split, part 15 (u3x_fixes.cpp) */
 __attribute__((visibility("hidden"))) void *u3x_onb_obj(uintptr_t base);
 __attribute__((visibility("hidden"))) void u3x_onb_strcpy(char *d,const char *s,uint32_t n);
@@ -1719,6 +1735,7 @@ static int prepare_lobby_menu(int32_t *header,int keep_box){
   k04_retag(page);   /* agent K k001: PAGE_CUSTOMRULES Friendly Fire style, Time Limit source */
   m04_retag(page);   /* agent M m004: PAGE_PLAYLISTS list (online semantics in offline mode) */
   h21_retag(page);   /* fixer H h021: PAGE_OPTIONS Credits hidden in MP (PS3 1.19 has no Credits button) */
+  u3x_fam_motd_retag(page);   /* v7.254 fam (SPEC-families2 NP-R5): restored PAGE_MULTIPLAYER_MOTD, its OK element 0xab58f9da (the MOTD text source) to the helper */
  }
  return ok;
 }
@@ -1876,7 +1893,7 @@ EXT static void lobby_focus(uintptr_t base,ProfileState *s){
  uint32_t ui=*(uint32_t*)(base+0x17bd080+8);
  uint64_t *fl=(uint64_t*)((uint8_t*)s+0x2400); /* lobby focus log: [0] frames on page, [1] changes, [2] last id, [3] guard moves, [4] redirects, [6..21] ring {frame<<32|id} */
  if(!page||*(uint32_t*)(page+0x10)!=0x53cbb5f2){s->focus_done=0;fl[0]=0;return;}
- {static uint32_t x60_motd EXT_BSS;if(onb_rows_online()&&x60_motd<=40&&++x60_motd==40)show_dialog(base,s,0x60edaa4fu,0xc6467f2du,0,0,0,0xe1e040aau);}   /* x060 */
+ {static uint32_t x60_motd EXT_BSS;if(onb_rows_online()&&!u3x_fam_motd_seen()&&x60_motd<=40&&++x60_motd==40)show_dialog(base,s,0x60edaa4fu,0xc6467f2du,0,0,0,0xe1e040aau);}   /* x060 */
  fl[0]++;
  fl[5]=(fl[5]&0xffffffffull)|((uint64_t)*(uint32_t*)(base+0x17bd080+0x14fc)<<32); /* popup page last opened by 0x6528d0 */
  {uint32_t n=*(uint32_t*)(page+0xac);uint8_t **controls=*(uint8_t***)(page+0xb0);uint32_t fid=0xffffffffu;
@@ -3014,6 +3031,7 @@ SR(NetSpawnEntity,8,0x797440,1) SR(NetSpawnEntityAt,9,0x797510,1) SR(ObjectInReg
 SR(GroupSpawnedCount,12,0x1080a30,0) SR(NetActiveCount,13,0x79b990,0) SR(NetIsHost,14,0x796b80,0) SR(NetAllInRegion,15,0x7976f0,0)
 EXT static void g6_link(uintptr_t base);   /* coop-visual-v7106 grab g006: logging wrappers of the ss-npc-grapple natives */
 EXT static void natives_link(uintptr_t base){
+ u3x_fam_natives_link(base);   /* v7.254 fam (N18): the net-command native */
  X.nbase=base;X.nat[0]++;
  melee_restore(base);g6_link(base);   /* grab g006 */
  SRL(BattleSelect,0x1bbe508) SRL(Schema,0x1bbe538) SRL(CSpawnNpc,0x1b56460) SRL(CSpawnNpcS,0x1b56490)
@@ -3562,7 +3580,7 @@ EXT static int32_t pm_type(uintptr_t base,ProfileState *s){return u3x_pm_type(ba
 EXT static int pm_coop(uintptr_t base,ProfileState *s){return u3x_pm_coop(base,s);}   /* f_310c68 */
 EXT static int pm_ranked(uintptr_t base,ProfileState *s){return u3x_pm_ranked(base,s);}   /* f_315240 */
 #define n13_mm X.ea[94]   /* the flag lives in ExtState (no BSS symbol moves) */
-EXT static void pm119(uintptr_t base,ProfileState *s,uint8_t *param){u3x_pm119(base,s,param);}
+EXT static void pm119(uintptr_t base,ProfileState *s,uint8_t *param){u3x_pm119(base,s,param);u3x_mm_after_match(base);}   /* v7.254 open O7: matchmaking stays in the room */
 /* ===== agent A a018: friends (PS3 1.19 NetFriends module 0x2ff08c..0x3017c0, friends datasources, quick actions) =====
  * PS4 kept the NetFriends object (PS3 0x1235900 = PS4 0x17caeb0, static init 0x71f8e8) and the UI that reads it (row click
  * 0x671f60 = f_29331c, players-met click 0x671580 = f_287e00, PLAYERSMET source 0x75e2e0 = f_351954), but dropped the module
@@ -3665,6 +3683,7 @@ EXT static void fr_pm_add(uintptr_t base,ProfileState *s,const uint8_t *names,ui
  * ones f_367cd8 = trackers NGM+0x370+8u; NpId np+0x430 -> PS4 np+0x5b8, the member key), online only -> f_2864dc =
  * f_2fff84 (wait for the list thread) + f_3011a8(nf, names, n, 1). Called from the helper's match setup hook (kind 10). */
 EXT static void fr_match_players(uintptr_t base,ProfileState *s){
+ u3x_recent_match(base,s);   /* v7.254 recent: the remote players to u3-recent-players.txt (launcher "Recently played") */
  u3x_match_players(base,s);}   /* v7.163 C++ */
 /* f_295480's friend events (1.19 0x295578..0x295598): offline (0) / presence (1): f_2fff84 (wait for the list thread),
  * f_2ff548(nf, npid, 0) */
@@ -4845,6 +4864,7 @@ JPX static int fl_decide(LanBe *be,uintptr_t base,ProfileState *s,uint8_t *m,uin
   if(once!=((uint8_t)room|1)){once=(uint8_t)room|1;static const char t_n[]="join in progress: the host's match takes no late joiner now (game type, rules or too late): staying in the party";so_note(t_n,0,-1,0);}
   return 0;}
  fl_jip=(!be&&(m[0x40+0x32]&4))?1:0;   /* host plays (net state 0x1d, x022): join in progress */
+ if(fl_jip&&u3x_jip2_md_skip(base,m,room)){fl_jip=0;return 0;}   /* v7.254 jip (R13): a JIP v2 leader is joined in its match only by a 0x11b */
  if(fl_jip){static const char t_j[]="join in progress: host playing, joining its room";so_note(t_j,0,-1,0);}
  return 1;}
 /* PS3 1.19 CLIENT_CUSTOM_LATE_JOIN entry (0x3282b0..0x328378, page handler f_327fe8 once the room is joined and the host's
@@ -4943,6 +4963,7 @@ JPX static void fj_dir_tick(uintptr_t base,ProfileState *s){
  uint8_t *ps=LNB_SESS_PARTY(base);int32_t now=*(int32_t*)(base+0x17b4a90u+0x114);
  if(!*(uint64_t*)(ps+0x18)||!fj_hi.room||lnb_followed==fj_hi.room||fj_hi.room==ng_bad_room||jip_on){fj_dir_t=0;return;}
  if(now-fj_dir_t<3*300)return;
+ if(u3x_jip2_info_skip(base,fj_from)){fj_dir_t=0;return;}   /* v7.254 jip (R13): a JIP v2 leader: only a 0x11b starts a late join */
  if(!(fj_hi.flags&2)){fj_dir_t=0;so_note(t_n,0,-1,0);return;}
  if(*(uint32_t*)(base+0x1b68810u)!=0u||!s)return;   /* only from the idle lobby */
  fj_dir_t=0;
@@ -5557,14 +5578,12 @@ EXT static void rpt_queue(const char *who,const char *why){
  int k=0;for(;who[k]&&k<16;k++)rpt_who[k]=who[k];rpt_who[k]=0;
  uint32_t n=u3x_report_line(rpt_line,(const char*)m->me,who,why);rpt_line[n]=0;   /* r2 S05 C++ (private) */
  __atomic_store_n(&rpt_pend,n,__ATOMIC_RELEASE);}
-static volatile uint32_t hb_mm EXT_BSS;static uint32_t hb_wait EXT_BSS,hb_logged EXT_BSS;   /* v7.80 rf15 */
+static volatile uint32_t hb_mm EXT_BSS;   /* v7.80 rf15 */
+/* v7.254 svc: the heartbeat (now with the PS3 timing and fields), location and clan-tag filter requests the game thread
+ * posts are run here (C++ "v7.254 svc private"; SPEC-services R1 / R2 / R10) */
 EXT static void hb_tick(RcMem *m){
  if(rc_srv_ok()!=1||!nl_rep_ip||!m->me[0])return;
- if(hb_wait&&++hb_wait<240)return;hb_wait=1;
- char q[160];uint32_t n=u3x_heartbeat_line(q,(const char*)m->me,(int)__atomic_load_n(&hb_mm,__ATOMIC_ACQUIRE));   /* r2 S05 C++ (private) */
- uint8_t rp[8];clear(rp,sizeof(rp));int got=-1;
- plat_sock f=nl_connect(nl_rep_ip,u3h_default_port(0));if(f!=PLAT_BADSOCK){if(nl_hello(m,f,"heartbeat-server")>0)got=nl_xchg(m,f,(const uint8_t*)q,n,rp,7);plat_sock_close(f);}
- if(hb_logged<2){hb_logged++;static const char t_a[]="heartbeat sent, the server answered ",t_b[]=" byte(s)";so_note(t_a,0,got,t_b);}}
+ u3x_svc_rc_tick(m,__atomic_load_n(&hb_mm,__ATOMIC_ACQUIRE));}
 /* ---- v7.81 rf16: leaderboard-server ---- */
 static uint32_t iv_b64(char *o,const uint8_t *s,uint32_t n);
 typedef struct{volatile uint32_t st;uint32_t kind,ln,max,rows;int32_t result;uint8_t *rowbuf,*blobs;char line[2048];}LbsReq;
@@ -6938,6 +6957,7 @@ static void onb_fail_dialog(uintptr_t base,ProfileState *s){u3x_online_failed(ba
  * Online opens PAGE_LAN_CHOOSE_PROFILE 0x4608c1ad like the LAN choice does and NetInit runs at the usual startup point.
  * No server configured = PS3's network failure: the dialog, nothing initialised (so the shutdown has nothing to undo). */
 EXT static void onb_play_online(uintptr_t base,ProfileState *s){
+ if(u3x_svc_play_gate(base,s))return;   /* v7.254 svc: content rating, ban (SPEC-services R15 / R9) */
  u3x_play_online(base,s);}   /* v7.178 C++ */
 EXT static void onb_lan_chosen(void){u3x_lan_chosen();}   /* v7.178 C++ */
 /* startup_tick phase 1, before NetInit: the profile name goes to net +0x3b8 (as the LAN path does a little later) and
@@ -8016,6 +8036,7 @@ int u3_profile_event(uintptr_t base,int32_t *event,int kind,ProfileState *s,uint
   if(coop_mods_source(base,event,s))return 1;
   if(missions_source(base,event,s))return 1;
   if(netprofile_source(base,event,s))return 1;   /* agent A a007 */
+  if(u3x_fam_motd_source(base,event,s))return 1;   /* v7.254 fam (NP-R5, SPEC-motd-tips 1): the MOTD text (net18 symbols + networking text bank) */
   if(records_source(base,event,s))return 1;   /* agent A a009 */
   if(profile_box_source(base,event,s))return 1;
   if(custom_load_source(base,event,s))return 1;
@@ -8515,7 +8536,7 @@ EXT static void party_kick_promote(uintptr_t base,int promote){
 EXT static void rpt_popup(uintptr_t base,ProfileState *s){u3x_report_popup(base,s);}   /* v7.213 C++ (G34) */
 EXT static void rpt_pick(uintptr_t base,ProfileState *s,uint32_t k){
  const char *why=u3x_report_reason(sym_table(s,0xffac56f2u),k);if(!why)return;   /* v7.114 C++ */
- rpt_queue((const char*)(base+0x17c3871u),why);}
+ rpt_queue((const char*)(base+0x17c3871u),why);u3x_svc_report_wait(base);}   /* v7.254: the report wait popup 0xceba0940 (builder sub 37) */
 #pragma clang section text="" rodata=""
 /* ===== end agent J j001 ===== */
 /* ===== agent J j002: Cinema film select crash (tester run baseline-1793258403535563800, v6.09 + FORCE_END=40) =====
@@ -9979,6 +10000,7 @@ EXT static int n03_source(uintptr_t base,int32_t *event,ProfileState *s){
  if(tab)((void(*)(int32_t*))(base+0x76bbf0u))(event);
  else done=fr_sources(base,event,s);
  *lan=keep;return done;}
+__attribute__((visibility("hidden"))) int u3x_fam_hook(uintptr_t base,void *s,uint64_t *r);   /* v7.254 fam (C++) */
 EXT static int n_kind(uintptr_t base,int kind,ProfileState *s,uint64_t *r){
  (void)s;if(!r||!base||kind!=244)return 0;
  if(r[0]==3||r[0]==4||r[0]==6||r[0]==7)return u3x_ring_draw(base,r);   /* C++ ring tint: 3/4 around the drawable update, 6/7 around each submesh draw (v7.222) */
@@ -9989,6 +10011,8 @@ EXT static int n_kind(uintptr_t base,int kind,ProfileState *s,uint64_t *r){
  if(r[0]==26||r[0]==27)return u3x_hs_process(base,r);   /* v7.253 hs: Process of StartConnection / ConnectionDone (builder add_ps3net_hooks) */
  if(r[0]==28||r[0]==29)return u3x_start_hook(base,r);   /* v7.253 start (A5 H1 / H2): settings-event sender entry, LoadLevels guest gate */
  if(r[0]==30)return u3x_coop_vox(base,s,r,ol01_print);   /* v7.253 coop: speech request entry / exit (R15) */
+ if(r[0]==37||r[0]==38)return u3x_svc_hook(base,r);   /* v7.254 svc: the report / network-start wait popup handlers (builder subs 37 / 38) */
+ if(r[0]>=43&&r[0]<=47)return u3x_fam_hook(base,s,r);   /* v7.254 fam: 43 loadout rename action, 44 its page (builder requests) */
  return n03_hdr(base,r);}
 #pragma clang section text="" rodata=""
 /* ===== end fixer L n003 ===== */
@@ -11042,6 +11066,7 @@ U3H void u3h_mission_take(uintptr_t base,void *s){mission_take(base,(ProfileStat
 U3H void u3h_party_kick_promote(uintptr_t base,int promote){party_kick_promote(base,promote);}
 U3H void u3h_report_popup(uintptr_t base,void *s){rpt_popup(base,(ProfileState*)s);}
 U3H void u3h_report_pick(uintptr_t base,void *s,uint32_t row){rpt_pick(base,(ProfileState*)s,row);}
+U3H uint32_t u3h_rpt_busy(void){return __atomic_load_n(&rpt_pend,__ATOMIC_ACQUIRE);}   /* v7.254 svc hooks: a report is being sent */
 U3H void u3h_view_stats(uintptr_t base,void *s){i05_stats(base,(ProfileState*)s);}
 U3H void u3h_lan_delete_profile(uintptr_t base,void *s,uint32_t action){lan_delete_profile(base,(ProfileState*)s,action);}
 U3H int u3h_profiles_save(void *s,const void *store){return save((ProfileState*)s,(const ProfileFile*)store);}   /* r2 G28 */
@@ -11220,6 +11245,7 @@ U3H void *u3h_rc(void *m_,int field){RcMem *m=(RcMem*)m_;
   case 30:return &sm_keyok;case 31:return sm_keyb;case 32:return &rp_st;case 33:return &rp_try;case 34:return &nl_tk_ok;case 35:return &nl_rep_ip;case 36:return &nl_rep_port;
   case 37:return m->ox_rec;case 38:return (void*)&ox_state;case 39:return ox_name;   /* r2 S05: the other player's record, its state, its name */
   case 40:return m->ox_keep;   /* v7.228 #84: the Statistics card's copy */
+  case 41:return m->n18;case 42:return &m->n18_len;   /* v7.254 fam: net18.bin (the MOTD symbols *motd-text-0..9*) */
  }
  return 0;}
 _Static_assert(sizeof(plat_sock)==8&&sizeof(((RcMem*)0)->srv_host[0])==64&&sizeof(((RcMem*)0)->pf_rx)==0x3000&&sizeof(((RcMem*)0)->ban_rx)==0x100,"RcMem fields as u3x_fixes.cpp reads them");
@@ -11411,7 +11437,7 @@ _Static_assert(offsetof(CinTm,min)==4&&offsetof(CinTm,hour)==8&&offsetof(CinTm,m
 U3H const int32_t *u3h_cin_localtime(const int64_t *t){return (const int32_t*)cin_localtime(t);}
 U3H char *u3h_cin_buffer(int which){return which?cin_tmp:cin_txt;}
 U3H void u3h_mp_quit(uintptr_t base,void *s){mp_quit119(base,(ProfileState*)s);}
-U3H int32_t u3h_server_notice(uintptr_t base,int32_t *arg){return ona_get()->server_notice(base,arg);}
+U3H int32_t u3h_server_notice(uintptr_t base,int32_t *arg){int32_t k=ona_get()->server_notice(base,arg);if(k==1)u3x_fam_notice1(base);return k>=0?k:u3x_svc_ban_notice(base,arg);}   /* v7.254 svc: else the sign-in ban answer (R9); v7.254 fam (NP-R6): notice 1 = emblems to the default */
 U3H int u3h_chat_restricted(uintptr_t base){return ona_get()->chat_restricted(base);}
 U3H int32_t u3h_tab_find(uint8_t *t,uint32_t key){return tab_find119(t,key);}
 U3H uint8_t *u3h_find_art_group_name(uintptr_t base,const char *name){return find_art_group(base,name);}
