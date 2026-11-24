@@ -378,7 +378,7 @@ __attribute__((visibility("hidden"))) uint64_t u3x_network_usec(void);
 __attribute__((visibility("hidden"))) void u3x_retag_net_profile(uint8_t *page);
 __attribute__((visibility("hidden"))) void u3x_fam_natives_link(uintptr_t base);   /* N18 net-command */
 __attribute__((visibility("hidden"))) void u3x_m05_row(uintptr_t base,int32_t *ev,int after);   /* v7.258 fam: LIST_MATCHMAKING row */
-__attribute__((visibility("hidden"))) void u3x_mm_focus(uintptr_t base,const int32_t *ev,void *s);   /* v7.259 fam: focus keeper on the matchmaking page */
+__attribute__((visibility("hidden"))) void u3x_mm_focus(uintptr_t base,int32_t *ev,void *s);   /* v7.259 fam: focus keeper on the matchmaking page */
 __attribute__((visibility("hidden"))) void u3x_fam_notice1(uintptr_t base);   /* NP-R6 server notice 1 */
 __attribute__((visibility("hidden"))) int u3x_net_profile_source(uintptr_t base,int32_t *ev,void *s);
 __attribute__((visibility("hidden"))) int u3x_film_select(uintptr_t base,void *s,int idx);

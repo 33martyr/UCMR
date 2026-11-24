@@ -55153,12 +55153,19 @@ FAM_FN void u3x_m05_row(uintptr_t base, int32_t *ev, int after) {
 // the matchmaking player list answers the party box instead, so the keeper never ran there: the game left the focus in
 // the player list and Left did nothing (no Profile / Paid Boosters, no difficulty vote). The C part's lobby source
 // calls this after each answered request; the keeper runs once per game tick.
-FAM_FN void u3x_mm_focus(uintptr_t base, const int32_t *ev, void *s) {
-    if (ev[0] != 6 || (ext_eb()[1] & 0x20000u)) return;   // the keeper's own switch
+FAM_FN void u3x_mm_focus(uintptr_t base, int32_t *ev, void *s) {
+    if ((ev[0] != 6 && ev[0] != 21) || (ext_eb()[1] & 0x20000u)) return;   // the keeper's own switch
     const uint8_t *source = rd<const uint8_t *>(ev, 0x98);
     if (!source || rd<uint32_t>(source, 0x1c) != 0x4c414eadu) return;   // the party box
     const uint8_t *top = u3h_active_page_object(base);
     if (!top || rd<uint32_t>(top, 0x10) != 0xe35f0f1au) return;     // PAGE_MULTIPLAYER_MATCHMAKING
+    // v7.260: op 21 "may the box take the focus": the helper's party list answers yes only while the player is in the
+    // box; the matchmaking player list left it unanswered (the game's default: yes), so the game kept moving the
+    // focus into the box and the keeper kept moving it back (the highlight jumped left and right without input)
+    if (ev[0] == 21) {
+        ev[1] = u3x_i01_user_party() ? 1 : 0;
+        return;
+    }
     u3x_i01_focus(base, s);
 }
 // every frame (ring tick): lobby entry, the connect step, the page after connecting, the rename keyboard, the co-op
