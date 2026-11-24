@@ -1,4 +1,4 @@
-// G32: menu actions (catch-all dispatcher, lobby rows, Custom Game entry, LAN choice, profile list, MOTD OK, quit
+// G32: menu actions (catch-all dispatcher, lobby rows, Custom Game entry, LAN choice, profile list, quit
 // count). Written from spec G32_menu_actions.md.
 
 extern "C" {
@@ -18,7 +18,6 @@ int u3h_start_match_catch(uintptr_t base, void *s, uint32_t id);
 int u3h_film_action(uintptr_t base, const int32_t *ev);
 int u3h_community_catch(uintptr_t base, void *s, uint32_t id);
 void u3h_treasure_first_row(void *s);
-void u3h_motd_ok(uintptr_t base, void *s);
 void u3h_mission_take(uintptr_t base, void *s);
 void u3h_party_kick_promote(uintptr_t base, int promote);
 void u3h_report_popup(uintptr_t base, void *s);
@@ -42,7 +41,6 @@ void u3x_custom_game(uintptr_t base, void *s);
 void u3x_menu_action(uintptr_t base, const int32_t *ev, void *s);
 int u3x_profile_list_op(uintptr_t base, int32_t *ev, void *s);
 void u3x_lobby_row(uintptr_t base, const int32_t *ev, void *s);
-void u3x_motd_ok(uintptr_t base, void *s);
 void u3x_mp_quit(uintptr_t base, void *s);
 }
 
@@ -85,7 +83,6 @@ constexpr uint32_t ACT_TREASURES = 0xe9bce205u;
 constexpr uint32_t ACT_RECORDS = 0x420f5e96u;
 constexpr uint32_t ACT_UNLOCKS = 0x58dda3cdu;
 constexpr uint32_t ACT_MISSIONS = 0xe4794ab9u;
-constexpr uint32_t ACT_MOTD_OK = 0xab58f9dau;
 constexpr uint32_t ACT_MISSION_TAKE = 0xea1f40c5u;
 constexpr uint32_t ACT_LOCK_PARTY = 0xccbf832eu;
 constexpr uint32_t ACT_UNLOCK_PARTY = 0x0d0c91cdu;
@@ -137,7 +134,7 @@ constexpr int SLOT_LEAVE = 7;
 // ---- helper state block words
 constexpr uintptr_t EXT_COOP_WORDS = 0x100;
 constexpr uint32_t SWITCH_OFF = 2;   // bit 1 of ea[0] / ea[1]
-constexpr int EA_DELETE_SWITCH = 0, EA_119_SWITCH = 1, EA_MOTD_OK = 36, EA_QUITS = 37, EA_REPORT_HANDLER = 96;
+constexpr int EA_DELETE_SWITCH = 0, EA_119_SWITCH = 1, EA_QUITS = 37, EA_REPORT_HANDLER = 96;
 constexpr int EB_LOBBY_ACTION = 168, EB_START_MATCH = 169;
 
 // ---- state object fields
@@ -272,7 +269,6 @@ U3X_FN void u3x_menu_action(uintptr_t base, const int32_t *ev, void *s) {
     case ACT_RECORDS: u3h_show(base, s, PAGE_RECORDS, 0); break;
     case ACT_UNLOCKS: u3h_show(base, s, PAGE_UNLOCKS, 0); break;
     case ACT_MISSIONS: u3h_show(base, s, PAGE_MISSIONS, 0); break;
-    case ACT_MOTD_OK: u3h_motd_ok(base, s); break;
     case ACT_MISSION_TAKE: u3h_mission_take(base, s); break;
     case ACT_LOCK_PARTY: at<uint8_t>(base + G_PARTY_LOCKED) = 1; break;
     case ACT_UNLOCK_PARTY: at<uint8_t>(base + G_PARTY_LOCKED) = 0; break;
@@ -351,18 +347,6 @@ U3X_FN void u3x_lobby_row(uintptr_t base, const int32_t *ev, void *s) {
     case ROW_SPLITSCREEN: u3h_splitscreen(base, s); break;
     default: u3x_lobby_action(base, s, action); break;
     }
-}
-
-// 4.8 the OK button of the message-of-the-day page
-U3X_FN void u3x_motd_ok(uintptr_t base, void *s) {
-    using namespace g32;
-    if ((ext_ea()[EA_119_SWITCH] & SWITCH_OFF) == 0) {
-        game_call<void>(base + FN_MENU_SOUND, static_cast<int32_t>(0));
-        ext_ea()[EA_MOTD_OK]++;
-    }
-    u3h_show(base, s, PAGE_MULTIPLAYER, 0);
-    if ((ext_ea()[EA_119_SWITCH] & SWITCH_OFF) == 0)
-        game_call<void>(base + FN_REBUILD_HISTORY, reinterpret_cast<void *>(base + G_MENU));
 }
 
 // 4.9 back on the multiplayer page while the record still says "in a match": count a quit

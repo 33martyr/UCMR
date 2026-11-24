@@ -39,9 +39,6 @@ constexpr uint32_t TITLE_HAT_STATS = 0x2e153e84u, TITLE_DLC = 0x9811415du;
 constexpr uint32_t TEXT_ON = 0xd1831446u, TEXT_OFF = 0x32066ec9u;
 constexpr uintptr_t PROFILE_HAT_STATS = 0x215c, PROFILE_DLC = 0xac8;
 
-// Records: Message of the Day
-constexpr uint32_t TITLE_MOTD = 0xa6694384u, MOTD_BODY = 0x60edaa4fu, MOTD_TITLE = 0xc6467f2du, MOTD_CLOSE = 0xe1e040aau;
-
 // "new" marker item type
 constexpr int32_t ITEM_TYPE_NEW = 0x2f;
 
@@ -140,14 +137,14 @@ extern "C" U3X_FN int u3x_net_profile_source(uintptr_t base, int32_t *ev, void *
     return 1;
 }
 
-// 4.9: six Records rows in LAN play: 0, 1 online rows; 2, 3 LAN rows 0, 1; 4 Message of the Day; 5 LAN row 2
+// 4.9: five Records rows in LAN play: 0, 1 online rows; 2, 3, 4 LAN rows 0, 1, 2 (v7.256: no Message of the Day row)
 extern "C" U3X_FN int u3x_n32_call(uintptr_t base, int32_t *ev, void *s, void (*native)(int32_t *)) {
     using namespace g28b;
     const int32_t op = ev[0];
 
     if (op == OP_LAST_ROW) {
         native(ev);
-        if (ev[W_ROW] >= 0) ev[W_ROW] += 3;
+        if (ev[W_ROW] >= 0) ev[W_ROW] += 2;
         uint32_t &counter = ext_ea()[125];
         counter = (counter & 0xffff0000u) | ((counter + 1) & 0xffffu);
         return 1;
@@ -159,25 +156,14 @@ extern "C" U3X_FN int u3x_n32_call(uintptr_t base, int32_t *ev, void *s, void (*
     else return 0;
     const int32_t row = ev[row_word];
 
-    if (row == 5 || row == 2 || row == 3) {   // a LAN row of the game, under its own number
-        ev[row_word] = row == 5 ? 2 : row - 2;
+    if (row >= 2 && row <= 4) {   // a LAN row of the game, under its own number
+        ev[row_word] = row - 2;
         native(ev);
         ev[row_word] = row;
         return 1;
     }
 
-    if (row == 4) {
-        if (op == OP_TEXT) {
-            if (ev[W_TEXT_SLOT] == 0) text_answer(ev, u3h_text(base, s, TITLE_MOTD));
-        } else if (op == OP_ROW_TEXT_ID) {
-            ev[W_ROW] = static_cast<int32_t>(TITLE_MOTD);
-        } else if (op == OP_CLICK) {
-            u3h_show_dialog(base, s, MOTD_BODY, MOTD_TITLE, 0, 0, 0, MOTD_CLOSE);
-        }
-        return 1;
-    }
-
-    if (row < 0 || row >= 6) return 1;
+    if (row < 0 || row >= 5) return 1;
 
     // row 0 or 1: the game's online row, read from the game
     const uint8_t *entry = reinterpret_cast<const uint8_t *>(base + IMG_ONLINE_RECORDS) + 16 * row;

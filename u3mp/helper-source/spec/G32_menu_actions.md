@@ -1,5 +1,7 @@
 # G32. Menu actions: the catch-all dispatcher, lobby rows, Custom Game entry, LAN choice, MOTD OK, quit count
 
+> v7.256: everything about the Message of the Day ("MOTD OK", section 4.8) is removed; the mentions below are history.
+
 Behaviour description for a reimplementation (reimpl2 pipeline, describer's document). It says what the functions
 do, not how the old ones were written. All offsets are hexadecimal when prefixed with 0x. "Image offset X" means the
 address `base + X`, where `base` is the game image base. All multi-byte values are little-endian; u8 / u16 / u32 /
@@ -345,7 +347,6 @@ A = word 0 of the event, as u32. In this order; "handled" ends the function:
 | 0x420f5e96 (Records) | `u3h_show(base, s, 0x6281f21f, 0)` |
 | 0x58dda3cd (Unlocks) | `u3h_show(base, s, 0x0c3a3716, 0)` |
 | 0xe4794ab9 (Missions) | `u3h_show(base, s, 0xdfdb36fa, 0)` |
-| 0xab58f9da (MOTD OK) | `u3h_motd_ok(base, s)` |
 | 0xea1f40c5 (take the mission) | `u3h_mission_take(base, s)` |
 | 0xccbf832e (Lock Party) | the u8 at image 0x17c3570 = 1 |
 | 0x0d0c91cd (Unlock Party) | the u8 at image 0x17c3570 = 0 |
@@ -393,15 +394,11 @@ All comparisons are unsigned (a negative row index is a large number). Nothing i
 | 0xcd127c29 (Splitscreen) | `u3h_splitscreen(base, s)` |
 | anything else | `u3x_lobby_action(base, s, A)` (4.2) |
 
-### 4.8 `u3x_motd_ok(base, s)`
+### 4.8 (removed)
 
-"On" = bit 1 of ea[1] is clear. In this order:
+v7.256: the Message of the Day is removed from the port (owner, 2026-11-24): no `u3x_motd_ok`, no `u3h_motd_ok`, no
+case for 0xab58f9da (an id no handler takes). ea[36] is no longer counted.
 
-1. When on: game function 0x651fa0 (0), then ea[36] incremented.
-2. `u3h_show(base, s, 0x53cbb5f2, 0)` (always; result ignored; the show-page pointer is not tested).
-3. When on: game function 0x6530e0 (address of image 0x17bd080).
-
-### 4.9 `u3x_mp_quit(base, s)`
 
 1. Bit 1 of ea[1] set: nothing.
 2. P = `u3h_lg_profile(base, 0)` (always local user 0). Null: nothing.

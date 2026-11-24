@@ -1,5 +1,7 @@
 # G28. Medals list, Profile and Records rows, player card tabs, stat bars, viewed-profile object, LAN profile delete
 
+> v7.256: the Records list's Message of the Day row is removed (five rows, word 1 += 2); other mentions of it below are history.
+
 Behaviour description for a reimplementation (reimpl2 pipeline, describer's document). It says what the functions
 do, not how the old ones were written. All offsets are hexadecimal when prefixed with 0x. "Image offset X" means the
 address `base + X`, where `base` is the game image base. All multi-byte values are little-endian; "u32 / s32 / u16 /
@@ -37,7 +39,7 @@ texts name / description / "earned N" / points, the medal picture, selection, co
   rows there, the PS4 game 10. Rows 10 ("Hat Stats") and 11 ("DLC"), each an On / Off toggle stored in the
   player's profile, are answered by the helper; everything else goes to the game's own source.
 - *The Records rows in LAN play* (`u3x_n32_call`): the game shows three Records rows while its LAN byte is set and
-  five online. The helper shows six (the two online-only rows, the three LAN rows, and a "Message of the Day" row).
+  five online. The helper shows five (the two online-only rows and the three LAN rows; v7.256: no Message of the Day row).
   `u3x_n32_call` is the row translation; it is called by the Records list source `u3x_records_source` (G22 4.8,
   which also owns the Legacy row's picture) and by nothing else. `u3x_n32_records` (existing, stays) says whether
   this mode is on.
@@ -597,11 +599,11 @@ while `u3h_onb_mode()` is not 2. `u3x_n32_records(base)`: non-zero when bit 0 of
 
 ### 4.9 `u3x_n32_call(base, ev, s, native)`
 
-The caller (G22 4.8) calls it only while `u3x_n32_records` holds. The list then has six rows: 0 and 1 = rows 0 and
-1 of the game's online table (3.6); 2 and 3 = the game's LAN rows 0 and 1; 4 = Message of the Day; 5 = the game's
-LAN row 2 (Legacy). `native` answers with the LAN rows, because the LAN byte is set.
+The caller (G22 4.8) calls it only while `u3x_n32_records` holds. The list then has five rows (v7.256: the Message of the Day row is removed): 0 and 1 = rows 0 and
+1 of the game's online table (3.6); 2, 3 and 4 = the game's LAN rows 0, 1 and 2 (Legacy).
+`native` answers with the LAN rows, because the LAN byte is set.
 
-- **Operation 6.** `native(ev)`; then, when word 1 is 0 or more (signed), word 1 += 3. The low 16 bits of ea[125]
+- **Operation 6.** `native(ev)`; then, when word 1 is 0 or more (signed), word 1 += 2. The low 16 bits of ea[125]
   go up by 1 without carry into the upper 16 bits. Return 1.
 - **Operations 2 and 4** take the row from word 1, **operations 0x15 and 0x16** from word 0x17. **Every other
   operation**: return 0, nothing touched.
