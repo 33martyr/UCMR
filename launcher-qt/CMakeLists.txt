@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.21)
 # The launcher's window in Qt 6 (C++ + QML). Open this folder in Qt Creator (or the QML files in Qt Design
 # Studio) to edit it. The launcher itself is launcher/native/uncharted_native.dll's core, which this program runs
 # (see README.md).
-project(UnchartedLauncherQt VERSION 1.0 LANGUAGES CXX)
+project(UCMRLauncherQt VERSION 1.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -10,7 +10,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 find_package(Qt6 6.5 REQUIRED COMPONENTS Core Gui Qml Quick QuickControls2 Widgets)
 qt_standard_project_setup(REQUIRES 6.5)
 
-qt_add_executable(UnchartedLauncher WIN32
+qt_add_executable(UCMRLauncher WIN32
     src/main.cpp
     src/backend.cpp
     src/backend.h
@@ -19,7 +19,7 @@ qt_add_executable(UnchartedLauncher WIN32
 )
 # version information, manifest and icon (Qt's window icon is the resource named IDI_ICON1)
 include(../tools/winres/ucmr.cmake)
-ucmr_winres(UnchartedLauncher "UCMR launcher window" ICON IDI_ICON1 assets/UCMR.ico)
+ucmr_winres(UCMRLauncher "UCMR launcher window" ICON IDI_ICON1 assets/UCMR.ico)
 
 set(LAUNCHER_QML
     qml/Main.qml
@@ -55,14 +55,14 @@ foreach(file IN LISTS LAUNCHER_QML)
 endforeach()
 set_source_files_properties(qml/Theme.qml PROPERTIES QT_QML_SINGLETON_TYPE TRUE)
 
-qt_add_qml_module(UnchartedLauncher
+qt_add_qml_module(UCMRLauncher
     URI Launcher
     VERSION 1.0
     QML_FILES ${LAUNCHER_QML}
     RESOURCES assets/UCMR.ico
 )
 
-target_link_libraries(UnchartedLauncher PRIVATE
+target_link_libraries(UCMRLauncher PRIVATE
     Qt6::Core Qt6::Gui Qt6::Qml Qt6::Quick Qt6::QuickControls2 Qt6::Widgets)
 
-install(TARGETS UnchartedLauncher RUNTIME DESTINATION .)
+install(TARGETS UCMRLauncher RUNTIME DESTINATION .)

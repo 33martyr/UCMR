@@ -1,5 +1,5 @@
 // starter.cpp - "UCMR_Launcher.exe", the program players start. It runs the launcher window
-// (launcher-qt\UnchartedLauncher.exe, beside it) with the same command line - --play u1 | u2 | u3 included, which the
+// (launcher-qt\UCMRLauncher.exe, beside it) with the same command line - --play u1 | u2 | u3 included, which the
 // per-game shortcuts and Steam entries use - and keeps running until that window has closed, so Steam counts the
 // entry's play time. Its exit code is the window's. Built by tools/package_windows.sh (icon, version: tools/winres).
 #define WIN32_LEAN_AND_MEAN
@@ -35,9 +35,9 @@ std::wstring arguments_given() {
 
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     const std::wstring folder = own_folder();
-    const std::wstring window = folder + L"\\launcher-qt\\UnchartedLauncher.exe";
+    const std::wstring window = folder + L"\\launcher-qt\\UCMRLauncher.exe";
     if (folder.empty() || GetFileAttributesW(window.c_str()) == INVALID_FILE_ATTRIBUTES) {
-        MessageBoxW(nullptr, L"The launcher window (launcher-qt\\UnchartedLauncher.exe) is not next to this program. "
+        MessageBoxW(nullptr, L"The launcher window (launcher-qt\\UCMRLauncher.exe) is not next to this program. "
                              L"Unpack the whole package into one folder and start the launcher from there.",
                     CAPTION, MB_OK | MB_ICONERROR);
         return 1;
@@ -49,7 +49,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     PROCESS_INFORMATION child{};
     if (!CreateProcessW(window.c_str(), &line[0], nullptr, nullptr, FALSE, 0, nullptr, folder.c_str(), &startup, &child)) {
         MessageBoxW(nullptr, L"The launcher window could not be started. Reinstall the package, or check that your "
-                             L"antivirus did not quarantine launcher-qt\\UnchartedLauncher.exe.", CAPTION, MB_OK | MB_ICONERROR);
+                             L"antivirus did not quarantine launcher-qt\\UCMRLauncher.exe.", CAPTION, MB_OK | MB_ICONERROR);
         return 1;
     }
     CloseHandle(child.hThread);

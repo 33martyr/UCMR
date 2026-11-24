@@ -57,7 +57,7 @@ sections and rows are written in `launcher/native/pages.cpp`.
 
 ```
 cmake -S launcher-qt -B build-qt -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
-ninja -C build-qt UnchartedLauncher
+ninja -C build-qt UCMRLauncher
 ```
 
 ## Running

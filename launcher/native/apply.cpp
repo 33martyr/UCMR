@@ -300,7 +300,8 @@ std::set<std::wstring> read_manifest() {
 // Folders only the package fills (programs and the helper build): what the new package does not ship there is dropped,
 // even when installed-files.txt is missing or incomplete (installs up to 0.5.0, a failed write, an unzip over the
 // install). The player's settings and imports never live in them; an older helper build (u3mp/patcher/build/v*) left
-// there would otherwise be picked, since the launcher and importer use the highest one on disk.
+// there would otherwise be picked, since the launcher and importer use the highest one on disk. A renamed program goes
+// the same way: launcher-qt\UnchartedLauncher.exe (the window's name up to 0.10.158, now UCMRLauncher.exe) is dropped.
 const wchar_t *const OWNED[] = {L"u3mp/bin", L"u2mp/bin", L"u3mp/patcher/build", L"launcher/native", L"launcher-qt"};
 
 // Adds to `dropped` every installed file below the package-owned folder `rel` that the new package lacks.

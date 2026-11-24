@@ -245,12 +245,12 @@ qt_window() {
     local build=dist/stage/qt-build win=$out/launcher-qt
     cmake -S launcher-qt -B "$build" -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang \
         -DCMAKE_CXX_COMPILER=clang++ "${CMAKE_CACHE[@]}" > /dev/null
-    ninja -C "$build" UnchartedLauncher > "$build.log" 2>&1 || { tail -40 "$build.log" >&2; exit 1; }
+    ninja -C "$build" UCMRLauncher > "$build.log" 2>&1 || { tail -40 "$build.log" >&2; exit 1; }
     mkdir -p "$win"
-    llvm-strip -o "$win/UnchartedLauncher.exe" "$build/UnchartedLauncher.exe"
+    llvm-strip -o "$win/UCMRLauncher.exe" "$build/UCMRLauncher.exe"
     PATH="$msys/clang64/share/qt6/bin:$PATH" windeployqt6 --qtpaths "$msys/clang64/bin/qtpaths6.exe" --release \
         --qmldir launcher-qt/qml --no-translations --no-system-d3d-compiler --no-opengl-sw --no-compiler-runtime \
-        "$win/UnchartedLauncher.exe" > "$build-deploy.log" 2>&1 || { tail -40 "$build-deploy.log" >&2; exit 1; }
+        "$win/UCMRLauncher.exe" > "$build-deploy.log" 2>&1 || { tail -40 "$build-deploy.log" >&2; exit 1; }
     # windeployqt misses QML plugin DLLs in CLANG64's layout: each deployed QML folder gets its source's DLLs
     local qml_from=$msys/clang64/share/qt6/qml dir plugin
     while read -r dir; do
@@ -284,7 +284,7 @@ qt_window() {
         local base=${dll##*/}
         have[${base,,}]=$dll
     done
-    local todo=("$win/UnchartedLauncher.exe") file name
+    local todo=("$win/UCMRLauncher.exe") file name
     while IFS= read -r -d '' file; do todo+=("$file"); done < <(find "$win" -mindepth 2 -name '*.dll' -print0)
     while (( ${#todo[@]} )); do
         file=${todo[0]}
