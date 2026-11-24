@@ -54682,11 +54682,13 @@ FAM_FN bool legacy_mark(uint8_t *rec) {
     return true;
 }
 // NP-R5 (5.2 / 5.3): the page after connecting. Online with an EULA row whose version is not the accepted one -> EULA;
-// Online Pass counts as owned (owner); else MOTD online, MULTIPLAYER on LAN
+// Online Pass counts as owned (owner); else MULTIPLAYER. v7.255: PS3 shows PAGE_MULTIPLAYER_MOTD online here, but the
+// imported page could not be closed on PC (its OK button took no input, 0.10.159), so the page stays off until it is
+// fixed and tested live; the helper's MOTD dialog (x060) shows the message instead, as in v7.253.
 constexpr uint32_t PG_MULTIPLAYER = 0x53cbb5f2, PG_EULA = 0xda1f28d9, PG_MOTD = 0xd6f98d11;
 FAM_FN uint32_t page_after_connect(bool lan, bool eula_row, uint32_t eula_version, uint32_t accepted) {
     if (!lan && eula_row && accepted != eula_version) return PG_EULA;
-    return lan ? PG_MULTIPLAYER : PG_MOTD;
+    return PG_MULTIPLAYER;
 }
 // N18 (SPEC-services2 5.1): (net-command <symbol>): symbol 0x69d69b6e with more than 2 players -> stat 0x778, more than 3
 // -> also 0x78c (for users 0 and 1); returns how many stats are in out[]
@@ -55214,8 +55216,7 @@ FAM_FN void u3x_fam_notice1(uintptr_t base) {
 FAM_FN void u3x_fam_motd_retag(uint8_t *page) {
     using namespace fam;
     if (rd<uint32_t>(page, 8) != PG_MOTD) return;
-    st.motd_seen = 1;
-    st.motd_dirty = 1;
+    st.motd_dirty = 1;   // v7.255: not "seen" here (this runs at menu load); only after_connect's page show sets it
     const uint8_t *list = rd<const uint8_t *>(page, 0x48);
     uint8_t *items = list ? rd<uint8_t *>(list, 8) : nullptr;
     const uint32_t count = list ? rd<uint32_t>(list, 0) : 0;
