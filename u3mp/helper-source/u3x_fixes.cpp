@@ -52681,6 +52681,11 @@ MM_FN void begin(uintptr_t base, void *s, bool member) {
     o[0] = 1;
     o[1] = 1;
     o[2] = 0x20;   // running, not the old driver's phase 1 (its 0x107 edge stays quiet)
+    // v7.256: the matchmaking page's player list (u3x_onm_players) draws one row per place of the match: this player,
+    // the room's members, "Finding..." for the free ones. The old driver set the places and the selection at its
+    // start; without them the list showed its title only ("Searching for ...") and no rows, in every mode.
+    o[5] = 0;        // the list's selected row
+    o[6] = mm.max;   // places: the playlist's maximum (2..10)
     const uint8_t *me = own(base);
     Line l;
     l.s(t_begin).x(mm.playlist, 8).s(t_min).d(mm.min).s(t_max).d(mm.max).s(t_rows).d(mm.rows).s(mm.dc_rows ? t_rows_dc : t_rows_def);
@@ -54663,6 +54668,13 @@ FAM_FN uint32_t net_command_stats(uint32_t symbol, uint32_t players, uint32_t *o
     if (players > 3) out[n++] = NC_STAT4;
     return n;
 }
+// v7.256 co-op heroes: 1 = a load screen of a match (matchmaking 0x18..0x1c, late join 0x27..0x2b, Custom Game
+// 0x2c..0x33): every player's look is its co-op slot's hero look; 2 = playing (0x1d): the same once that look's art
+// is loaded; 0 = elsewhere (menus, lobby, search): nothing
+FAM_FN int hero_phase(uint32_t ns) {
+    if ((ns >= 0x18 && ns <= 0x1c) || (ns >= 0x27 && ns <= 0x33)) return 1;
+    return ns == 0x1d ? 2 : 0;
+}
 }  // namespace fam
 // ===== v7.254 fam pure end =====
 
@@ -54701,11 +54713,15 @@ FAM_RO const char t_mute[] = "team list mute: row ", t_mute_team[] = " team ", t
 FAM_RO const char t_notice[] = "server notice 1 (emblem moderation): both users' emblems reset to default";
 FAM_RO const char t_netcmd[] = "net-command: symbol ", t_netcmd_players[] = ", players ", t_netcmd_stats[] = ", challenge stats bumped ";
 FAM_RO const char n_net_command_c[] = "DcNetCommand", n_net_command[] = "net-command";
+FAM_RO const char t_hero[] = "co-op heroes: record ", t_hero_slot[] = " (slot ", t_hero_was[] = ") look type ",
+                  t_hero_now[] = " -> hero type ", t_hero_ns[] = ", net state 0x";
+constexpr uintptr_t P_LOOK = 0x620, LOOK_SIZE = 0x28, FN_LOOK_LOADED = 0x996a60;
 struct State {
     uint32_t last_state, phase_was, n_actions, gone_said, reset_said;
     uint8_t content, entered, kb_slot;
     uint32_t actions[32];
     uint8_t after_pending;
+    uint16_t hero_said;   // v7.256: records whose hero look was put back this match (one log line each)
 };
 U3X_BSS State st;
 struct NativeRec { uint64_t fn, cname; uint32_t csid, pad0; uint64_t sname; uint32_t ssid, pad1; uint64_t next; };
@@ -55023,7 +55039,45 @@ FAM_FN void u3x_fam_notice1(uintptr_t base) {
     }
     say(t_notice, -1);
 }
-// every frame (ring tick): lobby entry, the connect step, the page after connecting, the rename keyboard
+int u3x_hero_slot(uintptr_t base, const uint8_t *pl);   // G43 part C
+const uint8_t *u3x_hero_desc(uintptr_t base, void *s, int slot, int32_t *gi, uint32_t *w11);
+// v7.256 co-op heroes: in a Co-op Adventure match (the current net game has hero looks) the game's match setup gives
+// each player its co-op slot's hero look, and the game loads the art of whatever look a player has during the load
+// screens. A look written back afterwards (the player's own multiplayer character) made the game load that art
+// instead, so the spawn kept the custom character. Through the load screens every player in the game keeps its slot's
+// hero look; while playing it is put back only once that look's art is loaded (as the spawn hook does).
+FAM_FN void hero_hold(uintptr_t base, void *s) {
+    using namespace fam;
+    const uint32_t ns = at<uint32_t>(base + NET_STATE);
+    const int phase = hero_phase(ns);
+    if (!phase) {
+        st.hero_said = 0;
+        return;
+    }
+    uint32_t notes[4] = {};
+    int32_t game = -1;
+    if (!u3x_hero_desc(base, s, 0, &game, notes)) return;   // not a Co-op Adventure net game
+    for (uint32_t i = 0; i < 10; i++) {
+        uint8_t *rec = net_record(base, i);
+        if (!rec[R_IN_USE] || rec[R_GONE]) continue;
+        const int slot = u3x_hero_slot(base, rec);
+        const uint8_t *look = u3x_hero_desc(base, s, slot, &game, notes);
+        if (!look) continue;
+        bool same = true;
+        for (uintptr_t k = 0; k < LOOK_SIZE && same; k++) same = rec[P_LOOK + k] == look[k];
+        if (same) continue;
+        if (phase == 2 && !game_call<uint8_t>(base + FN_LOOK_LOADED, static_cast<void *>(nullptr), look)) continue;
+        const uint8_t was = rec[P_LOOK];
+        for (uintptr_t k = 0; k < LOOK_SIZE; k++) rec[P_LOOK + k] = look[k];
+        if (st.hero_said & (1u << i)) continue;
+        st.hero_said = static_cast<uint16_t>(st.hero_said | (1u << i));
+        Line l;
+        l.s(t_hero).d(i).s(t_hero_slot).d(static_cast<uint32_t>(slot)).s(t_hero_was).d(was).s(t_hero_now).d(look[0]);
+        say(l.s(t_hero_ns).x(ns, 2).z(), -1);
+    }
+}
+// every frame (ring tick): lobby entry, the connect step, the page after connecting, the rename keyboard, the co-op
+// heroes
 FAM_FN void u3x_fam_tick(uintptr_t base, Log) {
     using namespace fam;
     void *s = u3h_fl_state();
@@ -55033,6 +55087,7 @@ FAM_FN void u3x_fam_tick(uintptr_t base, Log) {
     if (lobby && !was) lobby_entry(state);
     st.last_state = state ? state : 1;
     if (!s) return;
+    hero_hold(base, s);
     const uint32_t phase = rd<uint32_t>(s, S_STARTUP);
     if (phase == 3 && (st.phase_was == 1 || st.phase_was == 2)) {
         connect_step(base, s);
