@@ -49,6 +49,12 @@ reasons.
 - **Always legal:** code that comes from the game (PS3 or PS4) is reimplemented from a description of what it does,
   never rewritten 1:1 from the original code, so that no copyrighted code is reproduced. Do not copy constant tables
   or values from the game into the source.
+- **No copied or identically reproduced proprietary game code** (as in CONTRIBUTING.md): write independent
+  implementations that aim to reproduce the required behaviour. Do not copy and paste Naughty Dog's, Bluepoint's or
+  Sony's proprietary game code, reproduce whole functions from it, or include large arrays of executable bytes.
+  Renaming variables, reformatting code or mechanically translating decompiled code does not make a copied
+  implementation independent. Short instruction patterns used only to locate and verify patch sites in the player's
+  own copy remain permitted; they must not embed complete game functions or substantial executable code.
 - **Simple only when it is exact:** a simpler version is used only if it replicates 100% of what the original does,
   in every case. If the simpler way would change or break any behaviour, keep the full behaviour and do not simplify.
   Check this with a test that runs the old and the new code on the same inputs.

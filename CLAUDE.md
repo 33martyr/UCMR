@@ -15,6 +15,11 @@ Keep it simple, but always legal (reimplement game code from a description, neve
 simplify when the result does 100% of what the original does; if a simpler way would break anything, don't (see
 AGENTS.md, "Keep it simple, but legal and exact").
 
+No copied or identically reproduced proprietary game code (CONTRIBUTING.md): write independent implementations of the
+required behaviour; never copy Naughty Dog's, Bluepoint's or Sony's code, whole functions or large arrays of executable
+bytes. Renaming variables, reformatting or mechanically translating decompiled code does not make a copy independent.
+Only short instruction patterns that locate and verify patch sites in the player's own copy are allowed.
+
 Port assets from the PS3 only when PS4 has none: if PS4 has the asset anywhere (campaign included, e.g.
 baseball-shirt / red shirt Drake as a campaign skin), use PS4's, with its better textures and a smaller import
 (see AGENTS.md, "Assets: PS4 first").
