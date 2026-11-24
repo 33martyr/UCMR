@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="A setup guide for importing Uncharted 2 multiplayer files into the unofficial PC launcher.">
-  <title>Multiplayer Setup | UCMR</title>
+  <meta name="description" content="Setup guide for the Uncharted Collection PC port and Uncharted 2/3 multiplayer import.">
+  <title>Setup Guide | UCMR</title>
   <link rel="icon" type="image/png" href="favicon.png">
   <link rel="apple-touch-icon" href="favicon.png">
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -20,73 +20,74 @@
       <h1>UNCHARTED</h1>
       <p class="collection">THE NATHAN DRAKE COLLECTION</p>
       <div class="title-rule"></div>
-      <p class="guide-kicker">MULTIPLAYER IMPORT</p>
+      <p class="guide-kicker">COLLECTION + MULTIPLAYER IMPORT</p>
     </div>
   </header>
 
   <main>
     <section class="readiness shell" aria-label="Setup progress">
-      <div><span class="readiness__label">YOUR ROUTE TO MULTIPLAYER</span><strong id="readiness-copy">Start the import steps below</strong></div>
+      <div><span class="readiness__label">YOUR ROUTE TO MULTIPLAYER</span><strong id="readiness-copy">Start with the Collection setup</strong></div>
       <ol class="milestones" aria-label="Progress steps">
-        <li data-step="game"><span>01</span> Game folder</li>
-        <li data-step="data"><span>02</span> Game data</li>
-        <li data-step="eboot"><span>03</span> EBOOT</li>
+        <li data-step="game"><span>01</span> Collection</li>
+        <li data-step="data"><span>02</span> Update</li>
+        <li data-step="eboot"><span>03</span> PS3 files</li>
         <li data-step="import"><span>04</span> Import</li>
-        <li data-step="account"><span>05</span> Sign in</li>
+        <li data-step="account"><span>05</span> Play / RPCN</li>
       </ol>
     </section>
 
     <section class="shell intro-grid">
       <div>
-        <p class="section-tag">UNCHARTED 2: AMONG THIEVES</p>
-        <h2>Bring your own game data. Then play online.</h2>
+        <p class="section-tag">THE NATHAN DRAKE COLLECTION</p>
+        <h2>Bring your own games. Then play.</h2>
       </div>
-      <p class="lede">This guide walks through the files the launcher needs for multiplayer, then the RPCN connection used to sign in. Complete the steps in order.</p>
+      <p class="lede">Set up the Collection, add your own PS3 and PS4 files, then import Uncharted 2 or Uncharted 3 multiplayer on your PC. No game files are included.</p>
     </section>
 
     <section class="shell guide-layout">
       <aside class="side-note">
         <div class="side-note__mark">MP</div>
         <h3>Before you begin</h3>
-        <p>You need a legally owned copy of Uncharted 2, its decrypted game executable, and an RPCS3 installation with game data.</p>
-        <p class="muted">The guide does not provide game files, keys, or account credentials.</p>
+        <p>Windows 10/11 64-bit, a Vulkan 1.3 GPU with current drivers, 16 GB RAM recommended, and a 4-core CPU or better.</p>
+        <p>For multiplayer you need your own PS4 Collection and your own PS3 Uncharted 3. We support BCES01670, BCUS99086, BCES01692 and BCAS25014.</p>
+        <p class="muted">The guide does not provide game files, keys, server addresses or account credentials.</p>
       </aside>
 
       <div class="steps">
         <article class="step" id="game">
           <div class="step__number">01</div>
-          <div class="step__body"><p class="section-tag">GAME SOURCE</p><h3>Select your PS3 game folder</h3><p>Choose the folder for your own Uncharted 2 Game of the Year copy. It should contain <code>USRDIR</code>; choosing <code>USRDIR</code> itself also works.</p><div class="path"><span>Example path</span><code>D:/PS3 Games/Uncharted 2 - Among Thieves GOTY [NPUA80698]</code></div><label class="complete"><input type="checkbox" data-completes="game"><span>I found my PS3 game folder</span></label></div>
+          <div class="step__body"><p class="section-tag">DOWNLOAD + FIRST START</p><h3>Install the launcher</h3><p>Download <a href="https://github.com/UC-Resurrected/UCMR/releases/latest/download/UCMR_windows.zip">UCMR_windows.zip</a> and extract it into a normal folder you own, for example <code>D:\Games\Uncharted</code>, not <code>Program Files</code>. Double-click <strong>Uncharted Launcher.exe</strong>. If SmartScreen warns you, choose <strong>More info → Run anyway</strong>.</p><p>You will see <strong>Drake's Fortune</strong>, <strong>Among Thieves</strong> and <strong>Drake's Deception</strong> at the top. Newer versions show an <strong>UPDATE</strong> button next to PLAY; saves and settings are kept.</p><label class="complete"><input type="checkbox" data-completes="game"><span>The launcher starts and shows the three games</span></label></div>
         </article>
 
         <article class="step" id="data">
           <div class="step__number">02</div>
-          <div class="step__body"><p class="section-tag">RPCS3 DATA</p><h3>Locate the game data folder</h3><p>In your RPCS3 installation, select <code>dev_hdd0/game</code>. This folder contains the installed data used when Uncharted 2 goes online.</p><div class="path"><span>Typical location</span><code>RPCS3/dev_hdd0/game</code></div><label class="complete"><input type="checkbox" data-completes="data"><span>I found my RPCS3 game data folder</span></label></div>
+          <div class="step__body"><p class="section-tag">PS4 COLLECTION</p><h3>Add your game and update 1.02</h3><p>Click a game, press <strong>PLAY</strong>, and pick your own Collection folder: the one with <code>eboot.bin</code> and <code>sce_sys</code>, often called <code>uroot</code>. To switch folders later, use <strong>SETUP → step 1 → Change game folder</strong>.</p><p>For multiplayer this must be <strong>CUSA02320</strong> with update <strong>1.02</strong>; the import checks it. Add the update through <strong>SETUP → step 2 → Choose update folder</strong>, or place an extracted update beside the game folder with <code>-patch</code> added to its name. <strong>CUSA02826</strong>, <strong>CUSA02343</strong> and <strong>CUSA02344</strong> are also known to work for the Collection import.</p><div class="path"><span>Good to know</span><code>QUICK SETUP</code> sets a preset; <code>DISPLAY</code>, <code>PERFORMANCE</code> and <code>CONTROLS</code> fine-tune it. First launch compiles shaders and may stutter. <code>Insert</code> or <code>R3 + L2</code> opens the in-game menu. <strong>SETUP → step 1 → Check game files</strong> verifies your dump.</div><label class="complete"><input type="checkbox" data-completes="data"><span>CUSA02320 and update 1.02 are ready</span></label></div>
         </article>
 
         <article class="step" id="eboot">
           <div class="step__number">03</div>
-          <div class="step__body"><p class="section-tag">EXECUTABLE</p><h3>Choose the decrypted EBOOT</h3><p>Select the decrypted <code>EBOOT.elf</code> from your own game copy. It is normally inside the game’s <code>USRDIR</code> directory.</p><div class="path"><span>Expected file</span><code>.../NPUA80698/USRDIR/EBOOT.elf</code></div><label class="complete"><input type="checkbox" data-completes="eboot"><span>I have the decrypted EBOOT.elf</span></label></div>
+          <div class="step__body"><p class="section-tag">PS3 SOURCES</p><h3>Collect the Uncharted 3 files</h3><p>Add the PS3 game folder (<code>PS3_GAME/USRDIR</code> or an extracted ISO) and RPCS3's <code>dev_hdd0/game</code> folder. The RPCS3 folder must contain update <strong>1.19</strong>, the game data install (<code>XXXXXXXXXDATA2</code>) and the DLC map packs. Install them in RPCS3 and start the game once.</p><p>For character collisions the import also needs a decrypted EBOOT. In RPCS3 choose <strong>Utilities → Decrypt PS3 Binaries</strong>, select <code>dev_hdd0/game/XXXXXXXXX/USRDIR/EBOOT.BIN</code>, and RPCS3 writes <code>EBOOT.elf</code> beside it. The import finds it by itself.</p><div class="path"><span>Fastest path</span><code>Uncharted 3 BCES01670</code> and <code>Uncharted 2 NPUA80698</code> are the known working PS3 versions that get multiplayer running fastest.</div><label class="complete"><input type="checkbox" data-completes="eboot"><span>PS3 game, RPCS3 data and EBOOT.elf are ready</span></label></div>
         </article>
 
         <article class="step" id="import">
           <div class="step__number">04</div>
-          <div class="step__body"><p class="section-tag">LAUNCHER</p><h3>Import the multiplayer files</h3><p>Open the launcher’s <strong>Multiplayer</strong> section. Add the game folder, RPCS3 game-data folder, and EBOOT path from the previous steps. Choose an output location, then run <strong>RE-IMPORT / UPDATE</strong>.</p><div class="callout"><span class="callout__bar"></span><p>Wait for the import to finish before launching. The launcher will show that the game has been imported when it is ready.</p></div><label class="complete"><input type="checkbox" data-completes="import"><span>The import finished successfully</span></label></div>
+          <div class="step__body"><p class="section-tag">IMPORT</p><h3>Convert the multiplayer files</h3><p>Select <strong>Drake's Deception → MULTIPLAYER</strong>. Under <strong>PS3 Uncharted 3 folders → Add folder</strong>, add the game folder and RPCS3's <code>dev_hdd0/game</code>. Optionally choose the decrypted EBOOT if it was not found, or change the multiplayer data folder to another drive. Then press <strong>IMPORT</strong>.</p><div class="callout"><span class="callout__bar"></span><p>Conversion takes about <strong>1 hour</strong> on a modern 8-core PC. You can close the launcher; the import keeps going. Progress shows on the tab, and <strong>Open import log</strong> shows the details.</p></div><p>Allow about <strong>20 GB</strong> for the multiplayer files. Another <strong>11 GB</strong> helps future updates, which are built next to your current files so you can keep playing.</p><label class="complete"><input type="checkbox" data-completes="import"><span>The import finished successfully</span></label></div>
         </article>
 
         <article class="step" id="account">
           <div class="step__number">05</div>
-          <div class="step__body"><p class="section-tag">RPCN ONLINE PLAY</p><h3>Connect your account</h3><p>In the launcher, enter the community server DNS supplied by the server you use. Select or add your RPCN account, then confirm both DNS and account status show green.</p><div class="server-card"><span class="server-card__dot" aria-hidden="true"></span><div><span class="server-card__label">READY CHECK</span><strong>DNS reachable · RPCN account signed in</strong></div></div><label class="complete"><input type="checkbox" data-completes="account"><span>DNS and RPCN account are ready</span></label></div>
+          <div class="step__body"><p class="section-tag">PLAY + RPCN ONLINE</p><h3>Launch and sign in</h3><p>Turn on <strong>Start Uncharted 3 with multiplayer</strong>, then select <strong>Drake's Deception → PLAY</strong>. On the title screen, <strong>Right</strong> is Multiplayer and <strong>Right Right</strong> is Co-op. For <strong>LAN Party</strong>, press <strong>Cross</strong> on your profile.</p><p>For online play, create an RPCN account in RPCS3 under <strong>Configuration → RPCN</strong>. In the game front end press <strong>L2</strong> to open the <strong>RPCN</strong> page, fill in <strong>DNS</strong>, <strong>Account</strong>, <strong>Password</strong> and <strong>Token</strong>, then press <strong>Connect</strong>. The DNS for Uncharted 3 and Uncharted 2 is posted in the <a href="https://discord.com/invite/T545xWcpSw">Discord server</a>.</p><div class="server-card"><span class="server-card__dot" aria-hidden="true"></span><div><span class="server-card__label">KEEP IT UPDATED</span><strong>UPDATE refreshes multiplayer files in the background; no re-import needed</strong></div></div><p>If something goes wrong, post <strong>import.log</strong> from <strong>MULTIPLAYER → Open import log</strong> together with your GPU and Windows version.</p><label class="complete"><input type="checkbox" data-completes="account"><span>Multiplayer launches and RPCN is ready</span></label></div>
         </article>
       </div>
     </section>
 
     <section class="gallery shell" aria-label="Multiplayer preview">
       <img src="UCMR_gallery.png" alt="Uncharted 2 and Uncharted 3 multiplayer menus">
-      <div class="gallery__caption"><p class="section-tag">READY TO PLAY</p><h2>Launch into multiplayer</h2><p>Once all five checks are complete, select Play in the launcher. During play, use Insert or R3 + L2 to open the in-game menu.</p></div>
+      <div class="gallery__caption"><p class="section-tag">READY TO PLAY</p><h2>Launch into multiplayer</h2><p>Once all five checks are complete, start Uncharted 3 with multiplayer and select Play. During play, use Insert or R3 + L2 to open the in-game menu.</p></div>
     </section>
   </main>
 
-  <footer><div class="shell"><span>UCMR</span><span>Unofficial PC port · Multiplayer setup guide</span></div></footer>
+  <footer><div class="shell"><span>UCMR</span><span>Unofficial PC port · Collection + multiplayer setup guide</span></div></footer>
   <script src="script.js"></script>
 </body>
 </html>

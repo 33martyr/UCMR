@@ -1,11 +1,11 @@
 const boxes = [...document.querySelectorAll('[data-completes]')];
 const labels = {
-  0: 'Start the import steps below',
-  1: 'Your game source is ready',
-  2: 'Game files located',
-  3: 'Executable ready for import',
-  4: 'Import complete — connect your account',
-  5: 'Ready for multiplayer'
+   0: 'Start with the Collection setup',
+   1: 'Collection is installed',
+   2: 'CUSA02320 and update 1.02 are ready',
+   3: 'PS3 files and EBOOT are ready',
+   4: 'Import complete — start multiplayer',
+   5: 'Ready for multiplayer and RPCN'
 };
 
 function updateProgress() {
