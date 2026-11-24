@@ -170,7 +170,7 @@ u3_import() {   # Uncharted 3's importer, its recipe and tools, and the newest m
         "$fx/dctools/texcodec.cpp" "$fx/dctools/ps3bg.cpp" "$fx/dctools/stageplan.cpp" "$fx/dctools/ps4stage.cpp" \
         "$fx/dctools/collision.cpp" "$fx/dctools/visinfo.cpp" "$fx/dctools/ps3fp.cpp" "$fx/dctools/anim.cpp" \
         "$fx/dctools/skel.cpp" "$fx/dctools/hkconvert.cpp" "$fx/dctools/fgcoll.cpp" "$fx/dctools/ps4actor.cpp" "$fx/dctools/ps4mats.cpp" \
-        "$fx/dctools/dcconv.cpp" "$fx/dcconv/convert_dc1.cpp" "$fx/dcconv/apply_recipes.cpp" "$fx/sound-banks/convert_banks.cpp" \
+        "$fx/dctools/dcconv.cpp" "$fx/dcconv/convert_dc1.cpp" "$fx/dcconv/apply_recipes.cpp" "$fx/dcconv/menu_pages.cpp" "$fx/sound-banks/convert_banks.cpp" \
         "$fx/part-emitters/build_part_modules.cpp" "$fx/audio-defs/audio_defs.cpp" "$fx/music-streams/copy_music.cpp" "$fx/actor33/actors_hk.cpp" "$fx/coop-vo/apply_vo.cpp" \
         "$fx/coop-voice2/apply_coop_vox.cpp" "$fx/dctools/net_edits.cpp" \
         "$fx/eula-batch/make_eula.cpp" "$fx/wall-emblem/make_emblem.cpp" "$fx/dctools/lab_reg.cpp" "$fx/world-levels/world_levels.cpp" "$fx/dctools/normal_blend.cpp"; do

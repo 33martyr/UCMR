@@ -10,9 +10,13 @@
 // rebuilt file must have the recorded sha256. net18-versions.json: other accepted versions of the server's net18.bin
 // (their newer values land in the same copied slots, so only the size is checked), and for versions with another layout
 // the offset runs that rebuild the reference layout from them ("remap"). schema-oldconv.json: the opcode map.
-// Dry run by default; files already at the recorded hash are left alone.
+// overlay-r3 menu.bin also gets PS3 1.19's PAGE_MULTIPLAYER_MOTD (the message of the day page PS3 shows after
+// connecting; PS4 has none), converted from the player's PS3 1.19 menu.bin by menu_pages.cpp while the file is
+// rebuilt, and overlay-r3 modules.bin's menu size word follows (owner's decision 2026-11-24).
+// Dry run by default; files already at the recorded hash (or, for those two, at their rebuilt bytes) are left alone.
 #include "inflate.h"
 #include "json.h"
+#include "menu_pages.hpp"
 #include "proc.hpp"
 #include "psarc.hpp"
 #include "u3fix.hpp"
@@ -212,6 +216,23 @@ int dc_recipes(const std::vector<std::string> &argv) {
     for (const auto &f : R.fields) recs.push_back(&f);
     std::stable_sort(recs.begin(), recs.end(), [](const auto *x, const auto *y) { return x->first < y->first; });
     const std::string only = a.get("--only", "");
+    // the two files that get PS3 1.19 content on top of their recipe (see the top); they are compared by their bytes
+    const std::string MENU = "overlay-r3/dc1/ps4/menu.bin", MODULES = "overlay-r3/dc1/ps4/modules.bin";
+    auto rebuild = [&](const json::Value &rec, std::map<std::string, std::optional<Bytes>> &s) {
+        for (const auto &[n, h] : rec.get("sources")->fields) s[n] = src(n);
+        return apply(rec, s, accepted, opmap);
+    };
+    std::optional<Bytes> menu;   // overlay-r3 menu.bin as this step writes it (modules.bin records its size)
+    auto final_menu = [&]() -> const Bytes & {
+        if (!menu) {
+            const json::Value *rec = R.get(MENU);
+            if (!rec) throw Fail("no recipe for " + MENU);
+            std::map<std::string, std::optional<Bytes>> s;
+            const Bytes base = rebuild(*rec, s);
+            menu = menu_pages::add_page(base, *s.at("ps3/patch18:dc1/ps4/menu.bin"), menu_pages::PAGE_MULTIPLAYER_MOTD);
+        }
+        return *menu;
+    };
     for (const auto *kv : recs) {
         const std::string &key = kv->first;
         const json::Value &rec = kv->second;
@@ -223,21 +244,41 @@ int dc_recipes(const std::vector<std::string> &argv) {
         const size_t sl = key.find('/');
         const fs::path dst = upath(project + "/work/" + key.substr(0, sl) + "/u3data/build/main/" + key.substr(sl + 1));
         const std::string want = rec.get("sha256")->s;
-        if (fs::exists(dst) && sha_file(dst) == want) {
+        const bool added = key == MENU || key == MODULES;
+        if (!added && fs::exists(dst) && sha_file(dst) == want) {
             count("already");
             continue;
         }
         Bytes out;
+        bool newer = false;   // modules.bin built from another accepted net18.bin (below)
         try {
-            std::map<std::string, std::optional<Bytes>> s;
-            for (const auto &[n, h] : rec.get("sources")->fields) s[n] = src(n);
-            out = apply(rec, s, accepted, opmap);
+            if (key == MENU)
+                out = final_menu();
+            else {
+                std::map<std::string, std::optional<Bytes>> s;
+                out = rebuild(rec, s);
+                newer = sha256_hex(out) != want;
+            }
+            if (key == MODULES) {   // its menu size word: the recipe's menu.bin size -> the size of the menu.bin written
+                const uint64_t slot = module_size_slot(Dc(out, "modules.bin"), "menu");
+                const json::Value *mr = R.get(MENU);
+                if (!mr || rd64le(&out[slot]) != uint64_t(mr->get("size")->i)) throw Fail("modules.bin: its menu size is not the rebuilt menu.bin's");
+                wr64le(&out[slot], final_menu().size());
+            }
         } catch (const Fail &ex) {
             count("failed");
             std::printf("FAILED %s %s\n", key.c_str(), ex.what());
             continue;
         }
-        if (sha256_hex(out) != want) {   // built from another accepted net18.bin: the reference structure with the server's newer values
+        if (added) {
+            if (fs::exists(dst) && read_file(dst) == out) {
+                count("already");
+                continue;
+            }
+            count("rebuilt");
+            if (newer) std::printf("rebuilt from the newer server net18.bin: %s\n", key.c_str());
+            if (key == MENU) std::printf("menu.bin: page PAGE_MULTIPLAYER_MOTD added from the PS3 1.19 menu.bin\n");
+        } else if (sha256_hex(out) != want) {   // built from another accepted net18.bin: the reference structure with the server's newer values
             if (fs::exists(dst) && read_file(dst) == out) {
                 count("already");
                 continue;
