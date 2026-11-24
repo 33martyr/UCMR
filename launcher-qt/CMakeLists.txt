@@ -59,7 +59,7 @@ qt_add_qml_module(UnchartedLauncher
     URI Launcher
     VERSION 1.0
     QML_FILES ${LAUNCHER_QML}
-    RESOURCES assets/UCMR.ico assets/background.png
+    RESOURCES assets/UCMR.ico
 )
 
 target_link_libraries(UnchartedLauncher PRIVATE

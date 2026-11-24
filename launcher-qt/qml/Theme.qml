@@ -4,14 +4,13 @@ import QtQuick
 // Every colour, size and font of the launcher. Change the look here.
 QtObject {
     // near black with the Collection's yellow-gold accent
-    // panels are nearly opaque grey so text stays readable over the background artwork
-    readonly property color bg: "#1d1d21"
-    readonly property color panel: "#e62a2a2f"
-    readonly property color card: "#ea2e2e33"
-    readonly property color cardLine: "#3a3a42"
-    readonly property color field: "#f0393940"
-    readonly property color fieldHi: "#f544444c"
-    readonly property color line: "#45454e"
+    readonly property color bg: "#0c0c0e"
+    readonly property color panel: "#a6141417"
+    readonly property color card: "#b0151519"
+    readonly property color cardLine: "#25252c"
+    readonly property color field: "#9c222228"
+    readonly property color fieldHi: "#b42c2c34"
+    readonly property color line: "#2f2f37"
     readonly property color text: "#f2efe8"
     readonly property color muted: "#a3a09a"
     readonly property color dim: "#6c6a70"

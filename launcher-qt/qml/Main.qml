@@ -61,17 +61,26 @@ ApplicationWindow {
         }
     }
 
-    // background: the UCMR artwork (assets/background.png, built into the program), darkened so text on it stays readable
-    Rectangle { anchors.fill: parent; color: Theme.bg }
+    // Frosted background: the cover art across the whole window, blurred and darkened, so text on it stays readable.
     Image {
+        id: backgroundArt
         anchors.fill: parent
-        source: "qrc:/qt/qml/Launcher/assets/background.png"
+        source: backend.fileUrl(backend.chrome.hero || "")
         fillMode: Image.PreserveAspectCrop
+        verticalAlignment: Image.AlignTop
         asynchronous: true
-        smooth: true
-        mipmap: true
+        // the blur is this picture's own layer: it is redrawn at the window's size after every resize, maximize
+        // or restore (a separate effect kept a stale, offset copy)
+        layer.enabled: true
+        layer.effect: MultiEffect {
+            blurEnabled: true
+            blurMax: 64
+            blur: 0.85
+            saturation: -0.2
+            autoPaddingEnabled: false
+        }
     }
-    Rectangle { anchors.fill: parent; color: "#a6232327" }   // grey veil over the artwork
+    Rectangle { anchors.fill: parent; color: "#9a0b0b0d" }
 
     ColumnLayout {
         id: layout
@@ -81,10 +90,11 @@ ApplicationWindow {
         focus: true
         Keys.onPressed: (event) => event.accepted = navigator.key(event.key, event.modifiers)
 
-        // header band with one card per game
+        // header art carrying the title and one card per game
         Hero {
             Layout.fillWidth: true
             Layout.preferredHeight: 168
+            source: backend.fileUrl(backend.chrome.hero || "")
             games: backend.chrome.games || []
         }
 

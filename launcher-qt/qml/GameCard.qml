@@ -17,7 +17,7 @@ Item {
         anchors.fill: parent
         backdrop: card.backdrop
         radius: 18
-        tint: card.selected ? "#e63a3020" : (mouse.containsMouse ? "#e6383840" : "#e62e2e33")
+        tint: card.selected ? "#b81a160f" : (mouse.containsMouse ? "#a01d1d22" : "#8c121216")
     }
     Rectangle {   // outline: yellow when selected
         anchors.fill: parent

@@ -6,8 +6,8 @@ Item {
     id: glass
     property Item backdrop: null
     property real radius: 16
-    property color tint: "#d92a2a2f"
-    property real blurAmount: 0.35
+    property color tint: "#8c101014"
+    property real blurAmount: 1.0
 
     ShaderEffectSource {
         id: behind
