@@ -107,6 +107,102 @@ bool from_text(const std::vector<uint8_t> &text, uint8_t *value) {
     return true;
 }
 
+// SHA-256 of n bytes (any length)
+void sha256(const uint8_t *p, size_t n, uint8_t *out) {
+    std::vector<uint8_t> m(p, p + n);
+    m.push_back(0x80);
+    while (m.size() % 64 != 56) m.push_back(0);
+    const uint64_t bits = (uint64_t)n * 8;
+    for (int i = 7; i >= 0; --i) m.push_back((uint8_t)(bits >> (8 * i)));
+    uint32_t h[8] = {0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19};
+    for (size_t o = 0; o < m.size(); o += 64) {
+        uint32_t w[64], v[8];
+        for (int i = 0; i < 16; ++i)
+            w[i] = (uint32_t)m[o + 4 * i] << 24 | (uint32_t)m[o + 4 * i + 1] << 16 | (uint32_t)m[o + 4 * i + 2] << 8 | m[o + 4 * i + 3];
+        for (int i = 16; i < 64; ++i)
+            w[i] = w[i - 16] + (rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >> 3)) + w[i - 7] +
+                   (rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ (w[i - 2] >> 10));
+        std::memcpy(v, h, sizeof v);
+        for (int i = 0; i < 64; ++i) {
+            const uint32_t t1 = v[7] + (rotr(v[4], 6) ^ rotr(v[4], 11) ^ rotr(v[4], 25)) + ((v[4] & v[5]) ^ (~v[4] & v[6])) + K[i] + w[i];
+            const uint32_t t2 = (rotr(v[0], 2) ^ rotr(v[0], 13) ^ rotr(v[0], 22)) + ((v[0] & v[1]) ^ (v[0] & v[2]) ^ (v[1] & v[2]));
+            v[7] = v[6]; v[6] = v[5]; v[5] = v[4]; v[4] = v[3] + t1;
+            v[3] = v[2]; v[2] = v[1]; v[1] = v[0]; v[0] = t1 + t2;
+        }
+        for (int i = 0; i < 8; ++i) h[i] += v[i];
+    }
+    for (int i = 0; i < 8; ++i)
+        for (int b = 0; b < 4; ++b) out[4 * i + b] = (uint8_t)(h[i] >> (24 - 8 * b));
+}
+
+// The master server's 3232 pushes (helper v7.254, ps3net SPEC-services2 1.1) are sealed with two text keys of the same
+// EBOOT: the Blowfish key and the HMAC key. They are kept as two lines of hex digits in <data>\u3-push.key. Here only
+// where they are (file offsets of the strings, used with their full length) and their SHA-256.
+struct PushKey { long long at; size_t length; uint8_t want[32]; };
+const PushKey PUSH_KEYS[2] = {
+    {0xdde3d0, 20, {0x9a, 0xd0, 0x7a, 0xd0, 0x75, 0x64, 0xfd, 0xef, 0xd8, 0x3c, 0x65, 0xe0, 0x5f, 0x96, 0x03, 0x2d,
+                    0x20, 0x3a, 0x37, 0x32, 0x83, 0x2b, 0x7b, 0xed, 0x7e, 0xf4, 0xdc, 0xa5, 0x32, 0xaa, 0x48, 0x73}},
+    {0xdde388, 64, {0x8e, 0xd1, 0x4a, 0x17, 0x65, 0xbb, 0x93, 0x07, 0x76, 0xd5, 0x25, 0x24, 0xc3, 0x0b, 0x8f, 0x11,
+                    0xed, 0x99, 0xce, 0x86, 0xc7, 0xf3, 0x5e, 0x74, 0x87, 0xd5, 0xef, 0x57, 0xc4, 0x5f, 0x12, 0x1b}}};
+
+bool push_key_ok(const uint8_t *p, size_t n, const PushKey &k) {
+    if (n != k.length) return false;
+    uint8_t d[32];
+    sha256(p, n, d);
+    return !std::memcmp(d, k.want, 32);
+}
+
+// <data_dir>\u3-push.key already right, or written from the first EBOOT of the list that has both keys
+void push_key_file(const std::wstring &data_dir, const std::wstring &list) {
+    const std::wstring file = data_dir + L"u3-push.key";
+    {   // already there?
+        const std::vector<uint8_t> t = read_part(file.c_str(), 0, 300);
+        std::vector<uint8_t> v[2];
+        size_t line = 0;
+        int half = -1;
+        for (uint8_t c : t) {
+            if (c == '\n') { if (++line == 2) break; continue; }
+            const int d = c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : -1;
+            if (d < 0) continue;
+            if (half < 0) half = d; else { v[line].push_back((uint8_t)(half << 4 | d)); half = -1; }
+        }
+        const bool ok = push_key_ok(v[0].data(), v[0].size(), PUSH_KEYS[0]) && push_key_ok(v[1].data(), v[1].size(), PUSH_KEYS[1]);
+        SecureZeroMemory(v[0].data(), v[0].size());
+        SecureZeroMemory(v[1].data(), v[1].size());
+        if (ok) return;
+    }
+    for (size_t at = 0; at <= list.size();) {
+        size_t end = list.find(L'\n', at);
+        if (end == std::wstring::npos) end = list.size();
+        const std::wstring path = list.substr(at, end - at);
+        at = end + 1;
+        std::vector<uint8_t> a = read_part(path.c_str(), PUSH_KEYS[0].at, (long long)PUSH_KEYS[0].length);
+        std::vector<uint8_t> b = read_part(path.c_str(), PUSH_KEYS[1].at, (long long)PUSH_KEYS[1].length);
+        if (push_key_ok(a.data(), a.size(), PUSH_KEYS[0]) && push_key_ok(b.data(), b.size(), PUSH_KEYS[1])) {
+            static const char digits[] = "0123456789abcdef";
+            std::string text;
+            for (const std::vector<uint8_t> *k : {&a, &b}) {
+                for (uint8_t c : *k) { text += digits[c >> 4]; text += digits[c & 15]; }
+                text += '\n';
+            }
+            const std::wstring tmp = file + L".tmp";
+            HANDLE f = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+            bool done = false;
+            if (f != INVALID_HANDLE_VALUE) {
+                DWORD put = 0;
+                done = WriteFile(f, text.data(), (DWORD)text.size(), &put, nullptr) && put == text.size();
+                CloseHandle(f);
+                done = done && MoveFileExW(tmp.c_str(), file.c_str(), MOVEFILE_REPLACE_EXISTING);
+                if (!done) DeleteFileW(tmp.c_str());
+            }
+            SecureZeroMemory(&text[0], text.size());
+            SecureZeroMemory(a.data(), a.size());
+            SecureZeroMemory(b.data(), b.size());
+            return;
+        }
+    }
+}
+
 bool file_has_it(const std::wstring &file) {
     uint8_t value[16];
     return from_text(read_part(file.c_str(), 0, 64), value) && is_the_value(value);
@@ -147,11 +243,12 @@ UN_API int un_u3_session_value(const wchar_t *data_dir, const wchar_t *eboots, c
     CreateDirectoryW(data_dir, nullptr);   // a player who never started the multiplayer has no data folder yet
     std::wstring file = data_dir;
     if (file.back() != L'\\' && file.back() != L'/') file += L'\\';
+    std::wstring list = eboots ? eboots : L"";
+    push_key_file(file, list);   // helper v7.254: the 3232 push keys (no image fallback: no image ever held them)
     file += L"u3-session.key";
     if (file_has_it(file)) return 1;
     uint8_t value[16];
     int from = 0;
-    std::wstring list = eboots ? eboots : L"";
     for (size_t at = 0; at <= list.size() && !from;) {
         size_t end = list.find(L'\n', at);
         if (end == std::wstring::npos) end = list.size();
