@@ -29166,6 +29166,8 @@ extern "C" U3X_FN int u3x_i01_leftctl(uint32_t pid, uint32_t id) {
     if (pid == 0x53cbb5f2u) return id == 0xf75ffe57u;
     if (pid == 0xb99a3235u)
         return id == 0x70e80076u || id == 0xef031de1u || id == 0x9247257au || id == 0x382fa1fdu || id == 0x002b2bd6u;
+    if (pid == 0xe35f0f1au)   // v7.259: the matchmaking page: its menu, map vote, difficulty vote and tips lists
+        return id == 0xa01a2a26u || id == 0xdc6e89d8u || id == 0x30a4b8f3u || id == 0xcad0ae76u;
     return 0;
 }
 
@@ -47448,6 +47450,17 @@ A0_FN void u3x_a0_after_read(uintptr_t base, Log log, uint32_t index, const uint
     if (ps3) u3x_xp_after_read(base, log, index, entry, stream, length, fresh, queued);
     const char *name = xp::entry_name(entry);
     const uint32_t count = at<uint32_t>(base + xp::MQ_COUNT);
+    // v7.259: a PC peer's party messages come out of the game's read without a sender (name and id empty, connection
+    // 0), as a PS3 player's do (xp fills those in). The message layer takes a message as the leader's only by the
+    // sender, so a PC leader's 0x102 / 0x10e (Custom Game start, the follow) never counted on a PC member. The sender's
+    // name goes in here the same way, for the messages this packet posted.
+    if (!ps3 && name && name[0])
+        for (uint32_t i = queued; i < count && i < 64; i++) {
+            uint8_t *e = reinterpret_cast<uint8_t *>(base + xp::MQ) + i * 0x40;
+            if (e[0]) continue;
+            for (int c = 0; c < 0x24; c++) e[c] = 0;
+            for (int c = 0; c < 16 && name[c]; c++) e[c] = static_cast<uint8_t>(name[c]);
+        }
     for (uint32_t i = queued; i < count && i < 64; i++) {
         const uint8_t *e = reinterpret_cast<const uint8_t *>(base + xp::MQ) + i * 0x40;
         msg(0, 1, rd<uint32_t>(e, 0x28), name, rd<const uint8_t *>(e, 0x30), rd<uint32_t>(e, 0x38));
@@ -49266,7 +49279,9 @@ using v7252::S_OWNER;
 using v7252::R_KEY;
 // image offsets (SPEC-handshake [H5] [H6], SPEC-host-leaves [L4])
 constexpr uintptr_t PROC_START = 0x71d6b0, PROC_DONE = 0x71d3f0, SEND_START = 0x6aa8a0, FACTORY = 0x6c2b50,
-                    SEND_ALL = 0x733d90, LEAVE_SLOT = 0x16d3810 + 0x20, LEAVE_PROCESS = 0x6d3800;
+                    SEND_ALL = 0x733d90, LEAVE_SLOT = 0x16d3810 + 0x20, LEAVE_PROCESS = 0x6d3800,
+                    MAKE_NET_PLAYER = 0x72eca0, R_MEMBER = 0x574;   // v7.259: find-or-make, the record's member id
+HS_RO const char ht_made[] = "handshake: no net player of the host yet, made one before ConnectionDone: ";
 // the first 12 bytes of the manager's send to every connection (the check the co-op spoiler message makes)
 HS_RO const uint8_t code_send_all[12] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x54, 0x53, 0x49};
 // boot.log texts ("U3MP online: " + text, through the C part's so_note)
@@ -49390,6 +49405,26 @@ HS_FN void u3x_hs_tick(uintptr_t base) {
         uint8_t *host = st.answer ? u3x_find_member(ms, rd<uint32_t>(ms, S_OWNER)) : nullptr;
         if (!host) return;
         st.answer = 0;
+        // v7.259: the manager's send goes to the net player records, and a matchmaking member gets StartConnection
+        // before it ever made the host's record (PS4 makes the members' records only at the load; PS3's member match
+        // setup made one for every room member first). With no record the answer went nowhere and the host waited at
+        // 0x2c for ever. The host's record is made first when it is missing (the game's find-or-make, as PS3: no team,
+        // not ready).
+        bool have = false;
+        const uint32_t host_id = rd<uint32_t>(host, 0x2c);
+        for (int i = 0; i < 10; i++) {
+            const uint8_t *r = v7252::record(base, i);
+            if (r && r[R_IN_USE] && !r[R_GONE] && rd<uint32_t>(r, R_MEMBER) == host_id) have = true;
+        }
+        if (!have) {
+            uint8_t *p = game_call<uint8_t *>(base + MAKE_NET_PLAYER, reinterpret_cast<void *>(base + v7252::NGM), ms,
+                                              host, uint32_t{0}, uint32_t{0});
+            if (p) {
+                *reinterpret_cast<int32_t *>(p + 0x21c) = -1;
+                p[R_INFO] = 0;
+            }
+            note(ht_made, host, p ? nullptr : ht_not, -1, nullptr);
+        }
         // ConnectionDone {1, 0, 0} built here (the factory's object) and given to the manager's send to every connection
         const uint8_t *code = reinterpret_cast<const uint8_t *>(base + SEND_ALL);
         int same = 0;
@@ -55112,6 +55147,19 @@ FAM_FN void u3x_m05_row(uintptr_t base, int32_t *ev, int after) {
     } else if (ev[0] == 5 && st.m05_row && (!st.m05_last || st.m05_row <= st.m05_last)) {
         ev[1] = st.m05_row - 1;
     }
+}
+// v7.259: the focus keeper (G34 u3x_i01_focus: Left back out of the party box, the game's own moves into the box
+// undone, Right into it) runs from the party box's op 6 when the helper's party list answers. On the matchmaking page
+// the matchmaking player list answers the party box instead, so the keeper never ran there: the game left the focus in
+// the player list and Left did nothing (no Profile / Paid Boosters, no difficulty vote). The C part's lobby source
+// calls this after each answered request; the keeper runs once per game tick.
+FAM_FN void u3x_mm_focus(uintptr_t base, const int32_t *ev, void *s) {
+    if (ev[0] != 6 || (ext_eb()[1] & 0x20000u)) return;   // the keeper's own switch
+    const uint8_t *source = rd<const uint8_t *>(ev, 0x98);
+    if (!source || rd<uint32_t>(source, 0x1c) != 0x4c414eadu) return;   // the party box
+    const uint8_t *top = u3h_active_page_object(base);
+    if (!top || rd<uint32_t>(top, 0x10) != 0xe35f0f1au) return;     // PAGE_MULTIPLAYER_MATCHMAKING
+    u3x_i01_focus(base, s);
 }
 // every frame (ring tick): lobby entry, the connect step, the page after connecting, the rename keyboard, the co-op
 // heroes
