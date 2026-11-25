@@ -93,10 +93,13 @@ No other symbol of these files is used elsewhere. All state is file-private.
 ### 1.1 Purpose
 
 On PS4 nothing shows the in-match scoreboard page (`PAGE_MULTIPLAYER_SCOREBOARD`). The per-frame update and draw
-of the net player tracker's overlay entries were removed. This file shows entry 0 (the scoreboard) when the player
-presses a pad button during a match, fades it in and out, and draws its page every frame. It runs once per frame,
-after the frontend 2D draw, by retargeting the call at `0x3fc52d` (chaining whatever that call already reaches,
-normally loading.cpp's wrapper).
+of the net player tracker's overlay entries (PS3 `0x4cbf00` / `0x4cbc10`) were removed. This file decides which of
+the four entries is shown (pad button, the local player being dead, the round / match end), fades and slides them
+the PS3 way, draws the highest visible entry's page every frame, and draws the dead player's hint line. It runs once
+per frame, after the frontend 2D draw, by retargeting the call at `0x3fc52d` (chaining whatever that call already
+reaches, normally loading.cpp's wrapper). The PS3 rules are `parity-m-features.md` M1 / M2 and
+`parity-ticker-respawn.md` 2; the pure parts (fade, priority, slide, state entries, auto edges, hint fade) are in
+`overlay_rules.cpp` (test `u2mp-overlay-test`).
 
 ### 1.2 Interface
 
@@ -133,41 +136,79 @@ normally loading.cpp's wrapper).
 | `0x14ce97c` | NET_SM |
 | ngm+`0x1e80` | NGM state |
 | `0x1116180+0x104` | frame counter for the descriptor time |
+| tracker+`0x08` + `0x14` k, k = 0..3 | entry k: u8 shown, +4 f32 fade, +8 f32 speed, +0xc u8 dim, +0x10 u32 page id. Pages: 0 `f650325d` SCOREBOARD, 1 `5dad5a68` ROUND_RESULTS, 2 `3d437466` RESULTS, 3 `5dad5a68` ROUND_RESULTS; entries 1..3 dim |
+| ngm+0 -> tracker | local tracker; any tracker: +`0x20` name (0 = unused), +`0x10` character slot, +`0x18` character id (process +`0x44` must match), +`0x17c` s32 died time, +`0x180` s32 spawn time |
+| `0x65b830` | cond 44 query (respawn countdown / tries row); its start and op-test bytes are checked before the dead test is used |
+| `0xe2186a0c` | text "\|SELECT\| Scoreboard    \|D-PAD\| Camera" (TextDb `0xcddc00`) |
+| `0x3dd780` / `0x9b5c20` | one-shot sound init / play; `d9b465e1` open, `2f118f31` close |
+| `0x5b5450` | menu text-in-rect item (loading.cpp `menu_text_in_rect`) |
 
 ### 1.4 Behaviour
 
-State kept by the module (initial values): shown = false; fade = 0.0; speed = 1.0; previous buttons = 0;
-"first frame" = true; "page log pending" = true (once per process).
+State kept by the module (initial values): per entry k = 0..3 shown = false, fade = 0.0, speed = 1.0; board
+(entry 0 wanted) = false; by button = false; automatic flag of the last frame = false; request entry = 0; hint = 0.0;
+result timers auto_left = end_hold = 0; in match = false; previous buttons = 0; "first frame" = true; "page log
+pending" = true (once per process).
 
 **Page lookup.** Walk the menu manager's page pointer array (menu+0x370, up to 200 entries, stop at the first NULL).
-The result is the first page whose u32 at +0x10 equals `0xf650325d`, or none.
+The result is the first page whose u32 at +0x10 equals the entry's page id, or none.
+
+**Out of play (a tracker).** Its character does not resolve (slot NULL, id 0, slot empty, or process +0x44 != id),
+or s32 +0x17c (died) >= s32 +0x180 (spawned). This is the cond 44 dead test (`parity-ticker-respawn.md` 2.3 rule 2)
+without the two state-record flags (their PS4 call, process vtable +0x88, is not mapped). "Local player dead" = the
+local tracker (ngm+0) exists and is out of play. "Every player out" = at least one tracker has a name and every
+tracker with a name is out of play.
 
 **Each time H is called (once per frame):**
 
-1. Call the previous target of the call site (the address the call reached before install) with the same three
-   arguments. Keep its u64 result; H returns it at the end.
-2. Compute dt (float seconds) from a monotonic host clock: 0.0 on the first call; afterwards the time since the
-   previous call, capped at 0.1. Remember the current time.
-3. "Playing" = s32 NET_SM > 1 and s32 ngm+0x1e80 == 2.
-4. Read the u32 pad buttons. "Pressed" = a bit is set now, was not set in the previous frame's value, and is in
-   the button mask. Store the current value as the previous value (every frame, playing or not).
-5. If not playing: request "hidden" with reason `not playing`.
-   Else if pressed: set speed to 2.0 and write 2.0 (f32) to tracker+0x10 (on every press). Then request the
-   opposite of the current shown state with reason `button`.
-6. Fade: fade = clamp(fade + (shown ? dt : -dt) * speed, 0.0, 1.0). Write fade (f32) to tracker+0x0c every frame.
-7. If fade <= 0.0, stop here. Look up the page; if none, stop here.
-8. ease = shown ? fade*fade : 1 - (1-fade)*(1-fade). y = (1 - ease) * (shown ? 20.0 : -20.0). Draw the page
-   (below) with alpha = fade, x = 0.0, y, and dt.
+1. Call the previous target of the call site with the same three arguments; H returns its u64 result at the end.
+2. dt (float seconds) from a monotonic host clock: 0.0 on the first call, else the time since the previous call,
+   capped at 0.1.
+3. "Playing" = s32 NET_SM > 1 and NGM state (ngm+0x1e80) == 2. "In match" becomes true while playing and false when
+   NET_SM <= 1 or the NGM state is outside 2..5. NGM state changes are logged while in match
+   (`scoreboard: NGM state %d -> %d (NET_SM %d)`). The game type (`*net-games*` record +0xc) is read while in match;
+   type 11 = cinema.
+4. "Pressed" = a pad bit set now, not set in the previous frame and in the button mask (previous value stored every
+   frame).
+5. Result timers (stand-in for the PS3 request bytes, `parity-m-features.md` M2 rule 8 / open question 6), unchanged
+   in effect: while playing, in a round game, when ngm+0x1e84 turns non-zero: final round (round limit <= 0 or
+   rounds played + 1 >= limit) -> the scoreboard page if loaded, else RESULTS; auto_left = end_hold = 12 s. Other
+   rounds -> ROUND_RESULTS in round modes when loaded, the scoreboard in type 10, else RESULTS when loaded, else the
+   scoreboard; auto_left = 60 s. The page picks the request entry (scoreboard 0, ROUND_RESULTS 1, RESULTS 2). The
+   flag going back to 0 clears both timers. Not playing: end_hold counts down; when it is out, auto_left = 0.
+   `show_round_results()` (session.cpp) asks for the same 12 s request.
+6. Automatic flag (M2 rule 6) = playing, cond 44 bytes checked, local player dead, not cinema. Turning on: if the
+   board is not up, board = true, by button = false, entry 0 speed = 1.0 (no sound); log
+   `scoreboard: local player dead, board opens by itself`. Turning off: board = false unless the player opened it
+   with the button.
+7. Not playing and end_hold out: board = false, by button = false. Else on a press: open = not (board or
+   auto_left > 0); board = by button = open; auto_left = 0; entry 0 speed = 2.0 (written to tracker+0x10); play
+   `d9b465e1` (open) or `2f118f31` (close).
+8. Match states (M2 rule 8, only with `UNCHARTED_U2MP_SCOREBOARD_STATES=1`): while in match and not playing, NGM
+   state 3 -> entry 2, 4 -> entry 3, 5 -> entry 0 (cinema: only 3 and 4); skipped (logged once) when that entry's
+   page is not loaded. When it applies and no timer runs, board = by button = false.
+9. Shown: auto_left > 0 -> only the request entry; else a state entry -> only that one; else entry 0 = board. Each
+   change goes through "request shown state". Fade every entry: fade = clamp(fade +- speed x dt) (M2 rule 1); write
+   it to the entry's memory (entry 0 always, 1..3 when their page ids checked at install).
+10. Draw the highest entry with fade > 0 (M2 rule 2) when its page is loaded: alpha = fade, x = 0,
+    y = shown ? -20 x (1 - ease) : +20 x (1 - ease), ease = shown ? 1 - (1-fade)^2 : fade^2 (M2 rule 3: slides
+    down into place, on downward out). Entries 1..3 want the menu background dim; its PS4 fields are not mapped:
+    logged once, nothing dimmed.
+11. Hint line (M1): hint = clamp(hint + 1.0 dt) while the local player is dead (the automatic flag's test, standing in
+    for "a death camera runs") and not every player is out, else clamp(hint - 2.0 dt). While hint > 0 and not
+    cinema: text `e2186a0c` (none: nothing) through the text-in-rect item, colour transform {0.8, 1, 1, 1, hint,
+    3.0, 0, 1, 0, 0}, rect (0, 500, 1280, 240); first draw logs `scoreboard: death camera hint shown`.
 
-Notes: speed never returns to 1.0 once a button was pressed. The page keeps drawing while it fades out, also when
-not playing.
+The respawn countdown / co-op tries row (cond 44, `0x65b830`) is part of the scoreboard page and answers by itself
+whenever the page is drawn; nothing is drawn for it here (`parity-ticker-respawn.md` 2.4).
 
-**Request shown state (on, reason):** nothing happens if `on` equals the current shown state. Otherwise:
-- set shown = on; write u8 1 (on) or 0 (off) to tracker+0x08;
-- if on: look up the page; if found, write s32 2 at page+0xf8. Then, only the first time this happens in the
-  process, look the page up again and log `scoreboard: page %08x %s` with `0xf650325d` and `found` or
-  `NOT FOUND`;
-- log `scoreboard: %s (%s)` with `shown`/`hidden` and the reason.
+**Request shown state (k, on, reason):** nothing happens if `on` equals entry k's shown state. Otherwise:
+- set it; write u8 1 / 0 to the entry's shown byte (entry 0 always, 1..3 when checked);
+- if on: look up the entry's page; if found, write s32 2 at page+0xf8. Then, only the first time this happens in the
+  process, log `scoreboard: page %08x %s` with `0xf650325d` and `found` / `NOT FOUND`, and which result pages are
+  loaded;
+- log `scoreboard: %s %s (%s)` with the entry name, `shown`/`hidden` and the reason (`not playing`,
+  `round results`, `match state`, `button`, `local player dead`, `automatic`).
 
 **Draw the page (page, alpha, x, y, dt):**
 
@@ -201,12 +242,17 @@ In this order:
    `scoreboard: tracker 0x%llx is not as expected, not installed` with `0x104f544`, return.
 4. Check `0x3fc52d` is executable for 5 bytes and its byte is `0xE8`. Else log
    `scoreboard: 0x%llx is not a call, not installed` with `0x3fc52d`, return.
+4a. Optional parts, each logged when off: entries 1..3 memory (page ids at tracker+0x2c / +0x40 / +0x54 as in
+   1.3, else `scoreboard: tracker entries 1-3 not as expected, their memory is left alone`); the automatic board and
+   hint line (`0x65b830` start `55 48 89 e5 41 57 41 56 41 55 41 54 53 48 81 ec 88 00 00 00 48 89 fb 4c` and
+   `0x65b855` `83 3b 01 0f 85 f1 02 00 00`); the sounds (`55 48 89 e5` at `0x3dd780` and `0x9b5c20`); match-state
+   result pages only with env `UNCHARTED_U2MP_SCOREBOARD_STATES=1`.
 5. The current target = `0x3fc532 + rel32` (as an image offset; it may lie outside the image when another module
    already retargeted the call). Remember its absolute address as the previous target.
 6. `retarget_call(0x3fc52d, current target, H, name)` with name `scoreboard: 2D draw` when the current target is
    `0x554340`, else `scoreboard: 2D draw (chained)`. If it fails, return.
-7. installed += 1. Log `scoreboard: PAGE_MULTIPLAYER_SCOREBOARD port installed (button mask 0x%x; PS3 0x4cbf00 / 0x4cbc10)`
-   with the mask.
+7. installed += 1. Log `scoreboard: PAGE_MULTIPLAYER_SCOREBOARD port installed (button mask 0x%x; PS3 0x4cbf00 /
+   0x4cbc10; auto open %s, sounds %s, state result pages %s)`.
 
 The image is not checked for NULL here.
 
@@ -222,6 +268,11 @@ The image is not checked for NULL here.
 - The once-only page log (first show only), with the page absent on the first show.
 - dt comes from the host clock; a test that needs fixed values should only compare frames where dt is 0 (first
   call) or arrange equal timing, or replace the clock in both builds the same way.
+- Unit test `u2mp-overlay-test`: fade speeds 1 / 2 per second, entry priority, slide in from above / out below,
+  state entries, automatic edges, hint 1 / 2 per second.
+- In the game (`parity-m-features.md` 7): death in Team Deathmatch opens the board at 1/s without sound with
+  "Respawn in [A]..." and the hint line, both go on respawn; the button opens / closes it at 2/s with the two sounds;
+  round results over the board.
 
 ---
 

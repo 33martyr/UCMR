@@ -297,7 +297,7 @@ launcher's / online program's job.
 Game start-up (`0x25718`), after registering the MP controls: when one of the boot flags of section 0 is set,
 it presses BUTTON_MULTIPLAYER itself. Developer / boot-option path. Ours: none (open question 8).
 
-### 2.10 Friends stats ticker line `0x43b30c` and bounded append `0x43b290` (MISSING)
+### 2.10 Friends stats ticker line `0x43b30c` and bounded append `0x43b290` (DONE 2026-11-25: shown by ticker.cpp, `parity-ticker-respawn.md` 1)
 
 PAGE_MULTIPLAYER's bottom strip is a ticker control (PS4 kind 24; texts of `texts.cpp` "Stats ticker k24").
 PS3 fills it from the per-frame NET_SM update `0x447248` through `0x446c60` (both outside this group; their

@@ -1943,6 +1943,7 @@ U2MP_GUEST void page_handler(uint32_t *event) {
     cleanup_leaving_page();
     const bool page_open = multiplayer_page_open();
     if (page_open) multiplayer_page_seen = true;
+    if (page_open) ticker_refresh();   // PS3 0x447248: the stats ticker's next line (ticker.cpp)
     if (active && net_sm() == 18 && !page_open) {
         if (multiplayer_page_seen) {
             // The player backed out of the party menus without Leave Multiplayer (PS3 tore down here too).

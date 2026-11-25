@@ -510,8 +510,8 @@ co-op exclusion is in session.cpp).
 | 445020 | PAGE_MULTIPLAYER_CONNECTING | PLATFORM | session.cpp skips it (3.2) |
 | 445608 | Leave::Enter | COVERED | 2.5 session.cpp LeaderLeave (0x117), `host_own_party`; PS4 5f00d0 the normal path |
 | 4465c8 | PAGE_MULTIPLAYER (Callback_Multiplayer) | COVERED | PS4 5eb1a0 + session.cpp |
-| 446c60 | lobby ticker builder | MISSING | 2.10: text built (online.cpp, own entry first); the PS4 call that shows it is not known |
-| 447248 | per-frame net page update (ticker refresh, version text) | MISSING | 2.11 version text done (session.cpp `draw_version_text`); 2.10 refresh needs the ticker control |
+| 446c60 | lobby ticker builder | DONE (CHECK) | 2.10: text built (online.cpp, own entry first); shown through PS4 `5d6500` (ticker.cpp, `parity-ticker-respawn.md` 1) |
+| 447248 | per-frame net page update (ticker refresh, version text) | DONE (CHECK) | 2.11 version text done (session.cpp `draw_version_text`); 2.10 refresh: ticker.cpp `ticker_refresh` from the page handler |
 | 447a5c | NetInit thread | PLATFORM | netinit.cpp, netpatch.cpp, online.cpp (3.2) |
 | 4496ac | heartbeat reply parser | PLATFORM | none; party size shown (3.2) |
 | 449ae8 | NP Basic event handler | PLATFORM | online.cpp (3.2) |
