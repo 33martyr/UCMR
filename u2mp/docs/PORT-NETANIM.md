@@ -5,6 +5,9 @@ File: `gow3_pc/src/u2mp/netanim.cpp` (new, `install_netanim`). Replaces PORT-GAM
 whose conclusion ("`0x5f48d0` is reached only through the vtable, remote players animate through
 `0x5f48e0`") was wrong on both counts.
 
+Since `e05a7d9` (PR #110) the slot 4 replacement of section 3 is not installed: the reworked reader call-out
+feeds only the pose generator, so the slot's visitor gets no clips (`u2mp/docs/spec/netanim.md` 1.1).
+
 ## 1. What is called every frame
 
 - NetCharacter anim setup `0x601c4a..0x601cc1` gives the engine anim layer (type 0x10, ctor `0x391370`,

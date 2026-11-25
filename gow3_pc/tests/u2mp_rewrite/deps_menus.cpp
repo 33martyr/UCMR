@@ -39,6 +39,14 @@ std::vector<std::string> progression_recent_players(size_t max) {
     return s.recent;
 }
 
+#if !defined(u2mp)   // new build only: menus.cpp's Players Met query asks for the G1 list (f11e480, spec
+                     // parity-g-friends.md G1); the old headers lack it. Answers the same rows.
+std::vector<std::string> progression_players_met() {
+    hx::rec("progression_players_met -> %zu", s.recent.size());
+    return s.recent;
+}
+#endif
+
 namespace session {
 std::string local_name() {
     hx::rec("session::local_name");

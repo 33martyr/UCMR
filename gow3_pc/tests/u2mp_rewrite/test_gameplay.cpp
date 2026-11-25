@@ -6,6 +6,7 @@
 // run: bash gow3_pc/tests/u2mp_rewrite/run.sh gameplay scoreboard.cpp rosternames.cpp visibility.cpp gameplay3.cpp
 //      matchend.cpp spawn.cpp scripttime.cpp            (HX_VERBOSE=1 prints every record of failing scenarios)
 #include "harness.h"
+#include "deps_gameplay.h"
 #define HX_NO_CLOCK_MACRO
 #include "fake_clock.h"
 #include "u2mp_internal.h"
@@ -169,6 +170,7 @@ void scenario(const char *name, const std::function<void(const Side &)> &body) {
         hx::bind_both();
         bump = 0x1600000;
         hx::fake_clock_ns = side_clock[k];
+        gp_deps = GpDeps{};
         if (reset_cfg) reset_cfg();
         setenv_("UNCHARTED_U2MP_SCOREBOARD_BUTTON", nullptr);
         setenv_("UNCHARTED_U2MP_TIME_LIMIT", nullptr);
@@ -276,19 +278,154 @@ void sb_setup(uint64_t target = kSbDraw) {
     put<uint32_t>(kSbTracker + 0x18, 0xf650325d);
     put<float>(kSbTracker + 0x10, 1.0f);
     put_call(kSbCall, target);
+    // What the new install also checks, as the real PS4 1.02 image has it (boot-linked.bin): tracker entries 1-3
+    // (speed 1.0, dim 1, page ids 5dad5a68 / 3d437466 / 5dad5a68), the cond 44 query 0x65b830 / 0x65b855 and the
+    // one-shot sound pair 0x3dd780 / 0x9b5c20 (only their first bytes; the rest of the sound check, 0x3dd7f7,
+    // 0x3dd8a6, 0x9b5c34 and 0x666b8b, is not put, so the sounds stay off).
+    for (int k = 1; k < 4; k++) {
+        put<float>(kSbTracker + 0x10 + 0x14 * k, 1.0f);
+        put<uint32_t>(kSbTracker + 0x14 + 0x14 * k, 1);
+        put<uint32_t>(kSbTracker + 0x18 + 0x14 * k, k == 2 ? 0x3d437466 : 0x5dad5a68);
+    }
+    put_bytes(0x65b830, {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54,
+                         0x53, 0x48, 0x81, 0xec, 0x88, 0x00, 0x00, 0x00, 0x48, 0x89, 0xfb, 0x4c});
+    put_bytes(0x65b855, {0x83, 0x3b, 0x01, 0x0f, 0x85, 0xf1, 0x02, 0x00, 0x00});
+    put_bytes(0x3dd780, {0x48, 0x89, 0xf8, 0x48});
+    put_bytes(0x9b5c20, {0x55, 0x48, 0x89, 0xe5});
+    // The frame step read the new install requires (parity-m-features.md 10.1; without it: not installed).
+    put_bytes(0x5a3c74, {0x48, 0x8d, 0x05, 0x05, 0x25, 0xb7, 0x00, 0xc5, 0xfa, 0x2a, 0x88, 0x10, 0x01, 0x00, 0x00});
 }
-// after the install: the guest functions become stubs
+
+// ---- the documented scoreboard changes since the old version, applied to the old record before the comparison ----
+// The new scoreboard (u2mp/docs/spec/gameplay.md 1.4 / 1.5 after 514bcfe: parity-m-features.md M1 / M2,
+// parity-ticker-respawn.md 2; a93b2a8: parity-j-voice-medals.md J4 / J5) does more than the old one. In these
+// scenarios its additions stay idle: no local tracker (no automatic board, no hint line), no round end, no J4 / J5
+// bytes, sounds off as on the real image, no match-state pages. What they still change in the record is put into the
+// old record here, line by line, from the spec; everything else is compared as it is.
+
+// Install (gameplay.md 1.5, parity-j-voice-medals.md J4 / J5 "Done"): the voice column and the dispatcher are checked
+// first, also when the overlay is off; the sounds are logged off (step 4a); the install line names the optional parts.
+void sb_install_expected(size_t at) {
+    auto &r = hx::calls;
+    r.insert(r.begin() + long(at),
+             {"log scoreboard: team list cell image query not as expected: no muted icon in the voice column",
+              "log scoreboard: mode dispatcher / its team list row search not as expected: no mute from the scoreboard"});
+    const std::string installed = "log scoreboard: PAGE_MULTIPLAYER_SCOREBOARD port installed (button mask 0x";
+    for (size_t i = at + 2; i < r.size(); i++) {
+        if (r[i].rfind("retarget_call 0x3fc52d 0x", 0) == 0)   // the call itself, not its "failed (test)" line
+            r.insert(r.begin() + long(i++), "log scoreboard: one-shot sound calls not as expected, no open / close sounds");
+        if (r[i].rfind(installed, 0) == 0 && r[i].back() == ')')
+            r[i].insert(r[i].size() - 1, "; auto open on, sounds off, state result pages off");
+    }
+}
+void sb_inst(const Side &s) {
+    const size_t at = hx::calls.size();
+    inst(s.sb, "scoreboard");
+    if (g_side == 0) sb_install_expected(at);
+}
+// after the install: the guest functions become stubs (LookupPointer too: the new frame reads the game type from
+// *net-games* while in match, gameplay.md 1.4 step 3; no table here, so type -1)
 H3 sb_after(uint64_t target = kSbDraw) {
     hx::stub(kSbDraw, (void *)h_draw2d);
     if (target != kSbDraw) hx::stub(target, (void *)h_draw2d_chained);
     hx::stub(kSbLayout, (void *)h_layout);
+    hx::stub(kLookup, (void *)h_lookup);
     return (H3)hx::retarget_host(kSbCall);
 }
 H3 sb_install(const Side &s, const char *env, uint64_t target = kSbDraw) {
     sb_setup(target);
     if (env) setenv_("UNCHARTED_U2MP_SCOREBOARD_BUTTON", env);
-    inst(s.sb, "scoreboard");
+    sb_inst(s);
     return sb_after(target);
+}
+
+// Frames (gameplay.md 1.4). The new module's statics that decide these lines, kept from the old side's inputs
+// (both sides get the same ones; statics carry over between scenarios alike).
+struct SbNew {
+    int32_t last_state = -1;   // step 3: the NGM state of the last frame (-1 when not in the net)
+    bool in_match = false;     // step 3
+    std::string entered;       // the page the "entered" log names last (reset when an entry hides)
+    bool shown = false;        // entry 0 shown (old: its `shown`), from the shown / hidden logs; the tracker byte
+                               // is not it after hx::clear
+} sb_new;
+// M2 rule 3 (parity-m-features.md): in: ease = 1 - (1 - f)^2, y = -20 (1 - ease); out: ease = f^2, y = +20 (1 - ease).
+float sb_new_y(bool shown, float f) {
+    const float ease = shown ? 1.0f - (1.0f - f) * (1.0f - f) : f * f;
+    return shown ? -(20.0f * (1.0f - ease)) : 20.0f * (1.0f - ease);
+}
+float sb_old_y(bool shown, float f) {
+    const float ease = shown ? f * f : 1.0f - (1.0f - f) * (1.0f - f);
+    return (1.0f - ease) * (shown ? 20.0f : -20.0f);
+}
+int sb_page_count() {
+    int n = 0;
+    while (n < 200 && get<uint64_t>(kPages + 8ull * n)) ++n;
+    return n;
+}
+void sb_frame_expected(size_t at) {
+    auto &r = hx::calls;
+    const int32_t net_sm = get<int32_t>(kNetSm), state = get<int32_t>(kNgmState);
+    const bool net_in = net_sm > 1, playing = net_in && state == 2;
+    const float fade = get<float>(kSbTracker + 0xc);   // written every frame: the fade the page was drawn with
+    // step 3: the NGM state log and the game type read (LookupPointer *net-games*) while in match
+    std::vector<std::string> head;
+    if (net_in && state != sb_new.last_state && (sb_new.in_match || playing)) {
+        char b[200];
+        std::snprintf(b, sizeof b, "log scoreboard: NGM state %d -> %d (NET_SM %d)%s", sb_new.last_state, state, net_sm,
+                      state >= 3 && state <= 5 ? "; state result pages off (UNCHARTED_U2MP_SCOREBOARD_STATES=1 turns them on)"
+                                               : "");
+        head.push_back(b);
+    }
+    sb_new.last_state = net_in ? state : -1;
+    if (playing) sb_new.in_match = true;
+    else if (!net_in || state < 2 || state > 5) sb_new.in_match = false;
+    if (sb_new.in_match) head.push_back("guest LookupPointer 3b9a067d");
+    size_t i = at;
+    if (i < r.size() && r[i].rfind("guest draw2d", 0) == 0) ++i;   // step 1: the previous target first
+    r.insert(r.begin() + long(i), head.begin(), head.end());
+    i += head.size();
+    // the NetStatGame rank copy while playing or an entry is wanted (b8b141c "fix scoreboard levels of players"),
+    // before the draw; the shown logs come first
+    bool synced = false;
+    for (; i < r.size(); i++) {
+        std::string &l = r[i];
+        for (const char *what : {"shown", "hidden"}) {   // "Request shown state": the entry's name
+            const std::string from = std::string("log scoreboard: ") + what + " (";
+            if (l.rfind(from, 0) == 0) l = "log scoreboard: scoreboard " + l.substr(16);
+        }
+        if (l.rfind("log scoreboard: scoreboard shown (", 0) == 0) sb_new.shown = true;
+        if (l.rfind("log scoreboard: scoreboard hidden (", 0) == 0) sb_new.shown = false, sb_new.entered.clear();
+        const bool shown = sb_new.shown, sync = playing || shown;
+        if (l == "log scoreboard: page f650325d found" || l == "log scoreboard: page f650325d NOT FOUND") {
+            char b[64];
+            std::snprintf(b, sizeof b, "log scoreboard: %d menu pages loaded", sb_page_count());
+            r.insert(r.begin() + long(++i), b);
+            continue;
+        }
+        if (l.rfind("guest page.update ", 0) == 0) {
+            if (sync && !synced) {
+                r.insert(r.begin() + long(i++), "sync_netstat_ranks");
+                synced = true;
+            }
+            std::string &u = r[i];
+            const std::string page = u.substr(18, u.find(' ', 18) - 18);
+            if (page != sb_new.entered) {
+                sb_new.entered = page;
+                char b[64];
+                std::snprintf(b, sizeof b, "log scoreboard: page %08x entered",
+                              get<uint32_t>(std::stoull(page.substr(4), nullptr, 16) + 0x10));
+                r.insert(r.begin() + long(i++), b);
+            }
+            continue;
+        }
+        const size_t d = l.find(" desc{ctx=");
+        if (d != std::string::npos && (l.rfind("guest layout ", 0) == 0 || l.rfind("guest render", 0) == 0)) {
+            const size_t y = l.find(' ', d + 10) + 1 + 2 * (0x2c - 8);   // desc+0x2c in the hex dump from +8
+            const float yo = sb_old_y(shown, fade), yn = sb_new_y(shown, fade);
+            if (l.compare(y, 8, hexd(&yo, 4)) == 0) l.replace(y, 8, hexd(&yn, 4));
+        }
+    }
+    if ((playing || sb_new.shown) && !synced) r.push_back("sync_netstat_ranks");
 }
 uint64_t sb_vtable(void *update, void *render) {
     const uint64_t vt = salloc(0x20, 8);
@@ -320,7 +457,9 @@ void sb_frame(H3 h, long long dns, uint32_t buttons, uint64_t page_for_snap = 0)
     tick(dns);
     put<uint32_t>(kButtons, buttons);
     sb.layout_desc = nullptr;
+    const size_t at = hx::calls.size();
     const uint64_t r = h(0x1111, 0x2222, 0x3333);
+    if (g_side == 0) sb_frame_expected(at);
     rec("H -> %llx; tracker shown=%u fade=%s speed=%s itemfade=%s snap=%d", (unsigned long long)r,
         get<uint8_t>(kSbTracker + 8), fb(get<float>(kSbTracker + 0xc)).c_str(), fb(get<float>(kSbTracker + 0x10)).c_str(),
         fb(get<float>(kItemFade)).c_str(), page_for_snap ? get<int32_t>(page_for_snap + 0xf8) : -999);
@@ -342,37 +481,37 @@ void scoreboard_tests() {
     scenario("scoreboard install bad layout prologue", [](const Side &s) {
         sb_setup();
         hx::mem[kSbLayout + 3] = 0xe4;
-        inst(s.sb, "scoreboard");
+        sb_inst(s);
     });
     scenario("scoreboard install bad 2D draw prologue", [](const Side &s) {
         sb_setup();
         hx::mem[kSbDraw] = 0x90;
-        inst(s.sb, "scoreboard");
+        sb_inst(s);
     });
     scenario("scoreboard install tracker page id wrong", [](const Side &s) {
         sb_setup();
         put<uint32_t>(kSbTracker + 0x18, 0xf650325c);
-        inst(s.sb, "scoreboard");
+        sb_inst(s);
     });
     scenario("scoreboard install tracker speed wrong", [](const Side &s) {
         sb_setup();
         put<float>(kSbTracker + 0x10, 2.0f);
-        inst(s.sb, "scoreboard");
+        sb_inst(s);
     });
     scenario("scoreboard install no E8", [](const Side &s) {
         sb_setup();
         hx::mem[kSbCall] = 0xe9;
-        inst(s.sb, "scoreboard");
+        sb_inst(s);
     });
     scenario("scoreboard install call site not executable", [](const Side &s) {
         sb_setup();
         hx::noexec.push_back({kSbCall + 4, 1});
-        inst(s.sb, "scoreboard");
+        sb_inst(s);
     });
     scenario("scoreboard install retarget fails", [](const Side &s) {
         sb_setup();
         hx::fail_offsets.push_back(kSbCall);
-        inst(s.sb, "scoreboard");
+        sb_inst(s);
     });
     scenario("scoreboard install chained (call reaches 0x700000)", [](const Side &s) {
         H3 h = sb_install(s, "100000", 0x700000);
@@ -382,7 +521,7 @@ void scoreboard_tests() {
     scenario("scoreboard install chained (call reaches before the image start)", [](const Side &s) {
         sb_setup();
         put<int32_t>(kSbCall + 1, int32_t(-0x3fc532 - 0x100));   // target = image - 0x100
-        inst(s.sb, "scoreboard");
+        sb_inst(s);
     });
     // per frame
     scenario("scoreboard frames: not playing (NET_SM 1, NGM state 3), press ignored", [](const Side &s) {
@@ -532,6 +671,10 @@ U2MP_GUEST uint64_t h_cell_text(uint64_t a, uint64_t b, uint64_t c, uint64_t d, 
         (unsigned long long)d, (unsigned long long)e, (unsigned long long)f);
     return 0xce11ull;
 }
+// NetStatGame's builder (0x66c600, given the table base 0x1147bd0): only the new row build hook calls it, when the
+// table is empty (see rn_expected). It builds nothing here: the count stays as the scenario set it.
+constexpr uint64_t kBuildStats = 0x66c600;
+U2MP_GUEST void h_build_stats(void *table) { rec("guest build_stats %s", where(table).c_str()); }
 void rn_setup() {
     put_bytes(0x5b24fc, {0x4b, 0x8d, 0xb4, 0x3c, 0x18, 0x39, 0x00, 0x00});
     put_bytes(0x66c998, {0x49, 0x8d, 0xbc, 0x1d, 0x20, 0x39, 0x00, 0x00});
@@ -546,6 +689,7 @@ RnHooks rn_install(const Side &s) {
     inst(s.rn, "rosternames");
     hx::stub(kRowBuild, (void *)h_row_build);
     hx::stub(kCellText, (void *)h_cell_text);
+    hx::stub(kBuildStats, (void *)h_build_stats);
     RnHooks h;
     const uint64_t lo = A(0), hi = A(hx::kImageSize);
     uint64_t v = get<uint64_t>(kTeamVt + 0x10);
@@ -567,12 +711,36 @@ void rn_dump() {
     for (uint64_t tb : {kTable1, kTable2})
         for (int i = 0; i < 12; i++) rec("table %llx rec %d display %s", (unsigned long long)tb, i, hexd(hx::mem + tb + 0x80 * i + 0x3918, 0x21).c_str());
 }
+// What the new hooks add before they call the game's function, put into the old record (old side only):
+// - the row build hook rebuilds an empty NetStatGame once from the slots (0x66c600 on the table base; the loading
+//   screen's team lists of a joiner stayed empty; rosternames.cpp ensure_stat_table, from the 934a6ca import, where
+//   its comment is the only description): two logs around the builder call when the first table's count is 0;
+// - both hooks copy the trackers' levels into NetStatGame first (b8b141c "fix scoreboard levels of players").
+void rn_expected(size_t at, uint32_t count_before) {
+    auto &r = hx::calls;
+    for (size_t i = at; i < r.size(); i++) {
+        const bool row = r[i].rfind("guest row_build ", 0) == 0;
+        if (!row && r[i].rfind("guest cell_text ", 0) != 0) continue;
+        std::vector<std::string> add;
+        if (row && count_before == 0) {
+            char b[96];
+            std::snprintf(b, sizeof b, "log rosternames: NetStatGame table rebuilt with %u record(s)", get<uint32_t>(kTable1));
+            add = {"log rosternames: NetStatGame table empty; rebuilding it from the slots", "guest build_stats img+0x1147bd0", b};
+        }
+        add.push_back("sync_netstat_ranks");
+        r.insert(r.begin() + long(i), add.begin(), add.end());
+        return;
+    }
+}
 void rnc(H6 h, const char *what) {
     if (!h) {
         rec("no %s hook", what);
         return;
     }
+    const size_t at = hx::calls.size();
+    const uint32_t count_before = get<uint32_t>(kTable1);
     const uint64_t r = h(0xa1, 0xb2, 0xc3, 0xd4, 0xe5, 0xf6);
+    if (g_side == 0) rn_expected(at, count_before);
     rec("%s returned %llx", what, (unsigned long long)r);
 }
 const char k64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+-";   // 64 chars

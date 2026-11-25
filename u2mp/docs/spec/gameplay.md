@@ -151,7 +151,7 @@ the entry rules 6-8, overlay alpha, "every player out", hint) are in `overlay_ru
 | `0x664b90` | `bool (tracker *)`: the tracker's death camera runs |
 | `0x555550` | `bool (HUD manager 0x1130008 *)`: a HUD notification is showing |
 | `0xe2186a0c` | text "\|SELECT\| Scoreboard    \|D-PAD\| Camera" (TextDb `0xcddc00`) |
-| `0x3dd780` / `0x9b5c20` | one-shot sound init / play; `d9b465e1` "scoreboard-open", `2f118f31` "scoreboard-close" |
+| `0x3dd780` / `0x9b5c20` | one-shot sound init `(buffer *, u32 id, u32 0)` / play `(buffer *, u32 0)`; `d9b465e1` "scoreboard-open", `2f118f31` "scoreboard-close" |
 | `0x5b5450` | menu text-in-rect item (loading.cpp `menu_text_in_rect`) |
 | `0x1164080` / `0x1164088` | the current task process handle: u64 slot pointer, u64 id (low 32 bits compared with process +`0x44`); TaskManagerReplay in a film, TaskManagerOnline in a net match |
 | `0x4c4310` | `reply *(reply, u32 event, u64 slot, u64 id, a0, a1, a2 /* stack +0 */, a3 /* stack +8 */)`: sends a process an event; records 0x18 bytes (16 value bytes, u32 type at +0x10: 0 no answer, 1 bool, 2 s32) |
@@ -289,14 +289,15 @@ In this order:
    automatic board); state record call (`0x65b902`; off: flags A / B not read); tracker times (10.6: `0x6626b5`; off:
    "every player out" never holds); death camera (10.5: `0x664b90`; off: no hint); HUD notification (10.8:
    `0x555550`; off: no override); dim (10.2: `0x5d06a4`, `0x5d0704`, `0x5d1afd`; off: no dim); HUD alpha (10.3:
-   `0x555cd1`; off: A = 1.0); pause (10.3: `0x3faf57`; off: drawn while paused); sounds (`55 48 89 e5` at
-   `0x3dd780` and `0x9b5c20`, and 10.9 `0x666b8b`; off: silent); task query (10.8 handle writer `0xa5c7f6`, 10.11
-   `0x4c4310`, `0x4c4386`, `0x4c4470`, the HUD call `0x57803f`; off: no film queries) with its answers `e68ae001`
-   (`0x5e9336`; off: no film clear) and `8a87d1da` / `f498c2b5` (`0x5e91d8`, `0x5e9206`, `0x5e9180`, `0x5e91c4`,
-   also needing the film flag and tracker times; off: no automatic board in films); "Leave" test (`0xa5c7f6`,
-   `0x9be070`, the GoLeave name loads `0x5e3eab` / `0x5eaefb` and the string "Leave" at `0xe87ee6`; off: leaving
-   false); held word (10.10 `0x5cf51d`, `0x5d0c03`; off: L3 from the raw pad word); pause owner (`0x5e8e99`,
-   `0x5d05a4`; off: no pause block). The menu state word (`menu_up()`, loading.cpp)
+   `0x555cd1`; off: A = 1.0); pause (10.3: `0x3faf57`; off: drawn while paused); sounds (the init `0x3dd780`
+   is a frameless leaf: `48 89 f8` at `+0`, `89 90 d8 00 00 00` at `+0x77`, `89 70 70` at `+0x126`; the play
+   `0x9b5c20`: `55 48 89 e5` at `+0`, `49 89 f5 48 89 fe` at `+0x14`; and 10.9 `0x666b8b`; off: silent); task query
+   (10.8 handle writer `0xa5c7f6`, 10.11 `0x4c4310`, `0x4c4386`, `0x4c4470`, the HUD call `0x57803f`; off: no film
+   queries) with its answers `e68ae001` (`0x5e9336`; off: no film clear) and `8a87d1da` / `f498c2b5` (`0x5e91d8`,
+   `0x5e9206`, `0x5e9180`, `0x5e91c4`, also needing the film flag and tracker times; off: no automatic board in
+   films); "Leave" test (`0xa5c7f6`, `0x9be070`, the GoLeave name loads `0x5e3eab` / `0x5eaefb` and the string
+   "Leave" at `0xe87ee6`; off: leaving false); held word (10.10 `0x5cf51d`, `0x5d0c03`; off: L3 from the raw pad
+   word); pause owner (`0x5e8e99`, `0x5d05a4`; off: no pause block). The menu state word (`menu_up()`, loading.cpp)
    checks its own bytes on first use (10.2: `0x5e5b82`, `0x665151`, `0x4cbc18`; off: "no menu up", logged once).
 5. The current target = `0x3fc532 + rel32` (as an image offset; it may lie outside the image when another module
    already retargeted the call). Remember its absolute address as the previous target.

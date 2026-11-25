@@ -561,6 +561,11 @@ the exit paths then write 0. Our extra "in the match" gate can stay as a safety 
   k = 0 with sound, plays `d9b465e1` on open / `2f118f31` on close through `0x3dd780` / `0x9b5c20`; when it turns on,
   sets `+0xf8` = 2 on the loaded page with the entry's id. Verify `0x666b8b`:
   `85 f6 75 2f 80 f1 01 75 2a 84 db b8 e1 65 b4 d9 be 31 8f 11 2f`.
+- The pair, as every PS4 caller uses it (e.g. `0x4ae0cc`, `0x3fb2b8`): `0x3dd780(buffer, id, 0)` (rdi, esi, edx; a
+  frameless leaf that fills the buffer, id at `+0x70`), then `0x9b5c20(buffer, 0)` (rdi, esi). The buffer is a
+  caller local below `rbp-0x130`, 16-byte aligned (the init stores an xmm at `+0x60`). Verify `0x3dd780`:
+  `48 89 f8` (`mov rax, rdi`), `+0x77` `89 90 d8 00 00 00`, `+0x126` `89 70 70`; `0x9b5c20`: `55 48 89 e5`,
+  `+0x14` `49 89 f5 48 89 fe`.
 - `d9b465e1` = sound record "scoreboard-open", `2f118f31` = "scoreboard-close": PS4 `dc1/ps4/audio.bin` id table
   entries at file `0xf258` / `0x3618`, records at `0x78518` / `0x28820` (each: id, pointer to its name string, then
   the shared field `0xf19e22dc`); the sample names are in `sound1/banks/ps4/menu.bnk` (the menu bank). The ids are

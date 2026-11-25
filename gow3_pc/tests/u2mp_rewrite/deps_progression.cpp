@@ -1,6 +1,7 @@
 // u2mp rewrite tests, group "progression" (progression.cpp, netinit.cpp, netpatch.cpp): stand-ins for what the
 // sources call in other modules (online.cpp, unlocks.cpp, netheap.cpp, the C runtime's file functions), plus the
-// unchanged progression_store.cpp (compiled into each namespace, so each build has its own copy, as in the game).
+// current progression_store.cpp (compiled into each namespace, so each build has its own copy, as in the game; the
+// old build sees its current header too, flags_progression.sh).
 // Compiled once per namespace by run.sh; every call is recorded and answered from hx::pg::st (deps_progression.h).
 // The C functions get the OLD_FLAGS renames (..._old) for the old build.
 #include "../../src/u2mp/progression_store.cpp"
@@ -76,6 +77,21 @@ std::vector<std::string> friend_npids(size_t max) {   // only the new build call
     hx::rec("online::friend_npids %zu -> %zu", max, st.friends.size());
     return std::vector<std::string>(st.friends.begin(), st.friends.begin() + std::min(max, st.friends.size()));
 }
+#if !defined(u2mp)   // only the new online.h declares them (Players Met without friends, parity-g-friends.md G1)
+bool active() {
+    hx::rec("online::active -> %d", int(st.active));
+    return st.active;
+}
+bool friend_list_ready() {
+    hx::rec("online::friend_list_ready -> %d", int(st.friend_list_ready));
+    return st.friend_list_ready;
+}
+bool is_friend(const std::string &npid) {
+    const bool r = st.friend_list_ready && std::find(st.friends.begin(), st.friends.end(), npid) != st.friends.end();
+    hx::rec("online::is_friend [%s] -> %d", npid.c_str(), int(r));
+    return r;
+}
+#endif
 bool record_score(uint32_t board, int64_t score, const char *comment, const uint8_t *info, uint32_t info_len) {
     std::string hex;
     char b[4];
