@@ -140,9 +140,8 @@ and only when at least 120 bytes are queued for that connection.
 
 ## 3. MISSING items
 
-Implementation state (2026-11-25, branch `u2mp-ps3-parity-3`): J1, J2, J3, J6 and J8 done; J7 off (hook point not
-confirmed, see J7); J4 and J5 pending (they need scoreboard.cpp, which another branch is editing). Each item ends
-with a **Done** / **Pending** paragraph. Rules with no game in them (level decay, which packets count, mute
+Implementation state (2026-11-25, branch `u2mp-ps3-parity-3`; J4 / J5 on `u2mp-p4-scoreboard`): J1, J2, J3, J4,
+J5, J6 and J8 done; J7 off (hook point not confirmed, see J7). Each item ends with a **Done** / **Pending** paragraph. Rules with no game in them (level decay, which packets count, mute
 transitions) are `voice::decay_talk_level` / `is_talking` / `use_voice` / `next_mute`, tested by `u2mp-voice-test`.
 
 ### J1. Talking level in the game's connection records (PS3 `0x4e6cd0`, `0x4e7560`; readers `0x4c7c70`, `0x412d14`, `0x8aa448`, `0x4df460`)
@@ -235,7 +234,17 @@ nothing. The local player's row shows nothing. PS4 removed the muted branch and 
 J1). To do: answer the muted icon first for muted players (same image record as PS3: type 3, image id, table 1 as the
 talking icon already uses), then the PS4 talking branch.
 
-**Pending** (scoreboard.cpp belongs to another branch right now). The muted state it needs is ready: `voice::muted`.
+**Done.** The PS4 query is slot 15 of the team list vtable `0x100a280` (`0x100a2f8`); its arguments are the image
+record to fill, the list, the row and the column. scoreboard.cpp `cell_image_hook` takes the slot: for a player row
+(row kind 2 at list `+0x48 + 0x14 row`) of a list that names a tracker (page `+0x40` not `0x2eb65ce8`, tracker index
+`+0x4c + 0x14 row` 0..9) whose tracker's connection key (`+0x23c`, the net id; -1 for the local player) is
+`voice::muted`, and whose column (list key `+0x190` in the column tables `0x7805beb9`, entry `+8`) is `0x4c217b`, it
+writes the muted icon record (type 3, id `0x7a5f5bf1`, table 1, the icon's index in the net image table at
+`0x1130008 + 0x70` or -1, colour -1, scale 1.0) and returns; every other cell goes to the PS4 query unchanged
+(talking test included). The rule is `overlay::voice_cell_muted`, tested by `u2mp-overlay-test`. Log once:
+`scoreboard: voice column shows the muted icon 7a5f5bf1 (net image index N)`. Also on the other team lists that use
+this vtable (loading screen, results), as the cell query is shared. Note: PS4's talking branch answers icon
+`0x63969b5b`, not PS3's `0xffa98ec5`; it is left as PS4 has it (open question 8).
 
 ### J5. Scoreboard "mute this player" action (PS3 flow `0x443248`, branch at `0x44387c`; PS4 `0x5ed0ca`)
 
@@ -245,7 +254,19 @@ is not the local player and has a connection, that player's mute is toggled. No 
 as PS4 computes them) and then does nothing. To do: when that search finds the entry, toggle the mute of the entry's
 player through `voice::toggle_mute`, never for the local player.
 
-**Pending** (scoreboard.cpp, as J4). `voice::toggle_mute` already refuses the local player.
+**Done.** The mode dispatcher `0x5ecb80` is the menu callback the game registers at `0x5ed964` (`lea rcx` of its
+address into the callback table). scoreboard.cpp points that `lea` at a stub that jumps to `dispatcher_hook`, which
+handles the row press and then calls the PS4 dispatcher unchanged. The press (event `+0` action, `+4` row) is found
+as PS4 `0x5ed0d6..0x5ed166` finds it: action `0xb04c828b` = the own team's list, `0xb48d9f3c` = the other team's list
+(PS4 sends both into the same search; the team is the local tracker's `+0x134`, or 1 minus it); the NetStatGame copy
+is the current game's (`0x1147bd8`) while the NGM state is 1 or 2, else the previous game's (`0x114d2ec`); the entry
+is the first of the copy's count (at most 10) whose team byte (entry `+7`, entries of 0x80 bytes from `+0x38e4`) is
+that team and whose in-team position (u16 at `+0x3e4c + 0x34 i`) is row + 1. Its net id (entry `+0`) gets
+`voice::toggle_mute` when it is a session member and not the local player; otherwise nothing changes. Rules
+`overlay::mute_action_team` / `mute_action_previous_game` / `team_row_entry`, tested by `u2mp-overlay-test`. Logs:
+`scoreboard: row R of the own|other team list: NAME (net id N) muted|unmuted`, or `... (net id N): the local player|no
+connection, mute left alone`. PS3 differences: PS3 writes no log; this spec names only `0xb04c828b`, the other-team
+action `0xb48d9f3c` follows the PS4 search, which treats both lists alike (open question 9).
 
 **Correction (2026-11-25, `parity-n-remaining.md` N2):** `0xb04c828b` / `0xb48d9f3c` are the ids of LIST_MUTEPLAYERS0 / 1
 on PAGE_MULTIPLAYER_MUTE_PLAYERS (pause menu, Mute Players), not a scoreboard action; the scoreboard's own team lists
@@ -336,6 +357,11 @@ marks our own sending, and `toggle_mute` ignores the local id.
    PC level table listing every remote member; the real records and SendNetEvent stay untouched.
 8. J7 (question 5): caller and channel answered in `parity-n-remaining.md` N5; the loudness factor stays a proposal
    (N open question 1).
+9. J4: PS4's voice column talking branch answers icon `0x63969b5b` (table 1), PS3's rows use `0xffa98ec5`. Left as
+   PS4 has it; check in game that the talking icon draws (if not, the PS3 id is the fix).
+10. J5: does PS3's branch at `0x44387c` also toggle the mute for the other team's list (`0xb48d9f3c`)? Ours does,
+   following the PS4 search that serves both actions. Answered by `parity-n-remaining.md` N2: both ids are the Mute
+   Players lists (own team, other team); PS3 flips the mute in both.
 
 ## 6. Status table
 
@@ -346,9 +372,9 @@ marks our own sending, and `toggle_mute` ignores the local id.
 | 0x4e6e24 | master (speaker) volume read | COVERED | menus.cpp `query_volume`, `voice::volume` |
 | 0x4e6e64 | one player's playback volume | COVERED | voice.cpp `update_gating` / `all_audible` (`parity-e` 2.1) |
 | 0x4e6e94 | master volume set | COVERED | menus.cpp `query_volume`, `voice::set_volume` |
-| 0x4e6ecc | is this player muted | MISSING | `voice::muted` (one flag, J3 done); J4 (scoreboard muted icon) pending |
+| 0x4e6ecc | is this player muted | COVERED | `voice::muted` (one flag, J3); scoreboard voice column muted icon: scoreboard.cpp `cell_image_hook` (J4) |
 | 0x4e6f04 | unmute and empty the queue (record reset) | PLATFORM | voice.cpp `forget` |
-| 0x4e6f50 | set a player's mute | MISSING | `voice::toggle_mute` / `set_muted` / `unmute_strangers`, `frame` arrival and party join (J3 done); J5 (scoreboard action) pending |
+| 0x4e6f50 | set a player's mute | COVERED | `voice::toggle_mute` / `set_muted` / `unmute_strangers`, `frame` arrival and party join (J3); scoreboard row action: scoreboard.cpp `dispatcher_hook` (J5) |
 | 0x4e6f78 | microphone loudness while voice is detected | MISSING | voice.cpp `Gate` (PLATFORM part); J7 (mouth) off, hook point not confirmed |
 | 0x4e7038 | voice end: ports, stop, end | PLATFORM | `voice::stop` from the session teardown |
 | 0x4e71d8 | voice init: ports at volume 1.0, mic -> encoder | COVERED | voice.cpp `open_audio` (PLATFORM part); `voice::reset_volume` from `button_multiplayer` (J6) |
@@ -363,6 +389,5 @@ marks our own sending, and `toggle_mute` ignores the local id.
 | 0x469ef8 | EarnMedal (61) Read (slot 2): the same three words | COVERED | events.cpp `read_earn_medal` |
 | 0x46b760 | EarnMedal (61) Apply: award to the tracker with that net id | COVERED | PS4 `0x61d1e0` -> `0x5779a0` intact |
 
-Counts: 21 rows. COVERED 12, PLATFORM 6, MISSING 3 (0x4e6ecc: J4, 0x4e6f50: J5, 0x4e6f78: J7). Items: J1, J2, J3, J6,
-J8 done; J4, J5 pending (scoreboard.cpp); J7 off. J4, J5 and J8 come from tracing the callers of the mute and
-talking queries.
+Counts: 21 rows. COVERED 14, PLATFORM 6, MISSING 1 (0x4e6f78: J7). Items: J1, J2, J3, J4, J5, J6, J8 done; J7 off.
+J4, J5 and J8 come from tracing the callers of the mute and talking queries.

@@ -1,7 +1,7 @@
 // u2mp: the pure overlay and ticker rules (overlay_rules.h).
 //
-// Reimplemented from the behaviour descriptions u2mp/docs/spec/parity-m-features.md (M1, M2) and
-// u2mp/docs/spec/parity-ticker-respawn.md (1.2 - 1.6).
+// Reimplemented from the behaviour descriptions u2mp/docs/spec/parity-m-features.md (M1, M2),
+// u2mp/docs/spec/parity-j-voice-medals.md (J4, J5) and u2mp/docs/spec/parity-ticker-respawn.md (1.2 - 1.6).
 #include "overlay_rules.h"
 
 #include <cmath>
@@ -55,6 +55,24 @@ Edge auto_edge(bool &last, bool now) {
     if (now == last) return Edge::None;
     last = now;
     return now ? Edge::Opened : Edge::Closed;
+}
+
+bool voice_cell_muted(int32_t row_kind, uint32_t list_page, uint32_t tracker_index, uint32_t column_id, bool muted) {
+    return row_kind == kPlayerRow && list_page != kPreviousGameList && tracker_index < kTrackers &&
+           column_id == kVoiceColumn && muted;
+}
+
+int32_t mute_action_team(uint32_t action, int32_t own_team, bool &known) {
+    known = action == kActionOwnTeamList || action == kActionOtherTeamList;
+    return action == kActionOwnTeamList ? own_team : 1 - own_team;
+}
+
+bool mute_action_previous_game(int32_t ngm_state) { return ngm_state != 1 && ngm_state != 2; }
+
+int team_row_entry(const TeamEntry *entries, uint32_t count, int32_t team, int32_t row) {
+    for (uint32_t i = 0; i < count; ++i)
+        if (int32_t(entries[i].team) == team && int64_t(entries[i].position) == int64_t(row) + 1) return int(i);
+    return -1;
 }
 
 float hint_step(float h, bool on, float dt) { return clamp01(on ? h + kHintIn * dt : h - kHintOut * dt); }
