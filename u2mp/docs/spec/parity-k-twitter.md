@@ -13,6 +13,7 @@ Status words (as in `parity-e-flow2.md`):
 - **PLATFORM**: PS3 plumbing (HTTP, threads, NetCtl, system modules, live settings, posting) that the PC design
   replaces. The visible result must still match; the replacement is named and any delta stated.
 - **MISSING**: absent, or present with a different visible result.
+- **DROPPED**: MISSING rows the owner chose not to port (2026-11-25: the Twitter page is removed).
 
 Reading notes. All 54 OPD descriptors carry TOC `0xe183b8`. The module reads its constants through two module data
 pointers (TOC slots `0xe10ba8` -> `0xdbbe84` and `0xe10bac` -> `0xdbbef8`); every string and number below was
@@ -174,18 +175,19 @@ texts.
 
 ## 2. What our port does today
 
-- PS4 slots `0x6769d0` (PAGE_TWITTER) and `0x6769e0` (BUTTON_TWITTER_*) are `ret` stubs registered by PS4's own
-  registration; remaining.cpp replaces them: page event 6 pops the page and shows the box `kTextTwitter` ("Twitter is
-  not available on PC."), every button shows the same box (remaining.md B26 / B27).
+- **DROPPED (owner, 2026-11-25): the Twitter page is removed, not ported** (the service is gone). Items K1..K5 below
+  are not implemented; they stay only as a record.
+- PS4 slots `0x6769d0` (PAGE_TWITTER) and `0x6769e0` (BUTTON_TWITTER_*) stay the `ret` stubs registered by PS4's own
+  registration; our code no longer replaces them (the old placeholder box and its text were deleted).
 - The PS4 label dispatcher, status line, save block, constructor and toggle variables work unchanged.
 - The pages are unreachable (no Options entry), so the player never sees any of it.
 
-## 3. Items to implement
+## 3. Items (DROPPED, not implemented)
 
-The owner wants a working page that reports the service as unavailable (section 6, question 1, for the strict-parity
-alternative). Items K1..K5 describe that page. The service itself stays absent: no request of any kind is made.
+These were the items of a working page that reports the service as unavailable. The owner dropped the page
+(2026-11-25); nothing below is to be built.
 
-### K1. The Options entry (PS3 PAGE_OPTIONS control 6, `0x4efc6c`) - MISSING (menu data)
+### K1. The Options entry (PS3 PAGE_OPTIONS control 6, `0x4efc6c`) - DROPPED
 
 - The import's menu overlay adds to PAGE_OPTIONS a control equal to the PS3 BUTTON_OPTIONS_TWITTER (id `0xc173d8f7`,
   button kind, label `0x168207da`, action 28 condition 4, target PAGE_TWITTER `0x2ad3b7ab`), placed after
@@ -198,7 +200,7 @@ alternative). Items K1..K5 describe that page. The service itself stays absent: 
   online). If PS4 shows it blank but selectable, the overlay entry must be hidden by the same means the menu already
   uses for hidden rows instead.
 
-### K2. PAGE_TWITTER callback (PS3 `0x4f1950` -> `0x4f1744`; row `0x4f1744` string "twitter") - MISSING
+### K2. PAGE_TWITTER callback (PS3 `0x4f1950` -> `0x4f1744`; row `0x4f1744` string "twitter") - DROPPED
 
 Replaces remaining.cpp B26. Page events (arg +0):
 
@@ -211,7 +213,7 @@ Replaces remaining.cpp B26. Page events (arg +0):
 - **6 (every frame)**: poll the open text box (K3), if any.
 - The page is never popped by our code and no message box is shown.
 
-### K3. Buttons (PS3 `0x4f1c38` -> `0x4f195c`; `0x4efda4`, `0x4efe54`, `0x4eff24`) - MISSING
+### K3. Buttons (PS3 `0x4f1c38` -> `0x4f195c`; `0x4efda4`, `0x4efe54`, `0x4eff24`) - DROPPED
 
 Replaces remaining.cpp B27 for all ids registered to the slot (`0x2c738b98`, `0xb1668731`, `0xa989fea1`,
 `0xddaab65a`). PS3 reads the pressed control's id from the first 32-bit word of the callback argument (verify that
@@ -232,7 +234,7 @@ part (between `:` and `@`) becomes the text, the username is kept. An empty acce
 an accepted text, when the credentials are complete, run the account test (K4). Log (our wording; never log the
 password): `twitter: username entered`, `twitter: password entered`.
 
-### K4. Offline account test (PS3 `0x4f14d0`) - MISSING
+### K4. Offline account test (PS3 `0x4f14d0`) - DROPPED
 
 Same flags and order as 1.7, with fixed answers: network up := 1 (no NetCtl on PC); host reachable := 0 (the service
 is gone); step 3 never runs, so verified / wrong / failed keep their values (all 0 offline). Result on the status line:
@@ -243,7 +245,7 @@ Password", "Test Account"; after entering both: "Username: <name>", "Password: *
 After restarting with Remember Password on: the same filled page with "Twitter Host Is Down"; with it off: the name
 kept, "Enter Password", "Incomplete Username/Password".
 
-### K5. Event toggles remembered (PS3 `0x4ed4e0`, `0x4ed684`, `0x4eda98`, `0x4f0c34`) - MISSING
+### K5. Event toggles remembered (PS3 `0x4ed4e0`, `0x4ed684`, `0x4eda98`, `0x4f0c34`) - DROPPED
 
 PS4 keeps the seven event toggles only in memory (1.6: the twitter.msg file was dropped), so they reset to off at
 every start. Ours keeps them in a small local file of our own format (the seven 0/1 values of PS4 +0x08..+0x20, in
@@ -283,11 +285,13 @@ Activate Updates and the credentials need nothing: they travel in the game save 
 
 ## 6. Open questions
 
+Closed (owner, 2026-11-25): question 1 is answered "no page"; K1..K5 and questions 2-5 are moot.
+
 1. **Owner decision: page or no page.** Strict parity with a PS3 whose Twitter live settings no longer download is
    *no Options entry at all* (1.5), which is what our port shows today (nothing reachable) and how the U3 helper
    handled dead services (agent a011: "no dead options visible", entries hidden). The task asked for a working page
    that reports the service as unavailable; K1..K5 specify that. If the owner prefers the hidden form, only the
-   unreachable stubs remain and K1..K5 are dropped (remaining.cpp B26 / B27 could stay as they are).
+   unreachable PS4 stubs remain and K1..K5 are dropped.
 2. Whether an empty page-owner label hides the row on PS4 (K1 check).
 3. Password entry: the PC text input shows what is typed; PS3's keyboard mode was not traced. Masking needs the text
    input to support it; otherwise the password is visible while typed.
@@ -298,17 +302,17 @@ Activate Updates and the credentials need nothing: they travel in the game save 
 
 ## 7. Status table
 
-Counts: 18 COVERED, 23 PLATFORM, 13 MISSING (plus the missing Options entry in menu.bin, K1).
+Counts: 18 COVERED, 23 PLATFORM, 13 DROPPED (owner, 2026-11-25: no Twitter page on PC; these were MISSING), 0 MISSING.
 
 | PS3 | what | status | where / item |
 |---|---|---|---|
-| 0x4ed4e0 | default event-settings block (version 4, toggles off, per-event records) | MISSING | K5 |
-| 0x4ed684 | copy the seven event toggles into the block (non-zero -> 1) | MISSING | K5 |
+| 0x4ed4e0 | default event-settings block (version 4, toggles off, per-event records) | DROPPED | K5 |
+| 0x4ed684 | copy the seven event toggles into the block (non-zero -> 1) | DROPPED | K5 |
 | 0x4ed748 | event allowed: toggle on and live allowance > 0 | PLATFORM | 4 |
 | 0x4ed8b0 | static init: a module handle := -1 | PLATFORM | 4 |
 | 0x4ed8ec | its wrapper | PLATFORM | 4 |
 | 0x4ed8fc | event poster init: owner, default block, per-event interval / window table | COVERED | PS4 constructor `0x677100` (same values) |
-| 0x4eda98 | load `%s/twitter.msg`: last-post times := now - 1 day, accept version 4, apply toggles | MISSING | K5 |
+| 0x4eda98 | load `%s/twitter.msg`: last-post times := now - 1 day, accept version 4, apply toggles | DROPPED | K5 |
 | 0x4edd24 | per-frame clock; 2 s after a post, read the thread result | COVERED | PS4 inline (`0x3fd7e7`); result part never used |
 | 0x4edda8 | rate checks for money / trophy posts | PLATFORM | 4 |
 | 0x4edea0 | compose money + trophies post, queue it, stamp both events | PLATFORM | 4 (PS4 `0x675b30` texts only) |
@@ -325,9 +329,9 @@ Counts: 18 COVERED, 23 PLATFORM, 13 MISSING (plus the missing Options entry in m
 | 0x4ef9ac | queue a post (4 entries, lock, wake) | PLATFORM | 4 |
 | 0x4efb64 | queue only when verified and Activate Updates on | PLATFORM | 4 |
 | 0x4efbdc | credentials := `:@` | COVERED | PS4 registration / constructor |
-| 0x4efda4 | set the password part | MISSING | K3 |
-| 0x4efe54 | set the username part | MISSING | K3 |
-| 0x4eff24 | keyboard titles (`0xd3373c12`, `0x4e2230bb`) | MISSING | K3 (PC text input prompts) |
+| 0x4efda4 | set the password part | DROPPED | K3 |
+| 0x4efe54 | set the username part | DROPPED | K3 |
+| 0x4eff24 | keyboard titles (`0xd3373c12`, `0x4e2230bb`) | DROPPED | K3 (PC text input prompts) |
 | 0x4f0058 | free the live-settings buffer | PLATFORM | 4 |
 | 0x4f00f0 | "password set" test | COVERED | PS4 inline in `0x5b0410`, `0x677000` |
 | 0x4f0178 | password label | COVERED | PS4 inline in `0x5b0410` |
@@ -339,7 +343,7 @@ Counts: 18 COVERED, 23 PLATFORM, 13 MISSING (plus the missing Options entry in m
 | 0x4f05dc | status update request | PLATFORM | 4 |
 | 0x4f0828 | post thread loop ("TwitterPostThread::Unkown event") | PLATFORM | 4 |
 | 0x4f0bf8 | read the last post result | PLATFORM | 4 |
-| 0x4f0c34 | save `%s/twitter.msg` | MISSING | K5 |
+| 0x4f0c34 | save `%s/twitter.msg` | DROPPED | K5 |
 | 0x4f0cdc | manager constructor (flags 1.1, `:@`, poster init) | COVERED | PS4 `0x677100` |
 | 0x4f0de8 | static init / exit: manager, queue reset, thread start | COVERED | PS4 `0x677100` (thread part PLATFORM) |
 | 0x4f10d8 | static exit wrapper | COVERED | as above |
@@ -347,22 +351,17 @@ Counts: 18 COVERED, 23 PLATFORM, 13 MISSING (plus the missing Options entry in m
 | 0x4f10f8 | build the save block (password dropped unless remembered) | COVERED | PS4 `0x676a70` (question 4) |
 | 0x4f1208 | username label ("%s %s") | COVERED | PS4 `0x676d30` |
 | 0x4f1380 | credentials complete | COVERED | PS4 inline; K3 / K4 use the same rule |
-| 0x4f14d0 | account test (NetCtl, host, verify) | MISSING | K4 |
-| 0x4f15cc | apply the save block, then account test | MISSING | apply COVERED (PS4 `0x676bc0`); test at page open, K2 |
-| 0x4f1744 | page events (open / leave / frame), keyboard result | MISSING | K2, K3 |
-| 0x4f1950 | PAGE_TWITTER | MISSING | K2 (ours pops the page and shows a box) |
-| 0x4f195c | button handler | MISSING | K3 |
-| 0x4f1c38 | BUTTON_TWITTER_* | MISSING | K3 (ours shows a box) |
+| 0x4f14d0 | account test (NetCtl, host, verify) | DROPPED | K4 |
+| 0x4f15cc | apply the save block, then account test | DROPPED | apply COVERED (PS4 `0x676bc0`); the test was K2 |
+| 0x4f1744 | page events (open / leave / frame), keyboard result | DROPPED | K2, K3 |
+| 0x4f1950 | PAGE_TWITTER | DROPPED | K2 (PS4 ret stub kept) |
+| 0x4f195c | button handler | DROPPED | K3 |
+| 0x4f1c38 | BUTTON_TWITTER_* | DROPPED | K3 (PS4 ret stub kept) |
 | 0x4f1c44 | player start-phase helper (not Twitter) | COVERED | PS4 player module |
 | 0x4f1ca4 | player start-phase statics (not Twitter) | COVERED | PS4 player module |
 | 0x4f1d34 | their wrapper (not Twitter) | COVERED | PS4 player module |
 
 ## 8. Files to touch
 
-- `gow3_pc/src/u2mp/remaining.cpp`: B26 / B27 replaced by K2 / K3 (or a new `twitter.cpp` next to `clantag.cpp`, which
-  holds the PC text input use); install sets the service-enabled byte (K1).
-- `gow3_pc/src/u2mp/texts.cpp`, `texts.h`: `kTextTwitter` no longer used (remove, or keep for question 1's fallback).
-- K5 store: a small file of our own (next to the runtime's other local stores, e.g. beside `progression_store.cpp`).
-- `u2mp/patcher/importer/overlay.cpp`: PAGE_OPTIONS gets BUTTON_OPTIONS_TWITTER (K1).
-- `gow3_pc/tests/u2mp_rewrite/test_remaining.cpp`: B26 / B27 cases follow the new behaviour.
-- `u2mp/docs/spec/remaining.md` B26 / B27, `MENUS.md` 1 ("only menu.bin difference" also misses this Options entry).
+None (dropped). Done 2026-11-25: the placeholder (remaining.cpp B26 / B27, `kTextTwitter` and its texts, the
+B26 / B27 test cases) was deleted; the PS4 `ret` stubs stay and the pages stay unreachable.

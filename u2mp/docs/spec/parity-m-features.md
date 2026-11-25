@@ -248,7 +248,7 @@ spec it here).
 - PAGE_MULTIPLAYER_EULA, PAGE_MULTIPLAYER_MOTD (server pages; MOTD decided "none").
 - PAGE_FRIENDSTATS ("COMPARE FRIENDS"): no control of PS4 menu.bin opens it and its id is in neither binary as code;
   dead on PS3 1.10 as well. The visible friend stats are the ticker (`parity-d-flow1.md` 2.10).
-- PAGE_TWITTER_MESSAGES: PLATFORM (`remaining.md`).
+- PAGE_TWITTER, PAGE_TWITTER_MESSAGES: DROPPED (owner, 2026-11-25: the service is gone; `parity-k-twitter.md`).
 
 ### M9. PAGE_MULTIMEDALS (BUTTON_MULTIMEDALS, label MENU_MEDALS, title "MULTIPLAYER MEDALS") - COVERED in the import, CHECK in game (`parity-n-remaining.md` N3)
 

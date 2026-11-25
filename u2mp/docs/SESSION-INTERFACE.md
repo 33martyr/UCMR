@@ -129,7 +129,7 @@ PAGE_LOBBY pairs it with PS3 `0xf1fa48`, the object that holds the NP id at `+0x
 | `+0x30` u8 | flag used by the Resetting states and roster | `5e5b00`, `5f1240` | `65b1c0`, `65cc80` |
 | `+0x34` s32 | 1 = returning from a matchmaking match (Leave sets it); chooses 19 vs 18 on leave | `5f00d0`, cleared by `5eb830`/`6095d0` | `5eb7d0`, `5f00d0`, rosters |
 | `+0x60` u64 | current room handle (from match `+0x10` or the selected list entry `+0x20`) | `6093f0`, `609680` | `609d00` (compared with the 0x103 payload) |
-| **`+0x2c4` s32** | **MP menu mode**: 0 none, 1 matchmaking, 2 custom, 3 cinema, 4 leaderboard, 5 net trophies | dispatcher `5ecb80` (1..5), PAGE_MULTIPLAYER on event 1 (=0), PAGE_LOBBY from message 0x110 (party members) | 59 readers: lobby queries (1 or 2), roster (2/3), NetGameManager `63e6a0`, AssignTeams `6400d0`, stats `66c600`/`66cb70` |
+| **`+0x2c4` s32** | **MP menu mode**: 0 none, 1 matchmaking, 2 custom, 3 cinema, 4 leaderboard, 5 net trophies (never set on PC: its button is removed, DROPPED by the owner) | dispatcher `5ecb80` (1..5), PAGE_MULTIPLAYER on event 1 (=0), PAGE_LOBBY from message 0x110 (party members) | 59 readers: lobby queries (1 or 2), roster (2/3), NetGameManager `63e6a0`, AssignTeams `6400d0`, stats `66c600`/`66cb70` |
 | `+0x2d8/+0x2dc` | roster bookkeeping | `5ec010`, `65e3b0`, PAGE_MULTIPLAYER | |
 
 `+0x2c4` is the "net mode" value the remaining code tests besides `state > 1`. Many
@@ -232,13 +232,15 @@ the package table `0x1130390`. If the package is not there it requests it
     lobby automatically.**
 - Controls: BUTTON_MULTIPLAYER_MATCHMAKING (cond 51), _CUSTOM (52), _CINEMA (53),
   BUTTON_LEADERBOARD (131), BUTTON_NETTROPHIES (136), party roster PARTY_PLAYER0..9 (cond
-  16..25), INVITES (48).
+  16..25), INVITES (48). On PC the import's menu overlay removes BUTTON_NETTROPHIES from the
+  page's control list (DROPPED, owner 2026-11-25: PC has no trophies; MENUS.md 3.1); the other
+  controls keep their order.
 - The buttons go to the intact **mode dispatcher `5ecb80`** (PS3 `0x443248`):
   - CUSTOM `7d593924`: mode 2, ShowPage(PAGE_LOBBY).
   - MATCHMAKING `649e809a`: mode 1, ShowPage(PAGE_LOBBY).
   - CINEMA `b85cb12a`: mode 3, SetNetGame(-1), PAGE_PROGRESS.
   - LEADERBOARD: mode 4, PAGE_MENU_LEADERBOARD.
-  - NETTROPHIES: mode 5, PAGE_NET_TROPHIES.
+  - NETTROPHIES: mode 5, PAGE_NET_TROPHIES (unreachable on PC: no button sends it).
   - BUTTON_MP_POSTGAME_BACK `a0448333`: if IsHost(party), state 19 and
     PAGE_MULTIPLAYER_MATCHMAKING.
   - `ab58f9da`: PAGE_MULTIPLAYER.

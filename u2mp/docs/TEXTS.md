@@ -69,6 +69,11 @@ text anywhere. All 98, the 5 playlist texts and the 11 PC texts are in `kOwn` (1
 "Still English" in 3..20: `Buy Game`, `BUY GAME` and the copyright line (only English has them; not
 multiplayer), in every language; in greek, czech and turkish also the texts that are blank in English too.
 
+Removed since (owner, 2026-11-25): the Twitter PC text (`kOwn`), the two Message of the Day texts c70beaa3 / 307e3705
+(`kMenu`) and the alias of the net-patch9 Message of the Day id 7a89e967. Their pages are never shown. Also removed:
+the Trophies mode label f1b9728c and the PAGE_NET_TROPHIES title 85ed01cc (`kOwn`); the menu overlay takes the
+Trophies button off PAGE_MULTIPLAYER (PC has no trophies).
+
 ## 4. Left
 
 - PS4's own untranslated strings are kept (rule: a real PS4 string is never changed), e.g. the Japanese and

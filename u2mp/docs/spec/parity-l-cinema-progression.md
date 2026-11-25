@@ -104,7 +104,9 @@ entry) and the settle wait of RePlay::Update (900 ticks of the clock it reads).
 ### 2.2 L-T1: multiplayer trophies (DROPPED; PS3 `1735b8`, `4c5268`, stat updaters)
 
 Dropped for good by the owner (2026-11-25): PC has no trophies. Nothing below is implemented and no trophy code
-is changed; the text stays as a record of the PS3 behaviour.
+is changed; the text stays as a record of the PS3 behaviour. PAGE_NET_TROPHIES and its Trophies button
+(BUTTON_NETTROPHIES on PAGE_MULTIPLAYER) are DROPPED (owner) too: the import's menu overlay removes the button, so
+the page named below is never shown on PC (MENUS.md 3.1, 3.8).
 
 PS3 facts:
 
@@ -174,16 +176,11 @@ in-game error when sending failed (only a log line); ours shows a notice, which 
   scenarios "L-C1 ..."; a fake RePlay::Enter zeroes the counters, pumps and reads the tag). The camera kept by
   name (d), the 150-frame return (f) and multi-round content (e, open question 5) are game side: check in game.
 - L-T1a..e: dropped with L-T1 (2.2).
-- L-T1a one competitive match completed: slot for trophy 46 becomes 1; the multiplayer store marks 46 once;
-  no PS4 list change ("Runtime: trophy ... earned" must not appear for it).
-- L-T1b the same row reached again (second match): no popup, no log.
-- L-T1c medals while watching a film: no slot changes.
-- L-T1d no imported list: "reached (no trophy list imported)" once per id.
-- L-T1e career saved and reloaded: slots 90..111 unchanged; already earned trophies not requested again.
 
 ## 4. Open questions
 
-Questions 1 and 2 are closed: L-T1 is dropped (PC has no trophies).
+Questions 1, 2 and 4 are closed: L-T1 and every trophy question are dropped (owner, 2026-11-25: PC has no
+trophies).
 
 1. Which trophy ids does `*net-trophies*` hold in the net data the import installs (PS3 GOTY / net-patch9):
    PS3 46..70 as assumed? Check one match with a stock runtime: does boot.log show

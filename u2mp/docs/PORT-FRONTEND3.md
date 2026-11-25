@@ -31,7 +31,7 @@ From the function map (`functions-frontend-net.tsv`), every frontend row in stat
 | `43b698` | absent | net clock | session.cpp counted 60 Hz frames | **session.cpp**: 300 ticks per second (section 8) |
 
 Already done elsewhere (no change): every other `stub ret` row of the map (`remaining.cpp`: party / player
-/ friends / invites / clan tag / store / Twitter / cinema send-receive callbacks, the matchmaking box
+/ friends / invites / clan tag / store / cinema send-receive callbacks (Twitter's two stay `ret`: dropped), the matchmaking box
 24df6961 `64e900`; `session.cpp`: BUTTON_MULTIPLAYER, STARTMATCH, LEAVE_MULTIPLAYER, the roster queries;
 `menus.cpp`: LIST_FRIENDS query, the join list; `cinema.cpp`: `5ecb80`), and the partial rows of
 PORT-FRONTEND2.md. The three PS4 stubs `5eb7c0` / `5eba90` / `5ec470` are `blr` on PS3 too. The
