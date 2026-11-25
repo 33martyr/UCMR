@@ -27,6 +27,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cwchar>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -158,6 +159,11 @@ void check(const Host &h, bool manual, Value &out) {
     const std::string current = installed(h.root);
     if (current.empty()) {
         if (manual) out.set("dialog", dialog("info", "This is a source checkout: update it with git."));
+        return;
+    }
+    if (_wgetenv(L"RECOMPLAUNCHER") && std::wcscmp(_wgetenv(L"RECOMPLAUNCHER"), L"1") == 0) {
+        // RecompLauncher installs the releases itself (updater.cpp answers "nothing newer" there as well)
+        if (manual) out.set("dialog", dialog("info", "RecompLauncher keeps this copy up to date: update it there."));
         return;
     }
     if (g.busy) return;

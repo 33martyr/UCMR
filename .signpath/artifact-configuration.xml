@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- What SignPath signs in a release (docs/CODE-SIGNING.md): the package folder arrives as the GitHub artifact
+     UCMR_windows-unsigned, a zip of dist/UCMR_windows. Only the programs built from this repository's source are
+     signed; third-party files (Qt, the MSYS2 runtime DLLs, FFmpeg, objdump) are left as they are. Each path must
+     exist, so a renamed program stops the release instead of shipping unsigned. Keep this list in step with
+     tools/package_windows.sh, and paste the same text into the SignPath project's artifact configuration. The
+     release build checks every pe-file listed here for a valid signature. -->
+<artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">
+  <zip-file>
+    <pe-file path="UCMR_Launcher.exe"><authenticode-sign /></pe-file>
+    <pe-file path="launcher-qt/UCMRLauncher.exe"><authenticode-sign /></pe-file>
+    <pe-file path="launcher/native/uncharted_native.dll"><authenticode-sign /></pe-file>
+    <pe-file path="launcher/native/game_starter.exe"><authenticode-sign /></pe-file>
+    <pe-file path="tools/apply_update.exe"><authenticode-sign /></pe-file>
+    <pe-file path="gow3_pc/out/gow3-probe.exe"><authenticode-sign /></pe-file>
+    <pe-file path="u2mp/bin/u2import.exe"><authenticode-sign /></pe-file>
+    <pe-file path="u3mp/bin/u3import.exe"><authenticode-sign /></pe-file>
+    <pe-file path="u3mp/bin/u3fix.exe"><authenticode-sign /></pe-file>
+  </zip-file>
+</artifact-configuration>
