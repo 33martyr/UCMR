@@ -21,11 +21,11 @@ listed deltas still to do. MISSING = player-visible PS3 behaviour we lack. Secti
 
 | PS3 | Role (what it does) | Status | Where in our code / to do |
 |---|---|---|---|
-| `4a9e8c` | clan-tag check: "rejected" flag of the last finished check | MISSING | 2.1 (clantag.cpp + online) |
-| `4a9f78` | clan-tag check: poll the running check; on finish free it and store the flag | MISSING | 2.1. (The audit called it "leaderboard poll"; it is the censor poll. PS4 `64e060` is its dead remnant: leave it.) |
+| `4a9e8c` | clan-tag check: "rejected" flag of the last finished check | PLATFORM (no service) | 2.1: clantag_rules.h `on_verdict` (refused or failed = `*`); no censor request in the online interface |
+| `4a9f78` | clan-tag check: poll the running check; on finish free it and store the flag | PLATFORM (no service) | 2.1: clantag.cpp `clan_tag_check_frame` / `censor_poll`. (The audit called it "leaderboard poll"; it is the censor poll. PS4 `64e060` is its dead remnant: leave it.) |
 | `4aa000` | LB reset: counters 0, page shown -1, the 4 score slots cleared | COVERED | PS4 LB object is static data; progression.cpp module state |
 | `4aa084`, `4aa0c4` | static constructor of the LB global (compiler) | COVERED | nothing to port |
-| `4aa0d4` | clan-tag check: start a censor request on a text | MISSING | 2.1 |
+| `4aa0d4` | clan-tag check: start a censor request on a text | PLATFORM (no service) | 2.1: clantag.cpp `censor_start` answers "unavailable": accepted at once, published |
 | `4aa170` | ranking fetch (global "my page", global range, friends) | PLATFORM | progression.cpp 1.5.13/1.5.14 + online.cpp `board_request`; deltas 2.2, 2.3, 2.4 |
 | `4ab3e8` | start a page fetch (board id, page; ignored while one runs) | PLATFORM | progression.cpp fetch start (1.5.13) |
 | `4ab45c` | start a score post in one of 4 slots; all busy = dropped | PLATFORM | progression.cpp 1.5.8 + online.cpp `record_score`; delta 2.5 |
@@ -46,11 +46,12 @@ listed deltas still to do. MISSING = player-visible PS3 behaviour we lack. Secti
 | `4e3648` | net stat game vtable slot returning a constant (PS3 16; PS4 `0x673900` returns 32) | COVERED | PS4's own accessor; open question 4.6 |
 | (dup) `4aa170`, `4ab6d0`, `4ab854` | gameplay TSV repeats of the rows above | as above | |
 
-Counts (25 distinct rows): COVERED 11, PLATFORM 11 (8 with an equivalent, 3 without), MISSING 3 (one feature).
+Counts (25 distinct rows): COVERED 11, PLATFORM 14 (8 with an equivalent, 3 without, 3 clan-tag check rows with the
+client flow done and no censor service behind it), MISSING 0.
 
 ## 2. Behaviour to implement
 
-### 2.1 Clan tag check (MISSING; PS3 `4aa0d4`, `4a9f78`, `4a9e8c`, driven every online frame by `0x441e30`)
+### 2.1 Clan tag check (PLATFORM, client flow done; PS3 `4aa0d4`, `4a9f78`, `4a9e8c`, driven every online frame by `0x441e30`)
 
 PS3 checked every new clan tag with the score service's comment censor before keeping it, and published the
 career after the verdict. What the player saw: an offensive tag (or one whose check failed) became `*`.
@@ -84,6 +85,16 @@ Interaction with clantag.cpp: its immediate `progression_publish()` on accept ma
 the check then runs on the next online frame. Logs:
 `clan tag: [%.4s] check started`, `clan tag: [%.4s] kept`, `clan tag: [%.4s] refused, now [*]`,
 `clan tag: check unavailable, [%.4s] kept`.
+
+**Done (2026-11-25), PLATFORM part named.** The rules above (change test on 4 bytes, cleared = publish at once,
+start / start failed / no service, verdict with refused or failed = `*`) are `clantag_rules.h` (`notice`, `on_start`,
+`on_verdict`), tested by `u2mp-clantag-test` (scenarios A-C1 .. A-C7). clantag.cpp `clan_tag_check_frame` runs them
+from `online::frame()` while NET_SM > 1 (A-C8), writes the checked tag to NPD+0x1a8 and publishes the career and the
+member data, with the four logs. PLATFORM replacement: our online program's interface (`u2_online_abi.h`) has no
+comment censor request and is not changed for one, so `censor_start` answers "unavailable" and every
+new non-empty tag takes the no-service path (log `check unavailable, [TAG] kept`, tag kept, published). Visible
+difference to PS3: an offensive tag is not replaced by `*`. A censor, if one ever exists, plugs into `censor_start` /
+`censor_poll` without touching the rules.
 
 ### 2.2 Friends board (PLATFORM delta; PS3 `4aa170` friends branch)
 
@@ -183,8 +194,8 @@ again". Our publish is synchronous and writes neither. If any PS4 code reads `0x
 
 1. Career roaming (2.6): wanted? If yes: own slot or PS3-compatible format; keep local saves when the account read
    fails (PS3 did not save at all)?
-2. Censor service (2.1): does our online program / RPCN offer a comment censor? RPCS3's implementation is believed
-   to accept everything; with none, 2.1 reduces to the publish-after-change rule.
+2. ANSWERED (2026-11-25): Censor service (2.1): our online program offers none and its interface is not changed for
+   one, so 2.1 runs with the "no service" answer (accepted at once) and reduces to the publish-after-change rule.
 3. Online failure on the global range: PS3 empty list vs our local board (2.3).
 4. Reproduce the doubled friends total (2.2 step 5)?
 5. Does PS4 code read NPD+0x6bc / +0x6d0 (2.7)? Find readers of `0x1147bb4`, `0x1147bc8`.
