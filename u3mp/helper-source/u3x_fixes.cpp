@@ -50932,6 +50932,7 @@ ST_FN int u3x_start_member_lobby(uintptr_t base) {
                                                          1, 1, 0, 0, 0);
         set_state(base, 0x2d);
         say(t_fb);
+        u3x_guest_load_pages(base, u3h_fl_state());
     }
     return 1;
 }
@@ -52840,8 +52841,9 @@ MM_FN void owner_wait(uintptr_t base, void *s) {
     go(base, 0x05);
 }
 
-// the guest page's start: the owner's settings event raised the start-load flag at 0x12 (fallback after 0.5 s)
-MM_FN void guest_start(uintptr_t base) {
+// the guest page's start: the owner's settings event raised the start-load flag at 0x12 (fallback after 0.5 s);
+// s = the menu state, for the loading page the fallback has to show itself (u3x_guest_load_pages)
+MM_FN void guest_start(uintptr_t base, void *s) {
     uint8_t *ms = sess(base, MS);
     const uint32_t t = now(base);
     if (ps4_state(base) != 0x12 || !ms[S_START_LOAD]) {
@@ -52856,6 +52858,7 @@ MM_FN void guest_start(uintptr_t base) {
         game_call<void, void *, int, int, int, int, int>(base + FN_LOAD_REQUEST, reinterpret_cast<void *>(base + NGM), 1, 1, 0, 0, 0);
         u3h_onm_state(base, 0x2d);
         say(t_fb);
+        u3x_guest_load_pages(base, s);
     }
 }
 
@@ -53100,7 +53103,7 @@ MM_FN void tick(uintptr_t base, void *s) {
         if (room != mm.target) mm.target = room;
         if (status(base) == 3) go(base, 0x16);
         if (status(base) == 6) go(base, 0x18);
-        guest_start(base);
+        guest_start(base, s);
         break;
     case 0x15:
     case 0x16:   // 6.3: one handler; the owner tallies at the deadline
@@ -53122,12 +53125,12 @@ MM_FN void tick(uintptr_t base, void *s) {
         } else if (status(base) == 6) {
             go(base, 0x18);
         }
-        guest_start(base);
+        guest_start(base, s);
         break;
     case 0x18:   // 6.5: the owner starts at the deadline; guests start on the owner's settings event
         if (!owner) {
             if (status(base) == 4) go(base, 0x17);
-            guest_start(base);
+            guest_start(base, s);
             break;
         }
         if (mm.dv_due) {   // one frame after the map result (its 0x109 went out first)
