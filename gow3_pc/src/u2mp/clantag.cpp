@@ -8,9 +8,16 @@
 //
 // While the game is online (NET_SM > 1), clan_tag_check_frame() checks every new tag before it counts and then
 // publishes the career and the member data, as PS3 did with its score service's comment censor (u2mp/docs/spec/
-// parity-a-leaderboards.md 2.1). A refused tag, or one whose check failed, becomes "*".
+// parity-a-leaderboards.md 2.1). A refused tag, or one whose check failed, becomes "*". The rules are in
+// clantag_rules.h; this file feeds them the tag and the censor's answers and does the writes, publishes and logs.
+//
+// PLATFORM replacement: PS3 asked the score service's comment censor. Our online program's interface
+// (u2_online_abi.h) has no comment censor request, so censor_start() answers "unavailable" and the spec's no-censor
+// path runs: the tag is accepted at once and published (log "check unavailable"). The started / running / refused
+// paths stay in place for a censor that may come later.
 //
 // Reimplemented from the behaviour descriptions u2mp/docs/spec/remaining.md and parity-a-leaderboards.md.
+#include "clantag_rules.h"
 #include "online.h"
 #include "progression.h"
 #include "u2mp_internal.h"
@@ -26,38 +33,26 @@ namespace u2mp {
 namespace {
 
 constexpr uint64_t kClanTag = 0x11474f8 + 0x1a8;   // NetPlayerData: 8 bytes, NUL-padded
-constexpr size_t kTagBytes = 8;
+constexpr size_t kTagBytes = clantag::kTagBytes;
 constexpr size_t kTagChars = 4;
 
 constexpr uint64_t kNetSmState = 0x14ce97c;        // s32: > 1 = online
-constexpr size_t kTagCompared = 4;                 // PS3 compared the first 4 bytes
 
 bool g_editing = false;
 
 // The tag check: the last tag checked (kept for the process) and whether a check runs.
-char g_checked[kTagBytes] = {};
-bool g_check_running = false;
+clantag::Check g_check;
 
-// The censor service. Our online program has none yet (u2_online_abi.h has no comment check), so a check cannot run
-// and every tag is accepted at once. A censor plugs in here: censor_start() takes the tag text (<= 63 bytes) and says
-// whether a check started; censor_poll() then answers 0 while it runs, 1 accepted, -1 refused or failed.
-enum class CensorStart { Unavailable, Started, Failed };
-CensorStart censor_start(const char *text) {
+// The censor service (none yet, see the top of the file). A censor plugs in here: censor_start() takes the tag text
+// (<= 63 bytes) and says whether a check started; censor_poll() then answers while it runs.
+clantag::Start censor_start(const char *text) {
     (void)text;
-    return CensorStart::Unavailable;
+    return clantag::Start::Unavailable;
 }
-int censor_poll() { return 1; }
+clantag::Verdict censor_poll() { return clantag::Verdict::Accepted; }
 
-// The verdict is in: the checked tag (or "*" when it was refused) is the tag, then the career and the member data
-// are published.
-void tag_check_done(bool rejected) {
-    g_check_running = false;
-    if (rejected && g_checked[0]) {
-        log("clan tag: [%.4s] refused, now [*]", g_checked);
-        std::memset(g_checked, 0, kTagBytes);
-        g_checked[0] = '*';
-    }
-    std::memcpy(image.at<char>(kClanTag), g_checked, kTagBytes);
+// The career and the member data go out (a cleared tag, or the verdict is in).
+void publish_tag() {
     progression_publish_career();
     online::member_data_changed();
 }
@@ -107,35 +102,32 @@ void clan_tag_frame() {
 
 void clan_tag_check_frame() {
     if (!image.base || *image.at<const int32_t>(kNetSmState) <= 1) return;
-    if (g_check_running) {
-        const int verdict = censor_poll();
-        if (verdict == 0) return;
-        if (verdict > 0) log("clan tag: [%.4s] kept", g_checked);
-        tag_check_done(verdict < 0);
-        return;
+    char before[kTagBytes];   // the checked tag as it was before this frame's step (for the "refused" log)
+    std::memcpy(before, g_check.checked, kTagBytes);
+    clantag::Step step;
+    if (g_check.running) {
+        step = clantag::on_verdict(g_check, censor_poll());
+    } else {
+        switch (clantag::notice(g_check, image.at<const char>(kClanTag))) {
+        case clantag::Change::Same: return;
+        case clantag::Change::Cleared: publish_tag(); return;
+        case clantag::Change::Check: break;
+        }
+        char text[kTagBytes + 1] = {};
+        std::memcpy(text, g_check.checked, kTagBytes);
+        step = clantag::on_start(g_check, censor_start(text));
     }
-    const char *tag = image.at<const char>(kClanTag);
-    if (std::memcmp(tag, g_checked, kTagCompared) == 0) return;
-    std::memcpy(g_checked, tag, kTagBytes);
-    if (!g_checked[0]) {   // cleared: published at once, nothing to check
-        progression_publish_career();
-        online::member_data_changed();
-        return;
+    switch (step) {
+    case clantag::Step::Waiting: return;
+    case clantag::Step::Started: log("clan tag: [%.4s] check started", g_check.checked); return;
+    case clantag::Step::StartFailed: return;   // kept as typed and not checked again until it changes
+    case clantag::Step::Unavailable: log("clan tag: check unavailable, [%.4s] kept", g_check.checked); break;
+    case clantag::Step::Kept: log("clan tag: [%.4s] kept", g_check.checked); break;
+    case clantag::Step::Refused: log("clan tag: [%.4s] refused, now [*]", before); break;
     }
-    char text[kTagBytes + 1] = {};
-    std::memcpy(text, g_checked, kTagBytes);
-    switch (censor_start(text)) {
-    case CensorStart::Started:
-        g_check_running = true;
-        log("clan tag: [%.4s] check started", g_checked);
-        break;
-    case CensorStart::Unavailable:   // no censor: accepted at once (never "failed", which would make every tag "*")
-        log("clan tag: check unavailable, [%.4s] kept", g_checked);
-        tag_check_done(false);
-        break;
-    case CensorStart::Failed:        // kept as typed and not checked again until it changes
-        break;
-    }
+    // the verdict is in (or there is no censor): the checked tag, "*" when refused, is the tag; then publish
+    std::memcpy(image.at<char>(kClanTag), g_check.checked, kTagBytes);
+    publish_tag();
 }
 
 }  // namespace u2mp

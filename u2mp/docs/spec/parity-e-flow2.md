@@ -388,8 +388,9 @@ detach = connected), session.cpp frame work (`session.md` 5.8) and peer events (
 PS3: BUTTON_CLANTAG opens the on-screen keyboard (title `0x639e0fa8`, current tag as initial text); the
 PLAYER_OPTIONS page polls it, replaces `\` and `|` by spaces, stores the tag in NetPlayerData, and pops to the menu
 when PSN sign-in is lost. The per-frame update then sends the tag to the PSN censor; a rejected tag becomes `*`; the
-profile is saved and the room member data updated. Ours: clantag.cpp (text input, 4 characters A-Z / 0-9, upper-cased),
-no censor service. The allowed character set is open question 3.
+profile is saved and the room member data updated. Ours: clantag.cpp (text input, 4 characters A-Z / 0-9, upper-cased)
+and its per-frame check (`clan_tag_check_frame`, `parity-a-leaderboards.md` 2.1), which runs the client flow with the
+"no censor service" answer: accepted at once, then saved and published. The allowed character set is open question 3.
 
 ### 3.5 Host ranking and migration inside the states
 
@@ -495,7 +496,7 @@ co-op exclusion is in session.cpp).
 | 441b88 | Leave::Update | COVERED | PS4 5eff30 |
 | 441d78 | pause gate for the per-frame pause state | COVERED | engine (open question 6) |
 | 441dd8 | "in a running net match" query | COVERED | engine callers |
-| 441e30 | clan tag censor poll | PLATFORM | none (3.4) |
+| 441e30 | clan tag censor poll | PLATFORM | clantag.cpp `clan_tag_check_frame` from `online::frame` (3.4; no censor service) |
 | 442100 | EULA status callback | PLATFORM | none (3.2) |
 | 4421b8 | ShowResults::Update | COVERED | PS4 5f0b30 + gameplay3.cpp |
 | 442558 | Playing::Update (idle kick, 0x117, leave, game over) | COVERED | PS4 5f14d0 + session.cpp; 0x117 sender in 2.5 |
