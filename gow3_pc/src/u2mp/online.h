@@ -22,8 +22,10 @@ net::Link *start();
 bool active();
 // Once per game frame: room service events, link state, room state (hide / 0x53), timers.
 void frame();
-// Start Match in a custom game (host): makes the match room. True: the room is being made and
-// session::online_match_ready() follows; false: go on at once (no room needed or online off).
+// Start Match in a custom game (host): makes the match room (the game type's slot count, session::custom_room_slots).
+// True: session::online_match_ready() follows when the room exists, or session::online_match_abort() when it cannot be
+// made (error, no answer in 20 s, no link / world, no slot count: PS3 parity H2); false: go on at once (no room
+// needed or online off).
 bool create_match_room();
 // The match room this PC is in (0 none): sent with the follow so that party members join it too.
 uint64_t match_room();
@@ -102,11 +104,18 @@ bool friend_view(int i, FriendView &v);      // false: row i is no friend (a req
 int friend_index(const std::string &name);   // the row of that friend (or request) now, -1 none
 const char *request_state(int i);            // a request row's state text ("" for other rows)
 void refresh_friend_list();                  // fetch the list and presence again (the list's op 8)
+// The RPCN friend list has been read since the link came up (PS3: the friend list load is done).
+bool friend_list_ready();
+bool is_friend(const std::string &npid);     // a friend (not a request); false while the list is not ready
+// Friend row i's party members (PS3 parity G4, 0x490c28): the cached list when it belongs to that friend (true),
+// else nothing (false). Asks the room service for the members of the friend's party room (its presence) when the
+// cache is another friend's or older than 5 s and no such request runs; u2mp::friend_party_arrived follows.
+bool friend_party(int i, std::vector<std::string> &names);
 
 // ---- PAGE_MULTIPLAYER's friends stats ticker (PS3 0x446c60 / 0x43b30c / 0x43b290, spec parity-d-flow1.md 2.10) ----
 // One ticker text: a random category (0 cash .. 6 time played), then up to 5 random friends (of the first 101)
 // whose presence is this build's multiplayer with stats (presence version 3). No such friend: the heading only.
-// The PS4 call that puts a text into the ticker control is not known yet, so nothing shows it so far.
+// ticker.cpp hands it to the game's ticker add function 0x5d6500 (spec parity-ticker-respawn.md 1).
 std::string stats_ticker_text();
 // The ticker's pieces, for tests: one friend entry appended to `out` (false, `out` unchanged, when it would reach
 // 511 characters), and the time played text ("Nd Nh Nm", "Nh Nm", "Nm").
@@ -173,7 +182,12 @@ bool in_own_party(const std::string &npid);          // this PC or a member of o
 uint64_t own_party_id();                             // our party room while it has 2+ members, else 0
 uint64_t member_party_id(const std::string &npid);   // the party id a match room member published (+0), 0 none
 bool peer_rtt(const std::string &npid, uint32_t &rtt_ms, bool &up);   // false: no connection record
-int mm_slots();                      // the size of the match matchmaking fills (room max), 0 when it is off
+// The link state to that player (U2O_PEER_* of u2_online_abi.h: the matchmaking rows' bar colour, PS3 0x4e8f1c);
+// -1 when there is no connection record or no state was reported yet.
+int32_t peer_link_state(const std::string &npid);
+// The match room's slot count (custom or matchmaking); without one the size a matchmaking room of the chosen
+// playlist gets (matchmaking page) or 10. 0 when online matchmaking is off.
+int mm_slots();
 
 // ---- PS3 parity group E (session.cpp; spec parity-e-flow2.md 2.4 Party Up, 2.6 slot manager) ----
 uint64_t party_room_id();            // our party room (also a party of one), 0 none
@@ -195,6 +209,9 @@ void show_notice(const char *text);
 // menus.cpp: the friend card of friends-list row i (cond 38 lines: title, status, activity / match, "Match ends
 // in"); empty when row i is no friend. View Profile shows them (remaining.cpp).
 std::vector<std::string> friend_card_lines(int i);
+// remaining.cpp: a friend's party member list arrived (online::friend_party); an open View Profile box of that
+// friend shows it.
+void friend_party_arrived(const std::string &npid, const std::vector<std::string> &party);
 }  // namespace u2mp
 
 namespace u2mp::session {
@@ -208,9 +225,22 @@ void online_match_member_joined();
 // online.cpp -> session.cpp: the leader says whether the whole party is in the custom game room (PS3 0x10e {1} /
 // {0}); also a failed join from the list (0). Posts mailbox 0x10e for the JOINING page while it waits (NET_SM 12).
 void online_party_in(bool ok);
-// online.cpp -> session.cpp, leader: a party member could not join the custom game room (PS3 0x465da0 state 10
-// failure): the match is dropped and the leader goes back to PAGE_MULTIPLAYER with NET_SM 18.
-void online_match_abort();
+// online.cpp -> session.cpp, leader: the custom game is dropped (`why` is logged): a party member could not join the
+// custom game room (PS3 0x465da0 state 10 failure), or the room could not be made (PS3 "Session Create failed",
+// parity H2). The leader goes back to PAGE_MULTIPLAYER with NET_SM 18, no box.
+void online_match_abort(const char *why);
+// online.cpp -> session.cpp: the network error (netInfo +0x1c, the game's error box) and online play ends, for the
+// host and the others alike; `why` is logged (no room service world, parity H8).
+void online_network_error(const char *why);
+// Room sizes (PS3 parity H1, 0x49e620 / 0x49a958): a custom game room gets the current game type's player count (10
+// competitive, 3 co-op, 0 unknown type); a matchmaking room the chosen playlist's maximum: the largest player count of
+// its game types (the PS3 playlist value is not known to this port), 10 without a playlist of ours.
+int custom_room_slots();
+int playlist_room_slots();
+// The matchmaking room key's map-pack mask (PS3 parity H5, 0x4d6a08): the AND of the map-pack bits (dlc_packs) of
+// this PC and every party member (a member that sent none does not narrow it); 0 when the chosen playlist has no
+// map-pack map.
+uint32_t mm_pack_mask();
 // The NpIds of the other members on our transport (host), in slot order; empty when unknown.
 std::vector<std::string> member_npids();
 // online.cpp -> session.cpp: this player's name is the RPCN online name.

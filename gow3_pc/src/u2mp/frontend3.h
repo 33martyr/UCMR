@@ -54,8 +54,6 @@ void on_migrated(bool host);
 // Online (PS3 state 17 -> 35 -> 19): we left a stranger's matchmaking room because its host went away (or it removed
 // us). host: this PC searches again from the first criteria; else a party member waits for its leader in 19.
 void on_host_left(bool host);
-// Voice (PS3 0x4b0700 / 0x4b0868): players outside our party are silent while an online matchmaking room gathers.
-bool strangers_muted();
 }  // namespace matchmaking
 
 }  // namespace u2mp

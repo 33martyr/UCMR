@@ -54,8 +54,9 @@ PS3 roster query `0x4bc728` (jump table `0x4bc830`, resolved from TOC `0xe183b8`
 
 - **image 1** (`0x4bca08` / `0x4bcb38`): a member with a voice port shows `general/net/mic/default`
   (`ffa98ec5`) while cellVoice reports energy (attribute 1001); a muted member `general/net/mic/mute`
-  (`7a5f5bf1`); else nothing. Type 3 image. Now: `voice::talking(net_id)` (voice arrived in the last 300 ms;
-  the local member: a frame was sent) and `voice::muted(net_id)`, written as PS4 writes a type 3 net image
+  (`7a5f5bf1`); else nothing. Type 3 image. Now: `voice::talking(net_id)` (the member's PS3 talking level is at
+  least 1.0, spec `parity-j-voice-medals.md` J1; never the local member, J8) and `voice::muted(net_id)` (the one
+  mute flag, J3), written as PS4 writes a type 3 net image
   (`0x655f11`: +0x1c {id, selector 1}, +0x24 -1).
 - **op 17** (`0x4bc934`): only PAGE_LOBBY's rows (table arg 10..19) of a custom game (netInfo mode 2) whose
   game type is not free for all (`0x4a0bcc`: types 4, 8, 9, 12 = the types the PS4 team carousel hides,

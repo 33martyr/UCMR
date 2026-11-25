@@ -116,8 +116,13 @@ SendFn g_send_original = nullptr;
 SendFn g_session_send_original = nullptr;
 StateFn g_wait_ready_exit = nullptr;
 StateFn g_online_leave_enter = nullptr;
-StateFn g_replaying_exit = nullptr;
+StateFn g_replay_enter = nullptr;
 StateFn g_replay_leave_enter = nullptr;
+
+// Playback: E19 opened the film and the next RePlay::Enter is its first entry (not a restart);
+// a failed reopen in RePlay::Enter makes the next pump hand the game a film that ends at once.
+bool g_first_entry = false;
+bool g_empty_film = false;
 
 // ---------------------------------------------------------------------------------------------
 // Small accessors.
@@ -233,6 +238,7 @@ uint32_t frame_clock() {
 }
 
 void close_playback() {
+    g_empty_film = false;
     if (!g_reader.is_open()) return;
     g_reader.close();
     put32(cinema_mgr(cm::kOpen), 0);
@@ -334,7 +340,10 @@ void start_recording() {
 // ---------------------------------------------------------------------------------------------
 // Playback.
 
-bool open_for_reading() {
+// Opens the selected film with the file at its first stream byte; the stream itself stays empty
+// (the game's RePlay::Enter resets it and the next pump fills it from the film's start). `path`
+// is the file tried, empty when the selection is out of range.
+bool open_for_reading(std::string &path) {
     attach_stream();
     attach_lists();
     close_playback();
@@ -342,20 +351,18 @@ bool open_for_reading() {
     Stream *s = stream();
     s->bits = 0;
     s->bytes = 0;
+    path.clear();
     const int32_t i = selected();
     if (in_range(i)) {
-        const std::string path = store_dir() + "/" + entry_name(i);
+        path = store_dir() + "/" + entry_name(i);
         if (g_reader.open(path, cinema_mgr(cm::kHeader))) {
             *cinema_mgr(cm::kReading) = 1;
             *cinema_mgr(cm::kEof) = 0;
             put32(cinema_mgr(cm::kOpen), 1);
-            g_reader.fill(*s);
-            log("cinema: playing %s", path.c_str());
             return true;
         }
-        log("cinema: cannot read %s", path.c_str());
     }
-    // Give the reader a stream that ends at once, so the replay task leaves cleanly.
+    // A stream that ends at once, so a reader that looks now leaves cleanly.
     s->bytes = 4;
     *cinema_mgr(cm::kEof) = 1;
     return false;
@@ -372,6 +379,12 @@ U2MP_GUEST uint64_t pump(void *) {
     } else if (g_reader.is_open()) {
         g_reader.fill(*s);
         *cinema_mgr(cm::kEof) = g_reader.eof() ? 1 : 0;
+    } else if (g_empty_film) {
+        // Time 0 at the start: the game reads tag 0, not the stream start, and leaves.
+        g_empty_film = false;
+        buffer_words()[0] = 0;
+        s->bytes = 4;
+        *cinema_mgr(cm::kEof) = 1;
     }
     return 0;
 }
@@ -401,9 +414,18 @@ U2MP_GUEST void online_leave_enter(void *state) {
     g_online_leave_enter(state);
 }
 
-U2MP_GUEST void replaying_exit(void *state) {
-    g_replaying_exit(state);
-    close_playback();
+// Every entry into RePlay plays the film from its start: after E19, at the film's end marker and
+// on Restart. The film stays open through RePlaying::Exit and Resetting.
+U2MP_GUEST void replay_enter(void *state) {
+    std::string path;
+    if (open_for_reading(path)) {
+        if (!g_first_entry) log("cinema: replay restarts %s", path.c_str());
+    } else {
+        log("cinema: cannot reopen %s; the film ends", path.empty() ? "(none)" : path.c_str());
+        g_empty_film = true;
+    }
+    g_first_entry = false;
+    g_replay_enter(state);
 }
 
 U2MP_GUEST void replay_leave_enter(void *state) {
@@ -488,7 +510,13 @@ U2MP_GUEST void upload_button(void *) { cinema_pick_friend(); }
 
 U2MP_GUEST void start_cinema(void *) {
     finish_recording();
-    if (!open_for_reading()) return;
+    std::string path;
+    if (!open_for_reading(path)) {
+        if (!path.empty()) log("cinema: cannot read %s", path.c_str());
+        return;
+    }
+    log("cinema: playing %s", path.c_str());
+    g_first_entry = true;
     reinterpret_cast<void(U2MP_GUEST *)(void *)>(game(fMenuReset))(menu_manager());
     void *task = reinterpret_cast<void *(U2MP_GUEST *)(uint32_t, uint32_t)>(game(fFindTask))(kTaskSet, kTaskReplay);
     reinterpret_cast<void(U2MP_GUEST *)(void *)>(game(fPlayTask))(task);
@@ -709,7 +737,7 @@ void install_cinema(int &installed) {
     if (!g_can_record) log("cinema: recording off (a recorder hook is missing)");
     if (!start_ok) log("cinema: WARNING the replay stream has no buffer; WaitReady::Exit writes to NULL");
 
-    if (swap_slot(0x100a7a0, 0x5e8740, host(replaying_exit), g_replaying_exit, "RePlaying::Exit")) ++installed;
+    if (swap_slot(0x100a7d8, 0x5e9630, host(replay_enter), g_replay_enter, "RePlay::Enter")) ++installed;
     if (swap_slot(0x100a6d8, 0x5e5520, host(replay_leave_enter), g_replay_leave_enter, "replay Leave::Enter"))
         ++installed;
 

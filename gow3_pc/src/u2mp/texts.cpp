@@ -1433,7 +1433,7 @@ const MenuText kMenu[] = {
 TextFindFn orig_text_find = nullptr;
 thread_local int find_depth = 0;   // TextDb::Find calls itself for the next bank: only the outer call
 std::atomic<int> current_language{-1};
-char player_text[256];
+char player_text[1024];   // room for a friend's View Profile with its party member list (parity G4)
 
 std::mutex text_lock;
 // imported banks by language, loaded once each and never freed (the game keeps the pointers)

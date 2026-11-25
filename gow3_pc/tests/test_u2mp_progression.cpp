@@ -1,4 +1,5 @@
 // u2mp progression store test (no game needed): ninja -C out/gpu u2mp-progression-test
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -52,6 +53,27 @@ static void test_roundtrip() {
     Store x;
     CHECK(!decode(bytes.data(), bytes.size() - 1, x));
     CHECK(!decode(bytes.data(), 16, x));
+}
+
+// Format 2 keeps the local career headshots; a format 1 file (no headshots word) still reads, with 0.
+static void test_headshots() {
+    Store s = sample();
+    s.headshots = 41;
+    const std::vector<uint8_t> bytes = encode(s, 5);
+    Store d;
+    CHECK(decode(bytes.data(), bytes.size(), d) && d.headshots == 41 && d.recent.size() == 1);
+    std::vector<uint8_t> old(bytes.begin(), bytes.end() - 8);   // without the headshots word and the CRC
+    old[8] = 1, old[9] = old[10] = old[11] = 0;
+    const uint32_t crc = crc32(old.data(), old.size());
+    for (int i = 0; i < 4; ++i) old.push_back(uint8_t(crc >> (8 * i)));
+    Store o;
+    CHECK(decode(old.data(), old.size(), o) && o.headshots == 0 && o.recent.size() == 1 && o.local_name == "Drake");
+    // the local line adds its headshots; the other players' lines do not
+    std::vector<MatchPlayer> m(2);
+    m[0].name = "Drake", m[0].local = true, m[0].headshots = 3;
+    m[1].name = "Chloe", m[1].headshots = 9;
+    note_match(s, m, 300);
+    CHECK(s.headshots == 44);
 }
 
 static void test_files() {
@@ -118,24 +140,79 @@ static void test_matches() {
     for (const PlayerStats &p : s.recent) CHECK(p.name != "Drake");
 }
 
-// Players met at match / round start (spec parity-e-flow2.md 2.9): new names come in without statistics, known
-// ones move to the top with their statistics kept, the local player never; the Leave statistics add up later.
+// Players met at match / round start (spec parity-e-flow2.md 2.9, parity-g-friends.md G1): new names come in
+// without statistics, a player known only from a match's end is listed with its statistics kept, the local
+// player never; the Leave statistics add up later.
 static void test_met() {
     Store s;
     s.local_name = "Drake";
     std::vector<MatchPlayer> m(1);
     m[0].name = "Chloe", m[0].kills = 3;
-    note_match(s, m, 100);
-    CHECK(note_met(s, {"Sully", "Chloe", "Drake", ""}, 200));
+    note_match(s, m, 100);   // a late joiner: statistics, but no Players Met row
+    CHECK(s.recent.size() == 1 && s.recent[0].unlisted);
+    CHECK(players_met(s, nullptr).empty());
+    CHECK((note_met(s, {"Sully", "Chloe", "Drake", ""}, 200, nullptr) == std::vector<std::string>{"Sully", "Chloe"}));
     CHECK(s.recent.size() == 2);
     const PlayerStats *sully = nullptr, *chloe = nullptr;
     for (const PlayerStats &p : s.recent) (p.name == "Sully" ? sully : chloe) = &p;
-    CHECK(sully && sully->matches == 0 && sully->kills == 0 && sully->last_seen == 200);
-    CHECK(chloe && chloe->matches == 1 && chloe->kills == 3 && chloe->last_seen == 200);
-    CHECK(!note_met(s, {"Sully"}, 200));   // a new round in the same second: nothing to write
+    CHECK(sully && sully->matches == 0 && sully->kills == 0 && sully->last_seen == 200 && !sully->unlisted);
+    CHECK(chloe && chloe->matches == 1 && chloe->kills == 3 && chloe->last_seen == 200 && !chloe->unlisted);
+    // already listed: skipped, last_seen unchanged (a new round adds nobody)
+    CHECK(note_met(s, {"Sully"}, 250, nullptr).empty());
+    CHECK(sully && sully->last_seen == 200);
     note_match(s, m, 300);
     for (const PlayerStats &p : s.recent)
-        if (p.name == "Chloe") CHECK(p.matches == 2 && p.kills == 6);
+        if (p.name == "Chloe") CHECK(p.matches == 2 && p.kills == 6 && p.last_seen == 300 && !p.unlisted);
+    CHECK((players_met(s, nullptr) == std::vector<std::string>{"Chloe", "Sully"}));   // most recently seen first
+
+    // the unlisted flag survives the file (old files hold 0 there: listed)
+    Store d;
+    const std::vector<uint8_t> bytes = encode(s, 1);
+    note_match(s, std::vector<MatchPlayer>(1, MatchPlayer{"Flynn"}), 400);
+    const std::vector<uint8_t> bytes2 = encode(s, 1);
+    CHECK(decode(bytes2.data(), bytes2.size(), d));
+    for (const PlayerStats &p : d.recent) CHECK(p.unlisted == (p.name == "Flynn"));
+    CHECK(decode(bytes.data(), bytes.size(), d) && d.recent.size() == 2);
+}
+
+// G1: friends never appear and are never added; a stranger who became a friend leaves the rows; batches of 16;
+// 50 rows at most.
+static void test_met_friends() {
+    Store s;
+    s.local_name = "Drake";
+    std::vector<std::string> friends = {"Elena"};
+    const IsFriend is_friend = [&](const std::string &n) {
+        return std::find(friends.begin(), friends.end(), n) != friends.end();
+    };
+    CHECK((note_met(s, {"Elena", "Lazarevic"}, 100, is_friend) == std::vector<std::string>{"Lazarevic"}));
+    CHECK(s.recent.size() == 1);
+    // the friend's Leave statistics are kept (leaderboards), unlisted
+    std::vector<MatchPlayer> m(2);
+    m[0].name = "Elena", m[0].kills = 4;
+    m[1].name = "Lazarevic", m[1].kills = 9;
+    note_match(s, m, 150);
+    CHECK(s.recent.size() == 2);
+    CHECK((players_met(s, is_friend) == std::vector<std::string>{"Lazarevic"}));
+    friends.push_back("Lazarevic");   // befriended: gone at the next refresh
+    CHECK(players_met(s, is_friend).empty());
+    friends = {};                      // Elena unfriended: listed by the next match start, not before
+    CHECK((players_met(s, is_friend) == std::vector<std::string>{"Lazarevic"}));
+    CHECK((note_met(s, {"Elena", "Lazarevic"}, 200, is_friend) == std::vector<std::string>{"Elena"}));
+    CHECK((players_met(s, is_friend) == std::vector<std::string>{"Elena", "Lazarevic"}));
+
+    // at most 16 per batch, in order; duplicates once
+    std::vector<std::string> many;
+    for (int i = 0; i < 20; ++i) many.push_back("P" + std::to_string(i));
+    many.insert(many.begin(), "P0");
+    const std::vector<std::string> batch = note_met(s, many, 300, is_friend);
+    CHECK(batch.size() == kMetBatch && batch.front() == "P0" && batch.back() == "P15");
+    // 50 rows at most, most recent first
+    for (int i = 0; i < 60; ++i) note_met(s, {"Q" + std::to_string(i)}, 1000 + uint64_t(i), is_friend);
+    const std::vector<std::string> rows = players_met(s, is_friend);
+    CHECK(rows.size() == kMetShown && rows.front() == "Q59" && rows.back() == "Q10");
+    // a stored player past the 50 rows is no row: a match start lists it again at the top
+    CHECK((note_met(s, {"Q5"}, 2000, is_friend) == std::vector<std::string>{"Q5"}));
+    CHECK(players_met(s, is_friend).front() == "Q5");
 }
 
 static void test_boards() {
@@ -184,9 +261,11 @@ int main() {
     const char *check = "123456789";
     CHECK(crc32(reinterpret_cast<const uint8_t *>(check), 9) == 0xcbf43926u);
     test_roundtrip();
+    test_headshots();
     test_files();
     test_matches();
     test_met();
+    test_met_friends();
     test_boards();
     if (failures) {
         std::printf("%d failure(s)\n", failures);

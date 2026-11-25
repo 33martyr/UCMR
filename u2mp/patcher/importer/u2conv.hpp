@@ -1,5 +1,5 @@
 // importer/u2conv.hpp: the converters of the Uncharted 2 import that work on paks and DC modules (levels, stage, actors,
-// menu images, the net-patch module), as the import calls them.
+// menu images, the net-patch module, the audio records), as the import calls them.
 #pragma once
 #include "u2import.hpp"
 
@@ -31,5 +31,9 @@ std::vector<std::string> convert_net_images(const fs::path &ps3_net, const fs::p
 // dc1/ps4/net-patch9.bin from the PS3 server module: the converted module and its note
 extern const char *NETPATCH_VERSION;
 Bytes convert_net_patch(const Context &c, const Bytes &data, std::string &note);
+// dc1/ps4/audio.bin: the PS4 module (`ps4`) with the PS3 module's (`ps3`) falloff end of the multiplayer characters'
+// foley (sound.cpp); throws std::invalid_argument for a module that is not a U2 DC module
+extern const char *AUDIO_VERSION;
+Bytes audio_records_convert(const Bytes &ps4, const Bytes &ps3, std::string &note);
 
 }  // namespace u2imp

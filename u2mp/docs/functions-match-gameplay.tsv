@@ -1149,8 +1149,8 @@ players	-	0x4cba40	-	unresolved	no static pairing (small; probably inlined)		net
 players	-	0x4cba50	-	unresolved	no static pairing (small; probably inlined)		net-player-tracker.cpp	0x3c	6b87d8		
 players	-	0x4cba8c	-	unresolved	no static pairing (small; probably inlined)		net-player-tracker.cpp	0x34	6bb2c0		
 players	-	0x4cbac0	-	unresolved	no static pairing		net-player-tracker.cpp	0x150	4cbf00 4ccfe4 4cd08c	30fb28 7069c8 4233c4	
-players	-	0x4cbc10	0x5a0620	inlined	inlined (features 60% inside); host alive		net-player-tracker.cpp	0x2f0	447248	565d4 49e4a0 420f58 9294c4 4157a8 421548 4212ec 4153d0 +3	f1f70c f1f710
-players	-	0x4cbf00	0x5e8e70	intact-alive	sid:8a87d1da		net-player-tracker.cpp	0x878	447248	49e4a0 4cbac0 825e0 4919d4 4c7b90 6b6b3c 8a0348 494178 +3	e60af8 e61214 e6121c f0edb4 f1f70c
+players	tracker overlay draw (entries, dead-player hint line)	0x4cbc10	absent	absent	pairing corrected (parity-m-features.md 2.0): 0x5a0620 is the menu system-message poller; no PS4 counterpart	ported: scoreboard.cpp	net-player-tracker.cpp	0x2f0	447248	565d4 49e4a0 420f58 9294c4 4157a8 421548 4212ec 4153d0 +3	f1f70c f1f710
+players	tracker overlay update (entry rules, auto open, hint fade)	0x4cbf00	absent	absent	pairing corrected (parity-m-features.md 2.0): 0x5e8e70 is the theater-camera callback handler; no PS4 counterpart	ported: scoreboard.cpp	net-player-tracker.cpp	0x878	447248	49e4a0 4cbac0 825e0 4919d4 4c7b90 6b6b3c 8a0348 494178 +3	e60af8 e61214 e6121c f0edb4 f1f70c
 players	-	0x4cc778	-	unresolved	no static pairing		net-player-tracker.cpp	0x15c		ac9730	f2e150 f2e151 f2e154 f2e160 f2e168
 players	-	0x4cc8d4	-	unresolved	no static pairing (small; probably inlined)		net-player-tracker.cpp	0x10			
 natives	script native DcNetIsCinema (net-is-cinema?)	0x4cc8e4	0x669c50	intact-alive	native:DcNetIsCinema		net script functions	0x6c		4384b0	f1f824

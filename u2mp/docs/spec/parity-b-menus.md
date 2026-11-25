@@ -105,6 +105,8 @@ rooms) this list has a PC source: the match room's slots. **PLATFORM, partly mis
      (up to 49 ms: 5, up to 79: 4, up to 119: 3, up to 199: 2, above: 1; 0 when unknown), colour word
      0x800000FF while the connection is up, 0x80808080 (grey) otherwise (values as PS3 wrote them;
      byte order on PS4 to check). Source on PC: `online.cpp` RTT per peer (LAN: our transport RTT).
+     **Corrected by `parity-i-connection.md` I5:** the state function returns the signaling state, so PS3
+     shows four colours: inactive 0x800000FF, pending 0x80FF0000, active 0x8000FF00, otherwise grey.
 3. **Op 10.** Selector 0: result 1 only for kind 2. **[missing]**
 4. **Op 17 [missing], party group colour.** The player's party id is looked up in the matchmaking
    state's list of party ids (PS3 `+0x148`, count `+0x198`); found at position i -> row colour =
@@ -415,10 +417,12 @@ menuimages.cpp case is needed for them:
   other net pictures. Whether these four ids exist in net.pak was not checked: the menu images log
   ("missing") shows it on the first friends-list draw.
 
-Also for section 2.2 (PS3 `0x4bfac8`): the row code has four colour outcomes for the bars, but the
-connection-state function it asks returns only 0 (connection up) or -1, so only `0x800000FF` (up) and
-`0x80808080` (otherwise) can appear, as 2.2 says. The bar value comes from the peer's round-trip time in
-its connection record, thresholds as in 2.2; 0 when the player has no connection record.
+Also for section 2.2 (PS3 `0x4bfac8`): the row code has four colour outcomes for the bars. (This note
+first said the connection-state function returns only 0 or -1; `parity-i-connection.md` I5 corrected it:
+it returns the signaling state 0 inactive / 1 pending / 2 active, or -1, so all four colours appear:
+`0x800000FF`, `0x80FF0000`, `0x8000FF00`, `0x80808080`; session.cpp `mm_roster_query` writes them since I5.)
+The bar value comes from the peer's round-trip time in its connection record, thresholds as in 2.2; 0 when
+the player has no connection record.
 
 ### 11.5 Match end time and [TIME] (question 6): settled (PS3, PS4, bank)
 

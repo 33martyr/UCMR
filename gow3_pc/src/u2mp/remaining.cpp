@@ -80,6 +80,7 @@ constexpr uint32_t kTextJoin = 0xb1600ce3, kCbJoin = 0x0ace8463;
 constexpr uint32_t kTextInviteParty = 0x4a555973, kCbInviteParty = 0x45a9c65b;
 constexpr uint32_t kTextViewProfile = 0x4040b706, kCbFriendProfile = 0x3fe6f70e;
 constexpr uint32_t kTextAddFriend = 0x910fb4f9;
+constexpr uint32_t kTextParty = 0xb6bd34c3;   // "Party": PS3 PAGE_FRIENDACTIONS member list title
 
 // Our own callback ids (registered in the game's menu callback table on demand).
 constexpr uint32_t kCbFriendAccept = sid("U2MP_PC_CB_FRIEND_ACCEPT");
@@ -99,6 +100,7 @@ std::string g_selected_friend_name;    // the friend (or friend request) picked 
 // The picked friend's row now (the list is kept sorted, so rows move); -1 when it left the list.
 int selected_friend() { return g_selected_friend_name.empty() ? -1 : online::friend_index(g_selected_friend_name); }
 std::string g_selected_met;           // players-met name picked
+std::string g_profile_text;           // the friend View Profile text last shown (a party list arriving renews it)
 std::vector<std::string> g_pick_names;   // cinema picker: the friends offered, by option
 std::string g_last_level_name;        // level package lookups log once per name
 bool g_matchmaking_answered = false;  // kept for parity; nothing reads it
@@ -409,18 +411,32 @@ std::vector<uint32_t> match_others() {
     return ids;
 }
 
-// Mute All / Unmute All: every other player of the match, silently (as Mute).
-U2MP_GUEST void mute_all(void *, void *, void *) {
-    for (uint32_t id : match_others()) voice::set_muted(id, true);
+// The remote members of the party (party roster rows, without strangers of a matchmaking transport).
+std::vector<uint32_t> party_others() {
+    std::vector<uint32_t> ids;
+    for (int row = 0; row < 10; ++row) {
+        uint32_t id = 0;
+        std::string name;
+        if (session::member_at(row, id, name) && id && id != session::local_id() && !session::party_stranger(id))
+            ids.push_back(id);
+    }
+    return ids;
 }
-U2MP_GUEST void unmute_all(void *, void *, void *) {
-    for (uint32_t id : match_others()) voice::set_muted(id, false);
+
+// The session Mute All / Unmute All work on (PS3 parity E 2.7 / H7): the party in the party pages (page mode < 2),
+// the match otherwise; its players on our transport (they have a connection record), ourselves left out.
+std::vector<uint32_t> mute_others() {
+    return image_load<int32_t>(kNetInfo + 0x2c4) < 2 ? party_others() : match_others();
 }
+
+// Mute All / Unmute All (PS3 0x4d6ab0): every one of them, silently (as Mute).
+U2MP_GUEST void mute_all(void *, void *, void *) { voice::set_all_muted(mute_others(), true); }
+U2MP_GUEST void unmute_all(void *, void *, void *) { voice::set_all_muted(mute_others(), false); }
 
 U2MP_GUEST void party_player_row(void *arg, void *, void *) { player_options(int(arg_word(arg, 8) % 10)); }
 // Matchmaking / postgame rows (PS3 0x440620): the matchmaking slot list (session.cpp), not the party order. No
-// title, no Kick / Promote: "Mute" / "Unmute" (not on the own row), "Mute All" unless every other player is muted,
-// "Unmute All" unless none is.
+// title, no Kick / Promote: "Mute" / "Unmute" (not on the own row), "Mute All" unless every other player of the
+// named session (mute_others) is muted (PS3 0x4d6fa0), "Unmute All" unless none is (0x4d6d10); nobody else: neither.
 U2MP_GUEST void match_player_row(void *arg, void *, void *) {
     const int row = int32_t(arg_word(arg, 8));
     uint32_t id = 0;
@@ -429,17 +445,15 @@ U2MP_GUEST void match_player_row(void *arg, void *, void *) {
         log("player options: no player in row %d", row);
         return;
     }
-    const std::vector<uint32_t> others = match_others();
-    size_t muted = 0;
-    for (uint32_t o : others) muted += voice::muted(o);
+    const std::vector<uint32_t> others = mute_others();
     g_selected_member = id;
     text_set_player(name.c_str());
     const bool cbs = register_callback(kCbMuteAll, mute_all) && register_callback(kCbUnmuteAll, unmute_all);
     Popup popup;
     popup.set_title(0);
     if (id != session::local_id()) popup.add(voice::muted(id) ? kTextUnmute : kTextMute, kCbMatchMute);
-    if (cbs && muted < others.size()) popup.add(kTextMuteAll, kCbMuteAll);
-    if (cbs && muted > 0) popup.add(kTextUnmuteAll, kCbUnmuteAll);
+    if (cbs && !voice::all_muted(others)) popup.add(kTextMuteAll, kCbMuteAll);
+    if (cbs && !voice::none_muted(others)) popup.add(kTextUnmuteAll, kCbUnmuteAll);
     if (!popup.empty()) popup.show();
 }
 
@@ -448,16 +462,30 @@ U2MP_GUEST void match_player_row(void *arg, void *, void *) {
 U2MP_GUEST void friend_accept(void *, void *, void *) { online::accept_request(selected_friend()); }
 U2MP_GUEST void friend_remove(void *, void *, void *) { online::remove_friend(selected_friend()); }
 // View Profile: a friend's card lines (PS3 PAGE_FRIENDACTIONS header, menus.cpp), one per line; a request row
-// keeps its own text.
-U2MP_GUEST void friend_profile(void *, void *, void *) {
-    const int i = selected_friend();
+// keeps its own text. Under them the friend's party members (PS3 PAGE_FRIENDACTIONS member list, parity G4):
+// the title "Party" and one online id per line, nothing while the list is empty.
+std::string friend_profile_text(int i, const std::vector<std::string> &party) {
     std::string text;
     for (const std::string &line : friend_card_lines(i))
         if (!line.empty()) text += (text.empty() ? "" : "\\") + line;
     online::FriendView v;
     if (online::friend_view(i, v) && v.other_build) text += "\\Plays another version of the game.";
     if (text.empty()) text = online::profile_text(i);
-    text_set_player(text.c_str());
+    if (!party.empty()) {
+        const char *title = reinterpret_cast<const char *(U2MP_GUEST *)(void *, uint32_t)>(image_ptr(fTextFind))(
+            image_ptr(0x1066660), kTextParty);
+        text += std::string("\\") + (title ? title : "");
+        for (const std::string &name : party) text += "\\" + name;
+    }
+    return text;
+}
+
+U2MP_GUEST void friend_profile(void *, void *, void *) {
+    const int i = selected_friend();
+    std::vector<std::string> party;
+    online::friend_party(i, party);   // the cached list; asks again when it is old or another friend's
+    g_profile_text = friend_profile_text(i, party);
+    text_set_player(g_profile_text.c_str());
     message_box(kTextPlayer);
 }
 
@@ -523,7 +551,7 @@ U2MP_GUEST void met_profile(void *, void *, void *) { notice_text(progression_pl
 
 U2MP_GUEST void players_met_row(void *arg, void *, void *) {
     const int row = int32_t(arg_word(arg, 4));
-    const std::vector<std::string> names = progression_recent_players(50);
+    const std::vector<std::string> names = progression_players_met();
     if (row < 0 || size_t(row) >= names.size()) return;
     g_selected_met = names[size_t(row)];
     text_set_player(g_selected_met.c_str());
@@ -787,6 +815,16 @@ void game_message_box(uint32_t body, uint32_t second) {
 
 void cinema_pick_friend() { pick_friend_for_cinema(); }
 
+// The View Profile box of that friend is still the top page with our text: it gets the party members.
+void friend_party_arrived(const std::string &npid, const std::vector<std::string> &party) {
+    if (g_profile_text.empty() || npid != g_selected_friend_name || !image.base) return;
+    const char *shown = own_text(kTextPlayer);
+    const int32_t top = load_at<int32_t>(menu_manager(), 0x1010);
+    if (!shown || g_profile_text != shown || top < 0 || top > 0x40 || page_at(top) != kPageMessageBox) return;
+    g_profile_text = friend_profile_text(selected_friend(), party);
+    text_set_player(g_profile_text.c_str());
+}
+
 void install_remaining(int &installed) {
     // 1. level record package
     static const unsigned char level_pkg[] = {0x55, 0x48, 0x89, 0xe5, 0x41, 0x56, 0x53,
@@ -795,7 +833,8 @@ void install_remaining(int &installed) {
         replace_function(0x644130, 14, reinterpret_cast<void *>(&level_record_package), "level record package (644130)"))
         ++installed;
 
-    // 2. tracker values: read the match session's own block instead of the NULL room accessor
+    // 2. tracker values: read the match session's own block instead of the NULL room accessor (no NULL read; the
+    //    level itself comes per slot from teams.cpp's hook right after it, 0x6405a1)
     static const unsigned char tracker_old[] = {0xbf, 0x00, 0x00, 0x00, 0x00, 0x48, 0x0f, 0x45, 0xfe};
     static const unsigned char tracker_new[] = {0x48, 0x89, 0xf7, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90};
     if (bytes_at(0x640598, tracker_old)) {

@@ -115,7 +115,13 @@ SignalingGetPingInfo 0xE01. (P)
    servers -> `session+8`. PS4 `0x5eb830` still does this pick (DC `e5350103`, `0xde72c0` rand), over a
    list at `0x14ce990` (count) / `0x14ce9b8` (array) that only PS3's init filled. (P)
 
-### 1.3 CreateJoinRoom `0x4d421c(session, maxSlot, ownerAutoGrant, tier, partyFlag, partySize)`
+### 1.3 CreateJoinRoom `0x4d421c(session, maxSlot, ownerAutoGrant, tier, packFlag, packMask)`
+
+(The last two arguments were first read as a party flag and size; they are the map-pack flag and mask, spec
+`parity-h-session.md` 1.4 item 1. Room sizes, item 7: custom `0x49e620` = 10 for the competitive game types 0, 1, 2,
+3, 5, 6, 7, 10, 11, 3 for the co-op types 4, 8, 9, 12, 0 for an unknown type. Request time limits, item 3: JoinRoom
+5 s; LeaveRoom, SetRoomDataInternal, SetRoomDataExternal, SetRoomMemberDataInternal, GrantRoomOwner, Kickout 10 s;
+CreateJoinRoom and SearchRoom the context default 20 s; a request that times out reaches its callback as a failure.)
 
 Request (PS3 32-bit struct, sp+272, 112 bytes zeroed):
 
@@ -138,8 +144,8 @@ Searchable int attributes (ids are SCE_NP_MATCHING2_ROOM_SEARCHABLE_INT_ATTR_EXT
 
 | Id | Value at create | Search filter (`0x4d3c50`) | Meaning |
 |---|---|---|---|
-| 0x4C | `session+236` \| (partySize << 12 if partyFlag) | EQ, same value | **Room kind/version key**. `session+236` is set before each create/search by `0x4d23d4`: custom games = `netInfo+0` (= DC `6f1c3f87`[0] \| 0x90000, a net/build version, P); matchmaking = `(playlistIndex << 20) | netInfo+0 | 0x10000` (playlistIndex = `0x491a04(ngm, NetPlayerData+192)`, P). A room only matches the same version and the same playlist |
-| 0x4D | `partySize` (creator's party) | none (read when picking, section 4.3) | party size of the room's creator |
+| 0x4C | `session+236` \| (packMask << 12 if packFlag) | EQ, same value | **Room kind/version key**. `session+236` is set before each create/search by `0x4d23d4`: custom games = `netInfo+0` (= DC `6f1c3f87`[0] \| 0x90000, a net/build version, P); matchmaking = `(playlistIndex << 20) | netInfo+0 | 0x10000` (playlistIndex = `0x491a04(ngm, NetPlayerData+192)`, P). A room only matches the same version and the same playlist (and, with the map-pack flag, the same common map packs, bits 12 up) |
+| 0x4D | `packMask` | none (read when picking, 3.3 state 6) | **the creator party's common map-pack mask** (corrected, spec `parity-h-session.md` 1.4 item 1; first read as a party size): `0x4d6a08` = the AND of byte +19 of every member's member data 0x59 (all bits set at the start; members without data do not narrow it). Matchmaking create `0x4b2a18` / search `0x4b1134` pass it with the flag set only when NetPlayerData+367 bit 0 is set, the playlist uses map-pack content (`0x49b858`) and the mask is not 0; custom games pass 0 |
 | 0x4E | int(netInfo+36) | GE/LE window `v -/+ tol` | **latitude**, int(degrees) (P: `0x4496ac` stores the "location" latitude/longitude from the ND heartbeat reply into netInfo+36/+40 via `0x4a9d44`) |
 | 0x4F | int(netInfo+40) | GE/LE window | **longitude** |
 | 0x50 | country code (2 chars) << 16 \| language1 | EQ, only if the criteria row asks for it | region / language |
@@ -163,7 +169,7 @@ create (members, roomId, flag, internal bin attrs 0x57/0x58 -> `0x4d3920`), list
 Failed: %s (%x)" (text from `0x4eae30`). Callers: custom JOINING `0x466590` / `0x466694`, matchmaking
 `0x4b1790` / `0x4b399c`, party join `0x4c4704`.
 
-### 1.5 SearchRoom `0x4d3c50(session, latLonTol, regionFlag, tier, tierBelow, tierAbove, partyFlag, partySize)`
+### 1.5 SearchRoom `0x4d3c50(session, latLonTol, regionFlag, tier, tierBelow, tierAbove, packFlag, packMask)`
 
 `{option 0x13 (WITH_NPID | WITH_ONLINENAME | RANDOM), worldId session+8, lobbyId 0, range
 {startIndex 1, max 5}, flagFilter 0, flagAttr 0, intFilter[] (above), binFilter none, attrId [0x55]}`,
@@ -175,8 +181,8 @@ Filter operators: 1 EQ, 4 LE, 6 GE.
 Callers:
 - Custom game list `0x4655b0` (BUTTON_MULTIPLAYER_JOIN): `(0, 0, -1, 0, 0, 0, 0)` -> only
   `0x4C == netInfo+0`. Up to 5 random custom rooms of the same build.
-- Matchmaking `0x4b1134`: `(criteria.latLonTol, criteria.regionFlag, tier, criteriaIndex, 0, 0,
-  partySize)`. The criteria row comes from DC `b25ab071` (20-byte rows, indexed by `0xf22630`; +0
+- Matchmaking `0x4b1134`: `(criteria.latLonTol, criteria.regionFlag, tier, criteriaIndex, 0, packFlag,
+  packMask)` (the map-pack mask of 1.3, also in the 0x4C key). The criteria row comes from DC `b25ab071` (20-byte rows, indexed by `0xf22630`; +0
   lat/lon tolerance, +4 same-region flag, +8 max ping in ms, G for +4/+8 roles). The index goes up
   on each failed round, so the search widens.
 
@@ -191,7 +197,7 @@ Before a room exists, it only stores `session+504` (published by the next create
 
 | Wrapper | Request | Done flag / error | Callers |
 |---|---|---|---|
-| `0x4d4868` **HostRank(session, memberIds[], n)** | ownerPrivilegeRank list = the order of the next owners | +212 / +216 ("HostRank Error") | EstablishConnection::Update `0x441290` (members sorted by link quality once "Connections done") |
+| `0x4d4868` **HostRank(session, memberIds[], n)** | ownerPrivilegeRank list = the order of the next owners | +212 / +216 ("HostRank Error") | EstablishConnection::Update `0x441290`, host, once "Connections done": the remote players' trackers in game slot order, those flagged "can talk to everybody" moved in front (order otherwise kept) (corrected, spec `parity-h-session.md` 1.4 item 5; first read as "sorted by link quality") |
 | `0x4d4b28` **HostMigrate(session, on)** | flagFilter 0x80000000, flagAttr on ? 0x80000000 : 0 | +204 / +208 | host-left handler `0x440c2c` (value `0x4a5548()`), Leave::Enter `0x446300` (0) |
 | `0x4d5338` **Hide(session, on)** | flagFilter 0x50000000 (CLOSED \| HIDDEN), flagAttr on ? 0x50000000 : 0; `session+4396 = on` | +196 / +200 | party room hidden at NetInit `0x448ed4`; match room hidden when the match is about to start (`0x43ad84`, `0x4b35d8`, `0x4b3c18`, `0x443ad4`, `0x43b0fc`) and shown again in the lobby (`0x439ad8`, `0x439b54`, `0x43e608`, `0x443dc4`, `0x446310`, `0x446708`) |
 | `0x4d57b0` **RoomName(session)** | bin internal 0x58 = "%s.%lld" | +220 / +224 | matchmaking host after the vote `0x4b35c8` |
@@ -208,11 +214,13 @@ to both sessions:
 | +0 u64 | **party room id** (party session +16) when the party has more than one member and is not left, else 0. This is how party members find each other's match (P) |
 | +8 u8 | rank badge `0xd0578(0xe9c94c)` (session.cpp: "room member data +8 rank") |
 | +9 u8 | team preference, NetPlayerData+211 (1 / 2) |
-| +10 u32 | NetPlayerData+356 |
-| +14 u32 | NetPlayerData+360 |
-| +19 u8 | byte `0xe1d728+12` (G: headset/voice) |
-| +20..+35 | NetPlayerData+228, +232, +236, +240 (u32 each; stats, G) |
-| +36 8 bytes | 4 x u16 from `0xf1f56e` (G: local network address/port words) |
+| +10..+17 | **clan tag** (8 bytes: NetPlayerData+356 and +360); +18 stays 0 |
+| +19 u8 | **map-pack byte**: the low byte of the word at `0xe1d728`+12, the console's map-pack bits (the AND over the members is 0x4D / the 0x4C mask of 1.3, and Start Match's "a party member lacks the map pack" check) |
+| +20..+35 | four NetPlayerData skill words +228, +232, +236, +240 (u32 each) |
+| +36..+43 | four 16-bit words of the console's network address (from `0xf1f56e`) |
+
+(Corrected by spec `parity-h-session.md` 1.4 item 2; the first reading had +10 / +14 as two words, +19 as a
+headset byte and the rest unknown.)
 
 Received member data (event 0x1107) is copied into the member record (+248 size, +252 data).
 
@@ -367,15 +375,15 @@ PS4 `0x5eb830` kept steps 1 except CreateJoinRoom (no Matching2 import), and `0x
   to create. Otherwise SearchRoom (1.5) -> **5 GAME_LIST_WAIT**.
 - **5**: on completion, `0x4d5940` list; for each room log "%s, %i players %8.2f km" (distance from
   bin ext 0x55 to our lat/lon) -> **6 GAME_LIST_PICK**.
-- **6** (`0x4b13ac`): **room scoring** = geo distance (km); a room whose 0x4D (creator party size)
-  shares bits with our party size gets a penalty; skip full rooms (member count == `0x49a958` max)
+- **6** (`0x4b13ac`): **room scoring** = geo distance (km); a room whose 0x4D (the creator party's map-pack
+  mask, 1.3) shares bits with ours gets a penalty; skip full rooms (member count == `0x49a958` max)
   and rooms whose owner is in the dead-peer ring; keep the minimum. None -> next criteria /
   create. Chosen: owner NpId -> netInfo+96, roomId -> netInfo+88, connect to the owner, `match+4468
   = connId` -> **7**.
 - **7 CONNECT_TO_HOST**: status 2 (active) -> RTT/bandwidth check (2.3). Too slow / failed ->
   terminate, back to 19 with the next criteria. OK -> reserve slots (**9**, as 3.2) -> JoinRoom
   `0x4b1790` -> **14** -> **17 CLIENT_LOBBY** / **21 CLIENT_VOTE_SCREEN** -> 4 CLIENT_START.
-- No room: "GATHER": CreateJoinRoom(match, playlistMax, 0, tier, 0, partySize) `0x4b2a18` -> **3** ->
+- No room: "GATHER": CreateJoinRoom(match, playlistMax, 0, tier, packFlag, packMask) `0x4b2a18` -> **3** ->
   **16 SERVER_LOBBY** (waits by player count, table `0xb40710`, "time out %i players" -> LeaveRoom
   and search again) -> vote (**20**) -> result -> RoomName `0x4d57b0`, Hide(1) -> host sets
   `match+4472 = 1` and starts the game task (`0x4b1c24`). Detail of gather/vote: `PORT-FRONTEND3.md`
@@ -441,7 +449,7 @@ party room: the next owner leads). HostRank = the remote trackers in slot order,
 below is the first reading.
 
 - Match rooms are created without OWNER_AUTO_GRANT. At "Connections done" the host publishes the
-  owner order (HostRank `0x4d4868`, members sorted by link quality in `0x440f90`).
+  owner order (HostRank `0x4d4868` in `0x440f90`: slot order, "can talk to everybody" first, 1.7).
 - When the host leaves during a match, the state's host-left handler (`0x4409c4` / `0x440478`, "*****
   HOST %s LEFT") either leaves (LeaveRoom, abort) or, if the mode allows it (`0x4a5548`), takes over
   (`0x48a13c`) and sets HostMigrate (`0x4d4b28`). The server's RoomOwnerChanged event -> listener
@@ -566,7 +574,7 @@ feeds them from the room service instead of the direct transport.
 
 1. **Room service client (C++, no guest hook)**: create / search / join / leave / kick / set member
    data / room events. It must carry, per room, the PS3 attribute set (1.3): 0x4C key (build
-   version + playlist index), 0x4D creator party size, 0x4E/0x4F lat/lon (or 0), 0x50 region, 0x51
+   version + playlist index + map-pack mask), 0x4D map-pack mask, 0x4E/0x4F lat/lon (or 0), 0x50 region, 0x51
    tier, 0x53 state, bin 0x55 (8 bytes), room name 0x58, member blob 0x59 (48 bytes, 1.8), flags
    HIDDEN/CLOSED, maxSlot (custom: `0x49e620`, matchmaking: `0x49a958`, party: 10).
 2. **Peer address -> transport** (replaces sceNpSignaling): on member joined, the service gives the

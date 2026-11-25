@@ -33,7 +33,7 @@ Shared helpers from other files (use them, do not reimplement them):
 - Voice (`voice.h`): `voice::toggle_mute`.
 - Exported by this file besides `show_notice` / `cinema_pick_friend`: `game_message_box(body, second)`
   (u2mp_internal.h, parity group D).
-- Progression (`progression.h`): `progression_publish`, `progression_recent_players`,
+- Progression (`progression.h`): `progression_publish`, `progression_players_met`,
   `progression_player_summary`.
 - Runtime text input (C linkage, declared by the user of it, implemented in
   `gpu/shim/gow3gpu.cpp`): `int gow3gpu_text_input_begin(const char *initial_utf8, const char
@@ -455,7 +455,7 @@ F-friend-options(r):
 
 #### B11. LIST_PLAYERSMET row 0x5ebdf0
 
-1. row = arg +4 as signed int. names = `progression_recent_players(50)`. If row < 0 or row >= the
+1. row = arg +4 as signed int. names = `progression_players_met()` (parity group G1). If row < 0 or row >= the
    number of names: nothing.
 2. Selected players-met name := names[row]. Player text := that name.
 3. F-register U2MP_PC_CB_MET_ADD (B12 add), then U2MP_PC_CB_MET_PROFILE (B12 profile); stop at the
@@ -790,3 +790,23 @@ None. Nothing is patched and `installed` is not changed.
   of them are muted; "Unmute All" `0x3efad3ba` (callback `0x65be38af`) unless none is. An empty row logs `player
   options: no player in row %d`; no options: no popup.
 - B9 friends: Join and Invite To Party only when `online::friend_view(r).party_member` is false.
+
+## Parity group H changes (2026-11-25, spec parity-h-session.md H7)
+
+- B8 match rows, Mute All / Unmute All: "the others" are the remote players of the session the page names: page mode
+  (netInfo +0x2c4) below 2 = the party (roster rows `session::member_at` 0..9 without this PC and without
+  `session::party_stranger` players), else the match (the matchmaking list as before); every one of them is on our
+  transport, so it has a connection record. "Mute All" is offered unless `voice::all_muted(others)` (PS3 `0x4d6fa0`:
+  also true with nobody), "Unmute All" unless `voice::none_muted(others)` (`0x4d6d10`: also true with nobody), so
+  with nobody else neither row shows. The callbacks call `voice::set_all_muted(others, on)` (`0x4d6ab0`, silent).
+
+## Parity group G changes (2026-11-25, spec parity-g-friends.md G4)
+
+- B10 Profile: before building the text, `online::friend_party(selected friend row, party)` (the cached party
+  member list of that friend; it asks the room service again when the cache is another friend's or older than 5 s
+  and no request runs). When the list is not empty the text gets `\` + the game's text `b6bd34c3` ("Party") and
+  `\` + each member's online id. The text shown is remembered.
+- `friend_party_arrived(npid, party)` (online.cpp, when the member list answer comes): when `npid` is the selected
+  friend, the top page is the message box (`0x719e9fec`) and the player text is still the remembered profile text,
+  the profile text is built again with `party` and becomes the player text (no new request).
+- The player text buffer holds 1023 characters (was 255), room for the card lines plus ten names.

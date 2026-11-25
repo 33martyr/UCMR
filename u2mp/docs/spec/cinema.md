@@ -17,12 +17,14 @@ This module restores them:
 - Every online match is recorded into a file: the net events this console sends and receives are written into
   the game's replay stream, and the stream is streamed to disk.
 - The cinema menus list, select, protect, unprotect, delete and play those files.
-- Playback feeds the file back into the replay stream, which the game's replay task reads.
+- Playback feeds the file back into the replay stream, which the game's replay task reads. Every entry into
+  the task's RePlay state reopens the film from its start, so a film loops until the player leaves (parity
+  L-C1, `parity-l-cinema-progression.md` 2.1).
 - Two functions let other modules share a recording with a friend (`read_selected`, `add_received`).
 
 Hook points (details in section 2.3): one replaced pump function, two detoured send functions, one replaced
-receive-hook stub, five swapped state vtable slots, ten replaced menu functions, and one patched branch inside
-the cinema list query.
+receive-hook stub, one replaced ShowResults::Enter stub, four swapped state vtable slots, ten replaced menu
+functions, and one patched branch inside the cinema list query (20 mechanisms).
 
 Other modules depend on what this module leaves in the image:
 
@@ -108,7 +110,7 @@ Every host function here uses the System V convention. Argument registers are as
 | E5 | slot `0x100abd0` WaitReady::Exit (`0x5f2830`) | vtable slot swapped | (state) | none |
 | E6 | `0x5f0ea0` ShowResults::Enter ret stub | function replaced | (state, ignored) | none |
 | E7 | slot `0x100a9c8` online Leave::Enter (`0x5f00d0`) | vtable slot swapped | (state) | none |
-| E8 | slot `0x100a7a0` RePlaying::Exit (`0x5e8740`) | vtable slot swapped | (state) | none |
+| E8 | (removed by parity L-C1: slot `0x100a7a0` RePlaying::Exit `0x5e8740` stays the game's; the film must stay open after it) | - | - | - |
 | E9 | slot `0x100a6d8` replay Leave::Enter (`0x5e5520`) | vtable slot swapped | (state) | none |
 | E10 | `0x5e3f60` PAGE_PROGRESS handler | function replaced | (s32 *event) | none |
 | E11 | `0x5e4060` PAGE_CINEMA handler | function replaced | (s32 *event, ignored) | none |
@@ -121,6 +123,7 @@ Every host function here uses the System V convention. Argument registers are as
 | E18 | `0x5e42d0` BUTTON_CINEMA_UPLOAD | function replaced | (ignored) | none |
 | E19 | `0x5e45a0` BUTTON_MULTIPLAYER_STARTCINEMA | function replaced | (ignored) | none |
 | E20 | `0x657e7a` cinema list query (cond 69), case "op 9 set" | branch patched to a call | edi = s32 value (was r8d), esi = u32 local flag (zero-extended cl) | none; then the game continues at `0x657bea` |
+| E21 | slot `0x100a7d8` RePlay::Enter (`0x5e9630`; state vtable `0x100a7d0` + 8) | vtable slot swapped | (state) | none |
 
 Expected original bytes (checked at install, section 5):
 
@@ -236,6 +239,8 @@ Host state:
   filled (always zero).
 - One Writer, one Reader, flags `recording` (false), `record_enabled` (true), `can_record` (false), a steady
   clock start time, and a one-shot page request {pending, load first file, next page id}, initially empty.
+- Playback flags (4.6): `first entry` (false; E19 started a film whose next RePlay::Enter is not a restart) and
+  `empty film` (false; a failed reopen, delivered by the next pump).
 
 Shared steps (named here only for reference):
 
@@ -317,23 +322,35 @@ E6 does only this. E7 does this, then calls the original online Leave::Enter wit
 ### 4.5 Pump (E1)
 
 If the guest stream's data pointer is not this module's buffer, return 0. If recording, `Writer::flush`.
-Else, if the Reader is open, `Reader::fill`, then u8 C+0x95 = 1 when the Reader is at eof, else 0. Return 0.
+Else, if the Reader is open, `Reader::fill`, then u8 C+0x95 = 1 when the Reader is at eof, else 0. Else, if
+`empty film` is set: clear it, write u32 0 as the buffer's first word, guest stream bytes = 4, u8 1 to C+0x95
+(the game reads time / tag 0, not the stream start 5, and leaves the film). Return 0.
 
 ### 4.6 Playback
 
-**Open for reading** (used by E19): attach stream; attach lists; close playback; clear the buffer; guest stream
-bits = 0, bytes = 0. If selected is in range, path = directory + "/" + entry name; `Reader::open(path,
-C+0x1c8)`:
+**Close playback**: clear `empty film`; if the Reader is open, close it, s32 0 to C+0x00, u8 0 to C+0x94.
 
-- Success: u8 1 to C+0x94, u8 0 to C+0x95, s32 1 to C+0x00; `Reader::fill`; log `"cinema: playing %s"`
-  (path); result true.
-- Failure: log `"cinema: cannot read %s"` (path); continue below. Note that `Reader::open` may already have
-  overwritten C+0x1c8 with the bytes it read.
+**Open for reading** (used by E19 and E21; it puts no stream data into the guest stream): attach stream;
+attach lists; close playback; clear the buffer; guest stream bits = 0, bytes = 0. If selected is in range,
+path = directory + "/" + entry name (else the path is empty); `Reader::open(path, C+0x1c8)` reads the header
+and leaves the file at its first stream byte:
 
-When not in range or the open failed: guest stream bytes = 4, u8 1 to C+0x95, result false.
+- Success: u8 1 to C+0x94, u8 0 to C+0x95, s32 1 to C+0x00; result true. The first pump after the game reset
+  the stream fills it from the film's first stream word.
+- Failure: continue below. Note that `Reader::open` may already have overwritten C+0x1c8 with the bytes it
+  read.
 
-E8: call the original RePlaying::Exit with the state, then close playback.
-E9: close playback, then call the original replay Leave::Enter with the state.
+When not in range or the open failed: guest stream bytes = 4, u8 1 to C+0x95, result false. The caller logs.
+
+E9: close playback, then call the original replay Leave::Enter with the state. E9 and the next open are the only
+places that close the film: it stays open through RePlaying::Exit and Resetting, so a recorded round reset
+(RePlaying -> Resetting -> RePlaying) continues in the same file.
+
+**E21 RePlay::Enter** (reached on the first entry after E19, at the film's end marker and on Restart): open for
+reading. On success, log `"cinema: replay restarts %s"` (path) unless `first entry` is set. On failure, log
+`"cinema: cannot reopen %s; the film ends"` (path, `"(none)"` when the path is empty) and set `empty film`.
+Then clear `first entry` and call the original RePlay::Enter with the state (it zeroes the stream's bits and
+bytes, then pumps until bytes != 0 and checks the stream start).
 
 ### 4.7 Menus
 
@@ -365,9 +382,10 @@ count > 0, load(selected); pop page; if count is 0, the no-files message.
 
 **E18 upload.** Calls `cinema_pick_friend()`.
 
-**E19 start cinema.** Finish recording (4.4). Open for reading (4.6); if false, done (stay on the page).
-Else guest calls in order: menu reset `0x5cd1e0(menu_manager)`; task = `0xa572d0(0x9f2aeafb, 0xad76460e)`;
-`0xa5be10(task)`.
+**E19 start cinema.** Finish recording (4.4). Open for reading (4.6); if false, log `"cinema: cannot read %s"`
+(path) when the path is not empty, and stop (stay on the page). Else log `"cinema: playing %s"` (path), set
+`first entry`, then guest calls in order: menu reset `0x5cd1e0(menu_manager)`; task =
+`0xa572d0(0x9f2aeafb, 0xad76460e)`; `0xa5be10(task)`.
 
 **E20 list query set.** If the local flag is 0: write the value to s32 `0x14cfeb0`; done. Else if value !=
 selected (read from C+0x1a4 without attaching lists first), load(value) (which attaches lists, then ignores an
@@ -518,7 +536,8 @@ Each mechanism that succeeds adds 1 to `installed`. Order and names:
 8. `can_record` = send_ok and recv_ok and start_ok. If false log `"cinema: recording off (a recorder hook is
    missing)"`. If start_ok is false (also) log `"cinema: WARNING the replay stream has no buffer;
    WaitReady::Exit writes to NULL"`.
-9. Slot swap `0x100a7a0` expecting `0x5e8740`, name `"RePlaying::Exit"`.
+9. Slot swap `0x100a7d8` expecting `0x5e9630`, name `"RePlay::Enter"` (E21; until parity L-C1 this step
+   swapped E8's slot `0x100a7a0`, which now stays the game's).
 10. Slot swap `0x100a6d8` expecting `0x5e5520`, name `"replay Leave::Enter"`.
 11. Checked replace `0x5e3f60`, `"PAGE_PROGRESS"`.
 12. Checked replace `0x5e4060` (18 bytes), `"PAGE_CINEMA"`.
@@ -568,12 +587,13 @@ Recording (after install, with stubs for the event Write and the original functi
 
 Playback and menus:
 
-12. E19 with a valid selected file: finish, open, fill, "playing" line, then menu reset, find task, play task
-    in that order. Selected out of range: no calls, bytes = 4, eof = 1. File missing or invalid header:
-    "cannot read" line, C+0x1c8 holds what was read.
+12. E19 with a valid selected file: finish, open (stream left empty), "playing" line, then menu reset, find
+    task, play task in that order; the next pump fills from the first stream word. Selected out of range: no
+    calls, bytes = 4, eof = 1. File missing or invalid header: "cannot read" line, C+0x1c8 holds what was read.
 13. E1 during playback: discard at bits >= 0x20001 with bytes >= 0x4000, reads of 64 KB, eof flag at C+0x95;
     files of length 0, below 64 KB, exactly 64 KB and over 128 KB of stream.
-14. E8 and E9 with and without an open Reader (order of the original call vs the close).
+14. E9 with and without an open Reader (order of the original call vs the close). E21 and the film loop:
+    `parity-l-cinema-progression.md` section 3, L-C1a..h (the new-only scenarios of the rewrite test).
 15. E10 with events 2, 3, 4 (flags only), 5 / 7 (nothing), 6 with no request and mode != 3 (nothing), 6 with no
     request and mode 3 (refresh, load(0) SetNetGame if files exist, pop, ShowPage list, message if empty, with
     the message box pointer NULL and non-NULL), 6 after E13 (no load, list page), 6 after E14 (no ShowPage).

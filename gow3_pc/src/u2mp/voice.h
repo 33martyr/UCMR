@@ -104,6 +104,27 @@ private:
     int hold_ = 0;
 };
 
+// ---- talking level and mute rules (PS3 parity J1..J3, u2mp/docs/spec/parity-j-voice-medals.md) -------
+// Each remote player has a talking level: set to kTalkOnVoice when their voice arrives, 1.0 lower each game frame
+// while above 0; "talking" = at least kTalkThreshold (the PS4 readers' constant). About a third of a second at
+// 30 frames per second after the last voice packet.
+constexpr float kTalkOnVoice = 10.0f;
+constexpr float kTalkThreshold = 1.0f;
+float decay_talk_level(float level);
+bool is_talking(float level);
+// What a voice packet from a remote speaker does (J2): it lights their talking level unless our voice is off or the
+// in-match gating silences them (the PS3 sender would not have sent it); mute does not matter there (it only
+// silences). It is played only when it counts, the speaker is not muted and we have a playback stream.
+struct VoiceUse {
+    bool talking;
+    bool played;
+};
+VoiceUse use_voice(bool voice_on, bool gated_silent, bool muted, bool can_play);
+// The one mute flag per remote player (J3): a new connection is muted unless it is a member of our party; joining
+// our party unmutes; the vote opening unmutes everyone outside our party (also players muted by hand).
+enum class MuteEvent { Arrived, JoinedParty, VoteOpened };
+bool next_mute(bool muted, MuteEvent event, bool party_member);
+
 // ---- runtime (game thread) -------------------------------------------------------------------------
 // The session's transport (null when it goes away).
 void set_transport(net::Transport *transport);
@@ -119,12 +140,26 @@ bool enabled();
 // Playback volume of the other players (PAGE_AUDIO_VOLUMES slider, cond 104; PS3 cellVoice volume 0..1).
 float volume();
 void set_volume(float v);
-// Local mute of one member (by net id); toggle returns the new state.
+// Back to the start value (1.0 = full unless UNCHARTED_U2MP_VOICE_VOLUME says otherwise) on each online multiplayer
+// entry, as PS3 voice init created the speaker port at 1.0 every time (parity J6).
+void reset_volume();
+// The matchmaking vote opens (PS3 0x4b0700 client / 0x4b0868 host): every present player outside our party is
+// unmuted (parity J3).
+void unmute_strangers();
+// Mute of one remote member (by net id; the local player never is); toggle returns the new state.
 bool muted(uint32_t net_id);
 bool toggle_mute(uint32_t net_id);
 void set_muted(uint32_t net_id, bool on);   // Mute All / Unmute All (spec parity-e-flow2.md 2.7)
-// True while voice from this member (by net id; the local id: our own) arrived in the last 300 ms:
-// the roster rows' talking icon (PS3 0x4bc9f0 image 1, cellVoice energy level).
+// The "all" helpers of the player popups (PS3 parity H7, spec parity-h-session.md): `others` = the remote members of
+// the session the popup names (party or match) that have a connection record. All muted: every one of them is (also
+// true for none): Mute All is not offered. None muted: no one of them is (also true for none): Unmute All is not
+// offered. Set all: mutes / unmutes every one of them, silently.
+bool all_muted(const std::vector<uint32_t> &others);
+bool none_muted(const std::vector<uint32_t> &others);
+void set_all_muted(const std::vector<uint32_t> &others, bool on);
+// True while this remote member's talking level is at least kTalkThreshold: the roster rows' talking icon (PS3
+// 0x4bc9f0 image 1). Never for the local player (PS3 looks it up through the connection, which we have none of: J8).
+// The same level goes to the member's connection record for the game's own readers (gamenet::set_talk_levels).
 bool talking(uint32_t net_id);
 
 }  // namespace u2mp::voice

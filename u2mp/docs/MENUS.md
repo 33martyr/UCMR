@@ -177,6 +177,13 @@ Player lists are action-23 lists with a column set (`c441623e`, `dcae45f4`, `2eb
 NetGameManager trackers and NetStatGame, which the session layer fills. Header and widget queries
 (81..88, 106) are intact. Restored: the scoreboard countdown text 64370402 ("Starting in [A]"),
 absent from both text tables. POSTGAME's PLAYER0..9 rows: session.cpp.
+In the match, scoreboard.cpp draws SCOREBOARD / ROUND_RESULTS / RESULTS as the four tracker overlay entries with
+the PS3 fade, priority and slide; the scoreboard also opens by itself while the local player is dead, so its last
+row (cond 44, `65b830`: "Respawn in [A]..." / "Respawning" / "[A] Tries Remaining" / "Last Try") is seen as on PS3,
+and the hint line e2186a0c is drawn under it (`spec/gameplay.md` 1, `spec/parity-m-features.md` 9).
+
+PAGE_MULTIPLAYER's stats ticker (k24): ticker.cpp hands online.cpp's line to the game's add function `5d6500`
+every 10 s while the strip is drawn and the previous line has come in (`spec/parity-ticker-respawn.md` 1).
 
 ### 3.8 Leaderboards (PAGE_MENU_LEADERBOARD) and Trophies (PAGE_NET_TROPHIES)
 
@@ -223,6 +230,8 @@ per language ("texts: no text for ...", "texts: ... shown in English").
   counterpart). The matchmaking machine `64e910` is restored on the party (frontend3.cpp); the PS3
   5 s "Starting in [A]..." popup before it is ported too (frontend6.cpp, PORT-FRONTEND6.md 1).
 - `dd2d35e7` (a net event's text, `62f250`) is absent from both tables; not a menu text, left.
+- In-match overlay: no menu background dim behind the result pages (PS4 dim fields unknown); result pages from NGM
+  states only with `UNCHARTED_U2MP_SCOREBOARD_STATES=1` (`spec/parity-m-features.md` 9).
 - Not verified in the running game (static analysis only): the k23 panel and k19 rank widget
   drawing (`59ddb0`, `59bf50`) and the action-23 list classes are intact by size and callees, and
   get their data from NetPlayerData / NetStatGame / the trackers.

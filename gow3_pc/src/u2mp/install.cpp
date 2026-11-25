@@ -158,6 +158,7 @@ extern "C" int u2mp_install(unsigned char *base, uint64_t size, const uint64_t *
     install_progression(installed);
     install_cinema(installed);
     install_remaining(installed);
+    install_teams(installed);
     install_menus(installed);
     install_menuimages(installed);
     install_unlocks(installed);
@@ -173,6 +174,7 @@ extern "C" int u2mp_install(unsigned char *base, uint64_t size, const uint64_t *
     install_hud(installed);
     install_medals(installed);
     install_scoreboard(installed);   // after install_loading: chains its 2D draw call
+    install_ticker(installed);       // PAGE_MULTIPLAYER stats ticker (session.cpp page_handler refreshes it)
     install_rosternames(installed);  // team list rows: display name from the nick
     install_solocoop(installed);
     install_matchend(installed);     // after install_frontend: wraps session.cpp's Playing slot

@@ -14,7 +14,7 @@ packet level survives and is reachable through the message-layer vtable `0x103fc
 per-peer connection records at `0x1152a10`: event queuing (`0x644ab0` -> `0x609fc0` and inline
 queue code), message packing into a BitStream (`0x60ac70`), unpacking + factory + Read + relay +
 Apply (`0x60a110`), ack/loss handling (`0x60b780`, `0x60b8f0`) and reset (`0x60ba10`). What is
-missing is only the PS3 `NetConnection` packet layer (header, sequence/ack bitfield, 30-packet
+missing is only the PS3 `NetConnection` packet layer (header, sequence/ack bitfield, 31-packet
 window: `0x465138`, `0x4652cc`, `0x465218`, `0x464cb8`), the UDP update loop (`0x43cdb8`), the
 connection manager that creates the records, and the code that registers players in the
 NetGameManager tracker table (`AddOrUpdateNetPlayer 0x642370` is dead and has its name source
@@ -158,7 +158,8 @@ UDP datagram (bit stream, MSB first, 8191-byte receive buffer):
 u8  kind           0 data | 2 clock request {u32 t} -> reply 3 {u32 t, u32 netclock}
                    4 ping {f32 now} -> reply 5 {f32 echo} (latency -> conn+368)
 kind 0:
-  1   hasMessages  (0 = ack-only, sent when 30 packets are unacked: "%s window full")
+  1   hasMessages  (0 = ack-only, sent when more than 30 packets are unacked: "%s window full";
+                   so at most 31 are in flight, spec/parity-i-connection.md I1)
   11  packetSeq    (M+8 after increment; receiver extends with its high bits, wrap 2048)
   10  ackSeq       (sender's highest received seq M+0xc; wrap 1024)
   32  ackBits      (sender's M+0x14; bit k -> packet ackSeq-k arrived with messages)
@@ -344,9 +345,12 @@ read kind; kind 0 -> port of `0x464cb8` on `M` (fields in 1.4) calling
 `M+0xa8 = now` and, if new and hasMessages, `0x60a110(M, &bs)`. Kinds 2..5: clock sync and
 ping as in `0x43cdb8` (or the transport's own equivalents).
 
-`Send()` - for each peer record in use, if `now >= next` (0.05 s) and (`M+0x110` or `M+0x120`
-non-empty or unacked reliable data or 2 s passed): zero buffer, `bs = {buf, 0, 1200*8}`,
-WriteU8(0); if `M+8 - M+0x18 >= 30`: header with hasMessages 0 and the current `M+8`; else
+`Send()` - for each peer record in use, first drop expired type-12 snapshots from `M+0x120`
+(parity-i-connection.md I3); then on a fixed 0.05 s tick (the next tick is now + 0.05 s whether or
+not a packet goes out) and if (`M+0x110` or `M+0x120` non-empty, or an in-flight record still
+holds a mode 0 / 1 message, or the 2 s keepalive, moved by each packet, is due): zero buffer,
+`bs = {buf, 0, 1200*8}`, WriteU8(0); if `M+8 - M+0x18 > 30`: header with hasMessages 0 and the
+current `M+8`; else
 `M+8++`, `r = 0x609e60(M)` (or own zeroed 0x18 block), `r+0 = M+8`, append `r` to
 `M+0x100/0x108` via `r+8`, header with hasMessages 1, then `0x60ac70(M, &bs, r)`; byte-swap the
 `(numBits+7)/8` bytes per word and send. Keep `M+8`, `M+0xc`, `M+0x14`, `M+0x18`, `M+0xa4`

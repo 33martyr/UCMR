@@ -291,14 +291,8 @@ Xform compose(const Xform &d, const Xform &s) {
 
 // Text inside a rect through the menu's own text item.
 void draw_text(const Xform &t, const char *text, float x, float y, float w, float h) {
-    if (!g_text_on || !text || !*text) return;
-    alignas(16) float xf[10];
-    std::memcpy(xf, t.v, sizeof xf);
-    alignas(16) float rect[4] = {x, y, w, h};
-    alignas(16) float clip[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-    using Fn = void(U2MP_GUEST *)(void *, void *, float *, const char *, float *, int, int, int, float *, int, int,
-                                  int, int);
-    guest<Fn>(fItemText)(image.base + kDrawCtx, nullptr, xf, text, rect, 1, 1, 0, clip, 0, 0, 0, -1);
+    if (!g_text_on) return;
+    menu_text_in_rect(t.v, text, x, y, w, h);
 }
 
 // A solid rectangle through the menu's descriptor item.
@@ -1085,5 +1079,19 @@ void install_loading(int &installed) {
 }
 
 void loading_hide(const char *why) { record_request(false, why); }
+
+bool menu_text_in_rect(const float *xform, const char *text, float x, float y, float w, float h) {
+    static const unsigned char kPrologue[] = {0x55, 0x48, 0x89, 0xe5};
+    static const bool ok = image.matches(fItemText, kPrologue, sizeof kPrologue);
+    if (!ok || !text || !*text) return false;
+    alignas(16) float xf[10];
+    std::memcpy(xf, xform, sizeof xf);
+    alignas(16) float rect[4] = {x, y, w, h};
+    alignas(16) float clip[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    using Fn = void(U2MP_GUEST *)(void *, void *, float *, const char *, float *, int, int, int, float *, int, int,
+                                  int, int);
+    guest<Fn>(fItemText)(image.base + kDrawCtx, nullptr, xf, text, rect, 1, 1, 0, clip, 0, 0, 0, -1);
+    return true;
+}
 
 }  // namespace u2mp

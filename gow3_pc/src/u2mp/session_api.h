@@ -38,6 +38,9 @@ int rank();   // this PC's rank badge index (profile panel)
 int member_count();
 // Online: the player with this net id is on our transport but not in our party (a stranger of a matchmaking room).
 bool party_stranger(uint32_t net_id);
+// The player with this net id is a member of our party (voice mute rules, spec parity-j-voice-medals.md J3): off the
+// online link every member is; online only once its NpId is known and in our party room (unknown = not yet).
+bool party_member(uint32_t net_id);
 // A member leaves its party and hosts a party of its own (Leave Matchmaking as a member, PS3 party "leave" flag):
 // online the rooms are left (online::drop_out_of_party), on LAN the transport is closed and opened again as host.
 void leave_party();

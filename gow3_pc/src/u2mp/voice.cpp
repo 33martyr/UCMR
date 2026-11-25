@@ -185,6 +185,25 @@ bool Gate::update(const int16_t *pcm, int samples) {
     return speech || hold_ > 0;
 }
 
+// ---- talking level and mute rules (spec parity-j-voice-medals.md J1..J3) ------------------------------
+float decay_talk_level(float level) { return level > 0.0f ? std::max(level - 1.0f, 0.0f) : level; }
+
+bool is_talking(float level) { return level >= kTalkThreshold; }
+
+VoiceUse use_voice(bool voice_on, bool gated_silent, bool muted, bool can_play) {
+    const bool talking = voice_on && !gated_silent;
+    return {talking, talking && !muted && can_play};
+}
+
+bool next_mute(bool muted, MuteEvent event, bool party_member) {
+    switch (event) {
+    case MuteEvent::Arrived: return !party_member;
+    case MuteEvent::JoinedParty: return false;
+    case MuteEvent::VoteOpened: return party_member && muted;
+    }
+    return muted;
+}
+
 }  // namespace u2mp::voice
 
 #ifndef U2MP_VOICE_CORE_ONLY
@@ -192,14 +211,12 @@ bool Gate::update(const int16_t *pcm, int samples) {
 #include <SDL3/SDL.h>
 
 #include <atomic>
-#include <chrono>
 #include <cstdlib>
 #include <deque>
 #include <memory>
 #include <mutex>
 #include <string>
 
-#include "frontend3.h"
 #include "gamenet.h"
 #include "net.h"
 #include "session_api.h"
@@ -214,6 +231,7 @@ struct Config {
     Mode mode = Mode::Open;
     SDL_Scancode ptt = SDL_SCANCODE_T;
     float volume = 1.0f;
+    float start_volume = 1.0f;   // what reset_volume() goes back to
 } config;
 
 void load_config() {
@@ -232,6 +250,7 @@ void load_config() {
     }
     if (const char *v = std::getenv("UNCHARTED_U2MP_VOICE_VOLUME"); v && *v)
         config.volume = std::clamp(float(std::atof(v)), 0.0f, 4.0f);
+    config.start_volume = config.volume;
     static const char *const names[] = {"off", "open (voice-activity gate)", "push to talk"};
     log("voice: %s, volume %.2f", names[int(config.mode)], double(config.volume));
 }
@@ -240,14 +259,16 @@ net::Transport *transport = nullptr;
 SDL_AudioStream *capture = nullptr, *playback = nullptr;
 bool audio_open = false, audio_failed = false, sdl_audio = false;
 uint16_t send_sequence = 0;
+// Per remote member (by net id), game thread. The one mute flag (PS3: the mute of that connection's voice port, J3).
 bool mutes[kMaxSpeakers] = {};
-bool present[kMaxSpeakers] = {};   // members seen last frame (to forget the ones who left)
-// When each net id was last heard (ms of the steady clock; the local id: last frame sent). PS3 read
-// cellVoice's energy level per port (attribute 1001) for the roster rows' talking icon.
-std::atomic<int64_t> heard_ms[kMaxSpeakers];
-int64_t now_ms() {
-    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+bool present[kMaxSpeakers] = {};    // members seen last frame (to forget the ones who left)
+bool in_party[kMaxSpeakers] = {};   // seen as a member of our party since it arrived (the party join happened)
+float levels[kMaxSpeakers] = {};    // PS3 talking level (J1), mirrored into the connection records each frame
+
+float record_level(uint32_t key) {   // gamenet::set_talk_levels: never the local player (it has no record)
+    return key && key < kMaxSpeakers && key != session::local_id() ? levels[key] : 0.0f;
 }
+float no_level(uint32_t) { return 0.0f; }
 
 // capture thread -> game thread
 std::atomic<bool> ptt_down{false};
@@ -305,8 +326,22 @@ const char *device_name(SDL_AudioStream *stream) {
     return n ? n : "?";
 }
 
+// PS3 parity J7 (own character's mouth follows the microphone, PS3 0x51b3ec): off. PS4 keeps the facial channel
+// setter for sid 0x94bb3775 (0x473010: value, channel list), fed from a sound object's amplitude at three call sites
+// (0x21d3a6, 0x607763, 0x714db6). Which of them is the local player's character update, and whether the channel is
+// the mouth, is not confirmed from the image, so nothing is hooked; this check only says what this build has.
+void log_mouth_state() {
+    static const uint8_t kSetter[] = {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x53, 0x48, 0x81, 0xec, 0xa8, 0x00, 0x00, 0x00};
+    constexpr uint64_t kSetterAt = 0x473010;
+    const bool found = image.base && image.executable(kSetterAt, sizeof kSetter) &&
+                       std::memcmp(image.base + kSetterAt, kSetter, sizeof kSetter) == 0;
+    log("voice: own character's mouth follows voice lines only, not the microphone (PS3 parity J7 off: channel setter "
+        "0x473010 %s, its local-player caller and the mouth channel not confirmed)", found ? "present" : "differs");
+}
+
 void open_audio() {
     audio_open = true;
+    log_mouth_state();
     sdl_audio = SDL_InitSubSystem(SDL_INIT_AUDIO);   // reference counted: the game's audio may have it
     if (!sdl_audio) {
         log("voice: SDL audio unavailable (%s): no voice chat", SDL_GetError());
@@ -336,7 +371,7 @@ void open_audio() {
 // ---- in-match voice gating (PS3 NpNetUpdate 0x43bdd0, ShowResults::Enter 0x43ec08; spec parity-e-flow2.md 2.1) --
 // Each remote talker is heard (gain 1) or not (gain 0), recomputed every frame while the match plays; outside
 // play the last values stay, and the results (NET_SM 29) and the lobby side (NET_SM < 22) put everyone back to 1.
-// The player's own mutes and the matchmaking stranger mute are separate and still win.
+// The player's mute flag (which also holds the matchmaking stranger mute, J3) is separate and still wins.
 std::atomic<bool> silenced[kMaxSpeakers];   // zero (static) = heard
 bool gating_on = false;
 int32_t gating_sm = 0;
@@ -445,12 +480,36 @@ void update_gating() {
     }
 }
 
-// A member left (or the slot changed hands): forget its stream and mute.
+// A member left (or the slot changed hands): forget its stream, mute and talking level.
 void forget(uint8_t id) {
     mutes[id] = false;
+    in_party[id] = false;
+    levels[id] = 0.0f;
     silenced[id] = false;
     std::lock_guard<std::mutex> lock(play_mutex);
     speakers[id].reset();
+}
+
+void apply_mute(uint32_t id, bool on) {
+    mutes[id] = on;
+    if (on) {   // stop what is already buffered
+        std::lock_guard<std::mutex> lock(play_mutex);
+        if (speakers[id]) speakers[id]->jitter.clear();
+    }
+}
+
+// PS3 parity J3: the connection reset mutes a new member unless it is in our party; the party join unmutes.
+void track_member(uint8_t id) {
+    const bool party = session::party_member(id);
+    if (!present[id]) {
+        in_party[id] = party;
+        apply_mute(id, next_mute(false, MuteEvent::Arrived, party));
+        if (mutes[id]) log("voice: net id %u connected outside our party: muted until the vote opens", unsigned(id));
+    } else if (party && !in_party[id]) {
+        in_party[id] = true;
+        if (mutes[id]) log("voice: net id %u joined our party: unmuted", unsigned(id));
+        apply_mute(id, next_mute(mutes[id], MuteEvent::JoinedParty, true));
+    }
 }
 
 }  // namespace
@@ -481,24 +540,32 @@ void stop() {
         present[id] = false;
         speakers[id].reset();   // no playback callback is left to race with
         mutes[id] = false;
+        in_party[id] = false;
+        levels[id] = 0.0f;
         silenced[id] = false;
     }
+    gamenet::set_talk_levels(no_level);
     gating_on = false;
     gate = Gate{};
 }
 
 void frame() {
-    if (!transport || !enabled()) return;
-    // members: forget the ones who left; is there anyone to talk to?
+    if (!transport) return;
+    // members: forget the ones who left, mute the new ones outside our party (J3); is there anyone to talk to?
     bool others = false;
     const uint32_t me = session::local_id();
     for (uint8_t id = 1; id < kMaxSpeakers; ++id) {
         std::string name;
         const bool here = session::member_name(id, name);
         if (present[id] && !here) forget(id);
+        if (here && id != me) track_member(id);
         present[id] = here;
         others = others || (here && id != me);
     }
+    // talking levels (J1): 1.0 lower each game frame, then into the connection records for the game's readers
+    for (float &level : levels) level = decay_talk_level(level);
+    gamenet::set_talk_levels(record_level);
+    if (!enabled()) return;
     if (others && !audio_open) open_audio();
     update_gating();
     if (config.mode == Mode::PushToTalk) {
@@ -511,7 +578,6 @@ void frame() {
         batch.swap(outgoing);
     }
     if (!others || !me || me >= kMaxSpeakers) return;
-    if (!batch.empty()) heard_ms[me].store(now_ms(), std::memory_order_relaxed);
     std::vector<uint8_t> message;
     for (const auto &packet : batch) {
         message.assign({gamenet::kVoice, uint8_t(me), uint8_t(send_sequence), uint8_t(send_sequence >> 8)});
@@ -536,41 +602,64 @@ void receive(uint8_t slot, const uint8_t *data, size_t size) {
     } else if (slot != 0) {
         return;
     }
-    if (!enabled() || !playback || !speaker || speaker >= kMaxSpeakers || speaker == session::local_id() || mutes[speaker])
-        return;
-    // PS3 0x4b0700 / 0x4b0868: players outside our party stay muted while the matchmaking room gathers and are
-    // unmuted when the vote opens. A mute of its own, apart from the player's choice (muted() does not show it).
-    if (matchmaking::strangers_muted() && session::party_stranger(speaker)) return;
+    if (!speaker || speaker >= kMaxSpeakers || speaker == session::local_id()) return;
+    // J2: the talking level rises also for muted players and strangers (mute only silences); not with our voice off
+    // and not for a speaker the in-match gating silences (PS3 set that voice's volume to 0 and did not send to it).
+    const VoiceUse use = use_voice(enabled(), silenced[speaker], mutes[speaker], playback != nullptr);
+    if (use.talking) levels[speaker] = kTalkOnVoice;
+    if (!use.played) return;
     const uint16_t sequence = uint16_t(data[1] | data[2] << 8);
-    heard_ms[speaker].store(now_ms(), std::memory_order_relaxed);
-    if (silenced[speaker]) return;   // in-match gating: PS3 set this voice's playback volume to 0
     std::lock_guard<std::mutex> lock(play_mutex);
     if (!speakers[speaker]) speakers[speaker] = std::make_unique<Speaker>();
     speakers[speaker]->jitter.push(sequence, data + 3, size - 3);
 }
 
-bool muted(uint32_t net_id) { return net_id < kMaxSpeakers && mutes[net_id]; }
+bool muted(uint32_t net_id) { return net_id < kMaxSpeakers && net_id != session::local_id() && mutes[net_id]; }
 
 bool talking(uint32_t net_id) {
-    if (!net_id || net_id >= kMaxSpeakers || !enabled()) return false;
-    const int64_t last = heard_ms[net_id].load(std::memory_order_relaxed);
-    return last && now_ms() - last < 300;
+    return net_id && net_id < kMaxSpeakers && net_id != session::local_id() && is_talking(levels[net_id]);
 }
 
 bool toggle_mute(uint32_t net_id) {
-    if (!net_id || net_id >= kMaxSpeakers) return false;
-    mutes[net_id] = !mutes[net_id];
-    if (mutes[net_id]) {   // stop what is already buffered
-        std::lock_guard<std::mutex> lock(play_mutex);
-        if (speakers[net_id]) speakers[net_id]->jitter.clear();
-    }
+    if (!net_id || net_id >= kMaxSpeakers || net_id == session::local_id()) return false;
+    apply_mute(net_id, !mutes[net_id]);
     log("voice: net id %u %s", net_id, mutes[net_id] ? "muted" : "unmuted");
     return mutes[net_id];
+}
+
+void unmute_strangers() {
+    int unmuted = 0;
+    const uint32_t me = session::local_id();
+    for (uint8_t id = 1; id < kMaxSpeakers; ++id) {
+        if (!present[id] || id == me) continue;
+        const bool on = next_mute(mutes[id], MuteEvent::VoteOpened, session::party_member(id));
+        if (on == mutes[id]) continue;
+        apply_mute(id, on);
+        ++unmuted;
+    }
+    log("voice: the vote opens: players outside our party are heard now (%d unmuted)", unmuted);
 }
 
 void set_muted(uint32_t net_id, bool on) {
     if (!net_id || net_id >= kMaxSpeakers || mutes[net_id] == on) return;
     toggle_mute(net_id);
+}
+
+// PS3 parity H7 (0x4d6fa0 / 0x4d6d10 / 0x4d6ab0) over the caller's "others" (remote members with a record).
+bool all_muted(const std::vector<uint32_t> &others) {
+    for (const uint32_t id : others)
+        if (!muted(id)) return false;
+    return true;
+}
+
+bool none_muted(const std::vector<uint32_t> &others) {
+    for (const uint32_t id : others)
+        if (muted(id)) return false;
+    return true;
+}
+
+void set_all_muted(const std::vector<uint32_t> &others, bool on) {
+    for (const uint32_t id : others) set_muted(id, on);
 }
 
 float volume() {
@@ -581,6 +670,11 @@ void set_volume(float v) {
     load_config();
     config.volume = std::clamp(v, 0.0f, 4.0f);
     log("voice: volume %.2f (menu)", double(config.volume));
+}
+void reset_volume() {
+    load_config();
+    if (config.volume != config.start_volume) log("voice: volume back to %.2f (online multiplayer entered)", double(config.start_volume));
+    config.volume = config.start_volume;
 }
 
 }  // namespace u2mp::voice

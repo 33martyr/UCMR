@@ -325,6 +325,8 @@ int32_t playlist_max_party(uint32_t id) {
     hx::rec("playlist_max_party 0x%x", id);
     return 0;
 }
+// AssignTeams' per-slot values (teams.cpp); not recorded: the old session.cpp has no counterpart
+void teams_set_slot(int, uint32_t, uint32_t) {}
 namespace cinema {
 void start_playback() { hx::rec("cinema::start_playback"); }
 }  // namespace cinema
