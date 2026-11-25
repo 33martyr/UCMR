@@ -3,11 +3,17 @@
 // upscaling) plus the option tables used by the Display page.
 
 #include "native.h"
+#include "port.h"
 
 #include <cctype>
 #include <cstdlib>
-#include <windows.h>
+
+#ifndef _WIN32
+#include <vulkan/vulkan.h>
+#endif
+#ifdef _WIN32
 #include <dxgi.h>
+#endif
 
 #include <algorithm>
 #include <cmath>
@@ -19,6 +25,7 @@
 namespace {
 
 using Pairs = std::vector<std::pair<std::string, std::string>>;
+namespace fs = port::fs;
 
 int give(const std::string &text, char *out, int cap) {
     if ((int)text.size() + 1 > cap) return -(int)(text.size() + 1);
@@ -151,35 +158,23 @@ std::string recommendation(const std::string &name, int integrated) {
     return igpu ? "igpu" : tier(name);
 }
 
-std::string utf8(const std::wstring &w) {
-    if (w.empty()) return std::string();
-    int n = WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(), nullptr, 0, nullptr, nullptr);
-    std::string s(n, '\0');
-    WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(), s.data(), n, nullptr, nullptr);
-    return s;
-}
-
 // Finds the GPU of the most recent game run. Logs are tried newest first; within the first 400 lines the
 // "GPU: using <name>" line gives the name and the "GPU <n>: <name> (DiscreteGpu|IntegratedGpu)" lines give its type.
 // Returns false if none of the logs contains a "using" line.
-bool from_logs(const std::vector<std::wstring> &logs, std::string &name, int &integrated) {
-    struct Log { std::wstring path; FILETIME written; };
+bool from_logs(const std::vector<fs::path> &logs, std::string &name, int &integrated) {
+    struct Log { fs::path path; fs::file_time_type written; };
     std::vector<Log> present;
-    for (const std::wstring &p : logs) {
-        WIN32_FILE_ATTRIBUTE_DATA a;
-        if (GetFileAttributesExW(p.c_str(), GetFileExInfoStandard, &a)) present.push_back({p, a.ftLastWriteTime});
+    for (const fs::path &p : logs) {
+        std::error_code ec;
+        const fs::file_time_type written = fs::last_write_time(p, ec);
+        if (!ec) present.push_back({p, written});
     }
-    std::sort(present.begin(), present.end(),
-              [](const Log &a, const Log &b) { return CompareFileTime(&a.written, &b.written) > 0; });
+    std::sort(present.begin(), present.end(), [](const Log &a, const Log &b) { return a.written > b.written; });
     for (const Log &log : present) {
-        HANDLE h = CreateFileW(log.path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                               nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-        if (h == INVALID_HANDLE_VALUE) continue;
-        std::string text(1 << 20, '\0');
-        DWORD got = 0;
-        ReadFile(h, text.data(), (DWORD)text.size(), &got, nullptr);
-        CloseHandle(h);
-        text.resize(got);
+        std::vector<uint8_t> bytes;
+        port::read_part(log.path, 0, 1 << 20, bytes);
+        if (bytes.empty()) continue;
+        const std::string text(bytes.begin(), bytes.end());
         std::string using_name;
         std::vector<std::pair<std::string, std::string>> kinds;
         size_t pos = 0;
@@ -216,6 +211,7 @@ bool from_logs(const std::vector<std::wstring> &logs, std::string &name, int &in
     return false;
 }
 
+#ifdef _WIN32
 // names of the DXGI adapters, skipping software renderers and duplicates
 std::vector<std::string> adapters() {
     std::vector<std::string> out;
@@ -225,7 +221,7 @@ std::vector<std::string> adapters() {
     for (UINT i = 0; factory->EnumAdapters1(i, &a) != DXGI_ERROR_NOT_FOUND; ++i) {
         DXGI_ADAPTER_DESC1 d;
         if (SUCCEEDED(a->GetDesc1(&d)) && !(d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE)) {
-            std::string name = utf8(d.Description);
+            std::string name = port::utf8(std::wstring(d.Description));
             if (!name.empty() && std::find(out.begin(), out.end(), name) == out.end()) out.push_back(name);
         }
         a->Release();
@@ -233,6 +229,40 @@ std::vector<std::string> adapters() {
     factory->Release();
     return out;
 }
+#else
+// names of the Vulkan devices, skipping CPU renderers and duplicates (the runtime renders through Vulkan too)
+std::vector<std::string> adapters() {
+    std::vector<std::string> out;
+    void *lib = port::load_library_name("libvulkan.so.1");
+    if (!lib) return out;
+    typedef VkResult (*CreateInstance)(const VkInstanceCreateInfo *, const VkAllocationCallbacks *, VkInstance *);
+    typedef void (*DestroyInstance)(VkInstance, const VkAllocationCallbacks *);
+    typedef VkResult (*EnumerateDevices)(VkInstance, uint32_t *, VkPhysicalDevice *);
+    typedef void (*DeviceProperties)(VkPhysicalDevice, VkPhysicalDeviceProperties *);
+    CreateInstance create = (CreateInstance)port::symbol(lib, "vkCreateInstance");
+    DestroyInstance destroy = (DestroyInstance)port::symbol(lib, "vkDestroyInstance");
+    EnumerateDevices enumerate = (EnumerateDevices)port::symbol(lib, "vkEnumeratePhysicalDevices");
+    DeviceProperties properties = (DeviceProperties)port::symbol(lib, "vkGetPhysicalDeviceProperties");
+    if (!create || !destroy || !enumerate || !properties) return out;
+    VkInstance instance = VK_NULL_HANDLE;
+    if (create(nullptr, nullptr, &instance) != VK_SUCCESS) return out;
+    uint32_t count = 0;
+    if (enumerate(instance, &count, nullptr) == VK_SUCCESS && count) {
+        std::vector<VkPhysicalDevice> devices(count);
+        if (enumerate(instance, &count, devices.data()) == VK_SUCCESS) {
+            for (uint32_t i = 0; i < count; ++i) {
+                VkPhysicalDeviceProperties p;
+                properties(devices[i], &p);
+                if (p.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU) continue;
+                const std::string name = p.deviceName;
+                if (!name.empty() && std::find(out.begin(), out.end(), name) == out.end()) out.push_back(name);
+            }
+        }
+    }
+    destroy(instance, nullptr);
+    return out;
+}
+#endif
 
 // ------------------------------------------------------------------------------------------------ screen and sizes
 
@@ -284,13 +314,13 @@ extern "C" {
 // Suggests a preset. `logs` lists game log paths, one per line; the newest one naming a GPU decides. Without such
 // a log, the highest-ranked DXGI adapter is used. Output: name\tintegrated(1/0/-1)\tpreset, preset possibly empty.
 UN_API int un_gpu_recommendation(const wchar_t *logs, char *out, int cap) {
-    std::vector<std::wstring> paths;
-    std::wstring all = logs ? logs : L"";
+    std::vector<fs::path> paths;
+    const std::wstring all = logs ? logs : L"";
     for (size_t pos = 0; pos <= all.size();) {
         size_t end = all.find(L'\n', pos);
         std::wstring p = all.substr(pos, end == std::wstring::npos ? std::wstring::npos : end - pos);
         if (!p.empty() && p.back() == L'\r') p.pop_back();
-        if (!p.empty()) paths.push_back(p);
+        if (!p.empty()) paths.push_back(port::path(p));
         if (end == std::wstring::npos) break;
         pos = end + 1;
     }
@@ -323,10 +353,14 @@ UN_API int un_gpu_query(const char *what, const char *name, int integrated, char
 }
 
 UN_API int un_monitor_refresh_hz(void) {
+#ifdef _WIN32
     HDC dc = GetDC(nullptr);
     int hz = dc ? GetDeviceCaps(dc, VREFRESH) : 0;
     if (dc) ReleaseDC(nullptr, dc);
     return hz > 1 ? hz : 60;
+#else
+    return 60;   // the Qt window knows the screen's rate; the core only reports the value the pages show
+#endif
 }
 
 // fixed option lists by name: "resolutions" and "upscale_presets" give value\tlabel, "aspects" gives value\tvalue,
@@ -386,14 +420,14 @@ UN_API int un_anti_aliasing_choice(const char *upscaler, const char *launcher_aa
 // upscalers available in this install as value\tlabel: off, FSR 1 and FSR 3.1 always; FSR 4 only if its model file
 // is present, DLSS only if both DLLs are
 UN_API int un_upscaling_options(const wchar_t *root, char *out, int cap) {
-    std::wstring r = root ? root : L".";
-    auto file = [&](const wchar_t *rel) {
-        DWORD a = GetFileAttributesW((r + L"\\" + rel).c_str());
-        return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
+    const fs::path r = port::path(root ? root : L".");
+    auto file = [&](const char *rel) {
+        std::error_code ec;
+        return fs::is_regular_file(r / rel, ec);
     };
     std::string text = "off\tOff\nfsr1\tFSR 1\nfsr3\tFSR 3.1\n";
-    if (file(L"gow3_pc\\fsr4_shaders\\fsr4_model_v07_i8_native_1080_pre.spv")) text += "fsr4\tFSR 4\n";
-    if (file(L"gow3_pc\\out\\gow3_dlss.dll") && file(L"gow3_pc\\out\\nvngx_dlss.dll")) text += "dlss\tDLSS\n";
+    if (file("gow3_pc/fsr4_shaders/fsr4_model_v07_i8_native_1080_pre.spv")) text += "fsr4\tFSR 4\n";
+    if (file("gow3_pc/out/gow3_dlss.dll") && file("gow3_pc/out/nvngx_dlss.dll")) text += "dlss\tDLSS\n";
     return give(text, out, cap);
 }
 

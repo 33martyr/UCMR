@@ -5,7 +5,11 @@
 
 #include <wchar.h>
 
+#ifdef _WIN32
 #define UN_API __declspec(dllexport)
+#else
+#define UN_API __attribute__((visibility("default")))
+#endif
 #define UN_VERSION 1
 
 #define UN_ERR_NO_STEAM 1   /* no Steam account folder on this PC */

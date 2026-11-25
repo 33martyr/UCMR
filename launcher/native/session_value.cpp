@@ -10,14 +10,15 @@
 // can be read, the image file is searched for 16 bytes with that SHA-256, before an update replaces it.
 
 #include "native.h"
-
-#include <windows.h>
+#include "port.h"
 
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <string>
 #include <vector>
+
+namespace fs = port::fs;
 
 namespace {
 
@@ -67,33 +68,6 @@ bool is_the_value(const uint8_t *p) {
             if (WANT[4 * i + b] != (uint8_t)(word >> (24 - 8 * b))) return false;
     }
     return true;
-}
-
-// up to `count` bytes of a file from `at` (a negative `at` counts from the end)
-std::vector<uint8_t> read_part(const wchar_t *path, long long at, long long count) {
-    std::vector<uint8_t> data;
-    if (!path || !*path) return data;
-    HANDLE f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
-                           OPEN_EXISTING, 0, nullptr);
-    if (f == INVALID_HANDLE_VALUE) return data;
-    LARGE_INTEGER size, pos;
-    if (GetFileSizeEx(f, &size)) {
-        if (at < 0) at = size.QuadPart + at < 0 ? 0 : size.QuadPart + at;
-        if (at < size.QuadPart) {
-            if (count > size.QuadPart - at) count = size.QuadPart - at;
-            pos.QuadPart = at;
-            data.resize((size_t)count);
-            DWORD got = 0;
-            size_t have = 0;
-            if (SetFilePointerEx(f, pos, nullptr, FILE_BEGIN))
-                while (have < data.size() &&
-                       ReadFile(f, data.data() + have, (DWORD)std::min<size_t>(data.size() - have, 1 << 20), &got, nullptr) && got)
-                    have += got;
-            data.resize(have);
-        }
-    }
-    CloseHandle(f);
-    return data;
 }
 
 bool from_text(const std::vector<uint8_t> &text, uint8_t *value) {
@@ -153,10 +127,11 @@ bool push_key_ok(const uint8_t *p, size_t n, const PushKey &k) {
 }
 
 // <data_dir>\u3-push.key already right, or written from the first EBOOT of the list that has both keys
-void push_key_file(const std::wstring &data_dir, const std::wstring &list) {
-    const std::wstring file = data_dir + L"u3-push.key";
+void push_key_file(const fs::path &data_dir, const std::wstring &list) {
+    const fs::path file = data_dir / "u3-push.key";
     {   // already there?
-        const std::vector<uint8_t> t = read_part(file.c_str(), 0, 300);
+        std::vector<uint8_t> t;
+        port::read_part(file, 0, 300, t);
         std::vector<uint8_t> v[2];
         size_t line = 0;
         int half = -1;
@@ -167,8 +142,8 @@ void push_key_file(const std::wstring &data_dir, const std::wstring &list) {
             if (half < 0) half = d; else { v[line].push_back((uint8_t)(half << 4 | d)); half = -1; }
         }
         const bool ok = push_key_ok(v[0].data(), v[0].size(), PUSH_KEYS[0]) && push_key_ok(v[1].data(), v[1].size(), PUSH_KEYS[1]);
-        SecureZeroMemory(v[0].data(), v[0].size());
-        SecureZeroMemory(v[1].data(), v[1].size());
+        port::zero(v[0].data(), v[0].size());
+        port::zero(v[1].data(), v[1].size());
         if (ok) return;
     }
     for (size_t at = 0; at <= list.size();) {
@@ -176,8 +151,9 @@ void push_key_file(const std::wstring &data_dir, const std::wstring &list) {
         if (end == std::wstring::npos) end = list.size();
         const std::wstring path = list.substr(at, end - at);
         at = end + 1;
-        std::vector<uint8_t> a = read_part(path.c_str(), PUSH_KEYS[0].at, (long long)PUSH_KEYS[0].length);
-        std::vector<uint8_t> b = read_part(path.c_str(), PUSH_KEYS[1].at, (long long)PUSH_KEYS[1].length);
+        std::vector<uint8_t> a, b;
+        port::read_part(port::path(path), PUSH_KEYS[0].at, (long long)PUSH_KEYS[0].length, a);
+        port::read_part(port::path(path), PUSH_KEYS[1].at, (long long)PUSH_KEYS[1].length, b);
         if (push_key_ok(a.data(), a.size(), PUSH_KEYS[0]) && push_key_ok(b.data(), b.size(), PUSH_KEYS[1])) {
             static const char digits[] = "0123456789abcdef";
             std::string text;
@@ -185,30 +161,23 @@ void push_key_file(const std::wstring &data_dir, const std::wstring &list) {
                 for (uint8_t c : *k) { text += digits[c >> 4]; text += digits[c & 15]; }
                 text += '\n';
             }
-            const std::wstring tmp = file + L".tmp";
-            HANDLE f = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-            bool done = false;
-            if (f != INVALID_HANDLE_VALUE) {
-                DWORD put = 0;
-                done = WriteFile(f, text.data(), (DWORD)text.size(), &put, nullptr) && put == text.size();
-                CloseHandle(f);
-                done = done && MoveFileExW(tmp.c_str(), file.c_str(), MOVEFILE_REPLACE_EXISTING);
-                if (!done) DeleteFileW(tmp.c_str());
-            }
-            SecureZeroMemory(&text[0], text.size());
-            SecureZeroMemory(a.data(), a.size());
-            SecureZeroMemory(b.data(), b.size());
+            port::write_atomic(file, text.data(), text.size());
+            port::zero(&text[0], text.size());
+            port::zero(a.data(), a.size());
+            port::zero(b.data(), b.size());
             return;
         }
     }
 }
 
-bool file_has_it(const std::wstring &file) {
+bool file_has_it(const fs::path &file) {
     uint8_t value[16];
-    return from_text(read_part(file.c_str(), 0, 64), value) && is_the_value(value);
+    std::vector<uint8_t> text;
+    port::read_part(file, 0, 64, text);
+    return from_text(text, value) && is_the_value(value);
 }
 
-bool write_value(const std::wstring &file, const uint8_t *value) {
+bool write_value(const fs::path &file, const uint8_t *value) {
     char text[34];
     static const char digits[] = "0123456789abcdef";
     for (int i = 0; i < 16; ++i) {
@@ -216,18 +185,9 @@ bool write_value(const std::wstring &file, const uint8_t *value) {
         text[2 * i + 1] = digits[value[i] & 15];
     }
     text[32] = '\n';
-    const std::wstring tmp = file + L".tmp";
-    HANDLE f = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (f == INVALID_HANDLE_VALUE) return false;
-    DWORD put = 0;
-    const bool ok = WriteFile(f, text, 33, &put, nullptr) && put == 33;
-    CloseHandle(f);
-    SecureZeroMemory(text, sizeof text);
-    if (!ok || !MoveFileExW(tmp.c_str(), file.c_str(), MOVEFILE_REPLACE_EXISTING)) {
-        DeleteFileW(tmp.c_str());
-        return false;
-    }
-    return true;
+    const bool ok = port::write_atomic(file, text, 33);
+    port::zero(text, sizeof text);
+    return ok;
 }
 
 }  // namespace
@@ -240,12 +200,11 @@ extern "C" {
 // found nowhere, -1 it was found and the file can't be written.
 UN_API int un_u3_session_value(const wchar_t *data_dir, const wchar_t *eboots, const wchar_t *image) {
     if (!data_dir || !*data_dir) return 0;
-    CreateDirectoryW(data_dir, nullptr);   // a player who never started the multiplayer has no data folder yet
-    std::wstring file = data_dir;
-    if (file.back() != L'\\' && file.back() != L'/') file += L'\\';
-    std::wstring list = eboots ? eboots : L"";
-    push_key_file(file, list);   // helper v7.254: the 3232 push keys (no image fallback: no image ever held them)
-    file += L"u3-session.key";
+    const fs::path dir = port::path(data_dir);
+    port::ensure_dir(dir);   // a player who never started the multiplayer has no data folder yet
+    const std::wstring list = eboots ? eboots : L"";
+    push_key_file(dir, list);   // helper v7.254: the 3232 push keys (no image fallback: no image ever held them)
+    const fs::path file = dir / "u3-session.key";
     if (file_has_it(file)) return 1;
     uint8_t value[16];
     int from = 0;
@@ -254,14 +213,16 @@ UN_API int un_u3_session_value(const wchar_t *data_dir, const wchar_t *eboots, c
         if (end == std::wstring::npos) end = list.size();
         const std::wstring path = list.substr(at, end - at);
         at = end + 1;
-        const std::vector<uint8_t> bytes = read_part(path.c_str(), EBOOT_AT, 16);
+        std::vector<uint8_t> bytes;
+        port::read_part(port::path(path), EBOOT_AT, 16, bytes);
         if (bytes.size() == 16 && is_the_value(bytes.data())) {
             std::memcpy(value, bytes.data(), 16);
             from = 2;
         }
     }
     if (!from) {
-        const std::vector<uint8_t> tail = read_part(image, -IMAGE_TAIL, IMAGE_TAIL);
+        std::vector<uint8_t> tail;
+        port::read_part(image ? port::path(image) : fs::path(), -IMAGE_TAIL, IMAGE_TAIL, tail);
         for (size_t at = tail.size() >= 16 ? tail.size() - 16 + 1 : 0; at-- > 0 && !from;)
             if (is_the_value(tail.data() + at)) {
                 std::memcpy(value, tail.data() + at, 16);
@@ -270,7 +231,7 @@ UN_API int un_u3_session_value(const wchar_t *data_dir, const wchar_t *eboots, c
     }
     if (!from) return 0;
     const bool written = write_value(file, value);
-    SecureZeroMemory(value, sizeof value);
+    port::zero(value, sizeof value);
     return written ? from : -1;
 }
 

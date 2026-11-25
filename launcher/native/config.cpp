@@ -9,9 +9,9 @@
 
 #include "native.h"
 #include "json.h"
+#include "port.h"
 
 #include <cstdlib>
-#include <windows.h>
 
 #include <cstring>
 #include <string>
@@ -21,6 +21,7 @@
 namespace {
 
 using Pairs = std::vector<std::pair<std::string, std::string>>;
+namespace fs = port::fs;
 
 // ------------------------------------------------------------------------------------------------ tables
 
@@ -84,15 +85,6 @@ const std::vector<Preset> &presets() {
 
 // ------------------------------------------------------------------------------------------------ helpers
 
-std::wstring widen(const char *s) {
-    if (!s || !*s) return std::wstring();
-    int n = MultiByteToWideChar(CP_UTF8, 0, s, -1, nullptr, 0);
-    std::wstring w(n, L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, s, -1, w.data(), n);
-    w.resize(n - 1);
-    return w;
-}
-
 std::string trim(const std::string &s) {
     const char *ws = " \t\r\n\v\f";
     size_t a = s.find_first_not_of(ws);
@@ -100,20 +92,7 @@ std::string trim(const std::string &s) {
     return s.substr(a, s.find_last_not_of(ws) - a + 1);
 }
 
-bool read_text(const std::wstring &path, std::string &text) {
-    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
-                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (h == INVALID_HANDLE_VALUE) return false;
-    LARGE_INTEGER size{};
-    bool ok = GetFileSizeEx(h, &size) && size.QuadPart < (16 << 20);
-    if (ok) {
-        text.assign((size_t)size.QuadPart, '\0');
-        DWORD got = 0;
-        ok = text.empty() || (ReadFile(h, text.data(), (DWORD)text.size(), &got, nullptr) && got == text.size());
-    }
-    CloseHandle(h);
-    return ok;
-}
+bool read_text(const fs::path &path, std::string &text) { return port::read(path, text, (16 << 20) - 1); }
 
 // splits text at CR LF, a lone LF or a lone CR and drops the break characters (same result as splitlines() on
 // these files)
@@ -134,15 +113,15 @@ std::vector<std::string> lines_of(const std::string &text) {
     return out;
 }
 
-std::wstring settings_file(const std::wstring &user_dir, const char *game) {
-    return user_dir + L"\\probe-" + widen(game) + L".ini";
+fs::path settings_file(const fs::path &user_dir, const char *game) {
+    return user_dir / port::path_utf8("probe-" + std::string(game ? game : "") + ".ini");
 }
 
 // starts from the per-game file; failing that, from probe.ini (the single file older versions shared); failing
 // both, from just a header comment
-std::vector<std::string> settings_lines(const std::wstring &user_dir, const char *game) {
+std::vector<std::string> settings_lines(const fs::path &user_dir, const char *game) {
     std::string text;
-    if (read_text(settings_file(user_dir, game), text) || read_text(user_dir + L"\\probe.ini", text)) return lines_of(text);
+    if (read_text(settings_file(user_dir, game), text) || read_text(user_dir / "probe.ini", text)) return lines_of(text);
     return {"# Uncharted settings (launcher and in-game menu: Insert / R3+L2)"};
 }
 
@@ -162,7 +141,7 @@ std::string fps_limit(const std::string &value) {
     bool number = !t.empty() && t.find_first_not_of("+-0123456789") == std::string::npos &&
                   t.find_first_of("0123456789") != std::string::npos;
     if (!number) return "60";
-    long long n = _strtoi64(t.c_str(), nullptr, 10);
+    long long n = std::strtoll(t.c_str(), nullptr, 10);
     return (n == 0 || n > MAX_FPS) ? std::to_string(MAX_FPS) : "60";
 }
 
@@ -172,21 +151,12 @@ int give(const std::string &text, char *out, int cap) {
     return 0;
 }
 
-bool write_bytes(const std::wstring &path, const std::string &data) {
-    HANDLE h = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL,
-                           nullptr);
-    if (h == INVALID_HANDLE_VALUE) return false;
-    DWORD put = 0;
-    BOOL ok = data.empty() || (WriteFile(h, data.data(), (DWORD)data.size(), &put, nullptr) && put == data.size());
-    ok = CloseHandle(h) && ok;
-    return ok;
-}
+bool write_bytes(const fs::path &path, const std::string &data) { return port::write(path, data.data(), data.size()); }
 
-Pairs ini_values(const std::wstring &user_dir, const char *game);
-bool ini_update(const std::wstring &user_dir, const char *game, const Pairs &changes);
-json::Value read_config(const std::wstring &config_file, const std::wstring &prefix_file, const std::wstring &user_dir,
-                        bool wine);
-bool write_config(const std::wstring &path, const json::Value &config);
+Pairs ini_values(const fs::path &user_dir, const char *game);
+bool ini_update(const fs::path &user_dir, const char *game, const Pairs &changes);
+json::Value read_config(const fs::path &config_file, const fs::path &prefix_file, const fs::path &user_dir, bool wine);
+bool write_config(const fs::path &path, const json::Value &config);
 
 }  // namespace
 
@@ -220,7 +190,7 @@ UN_API int un_settings_table(const char *name, char *out, int cap) {
 // through fps_limit() before it is returned.
 UN_API int un_ini_read(const wchar_t *user_dir, const char *game, char *out, int cap) {
     std::string text;
-    for (auto &kv : ini_values(user_dir, game)) text += kv.first + "\t" + kv.second + "\n";
+    for (auto &kv : ini_values(port::path(user_dir), game)) text += kv.first + "\t" + kv.second + "\n";
     return give(text, out, cap);
 }
 
@@ -233,25 +203,27 @@ UN_API int un_ini_write(const wchar_t *user_dir, const char *game, const char *u
         size_t tab = line.find('\t');
         if (tab != std::string::npos) changes.push_back({line.substr(0, tab), line.substr(tab + 1)});
     }
-    return ini_update(user_dir, game, changes) ? 0 : 1;
+    return ini_update(port::path(user_dir), game, changes) ? 0 : 1;
 }
 
 UN_API int un_config_read(const wchar_t *config_file, const wchar_t *prefix_file, const wchar_t *user_dir, int wine,
                           char *out, int cap) {
-    return give(json::dump(read_config(config_file, prefix_file, user_dir, wine != 0)), out, cap);
+    return give(json::dump(read_config(port::path(config_file), port::path(prefix_file), port::path(user_dir),
+                                      wine != 0)),
+                out, cap);
 }
 
 UN_API int un_config_write(const wchar_t *config_file, const char *config_json) {
     json::Value v;
     if (!json::parse(config_json ? config_json : "", v) || !v.is_object()) return 2;
-    return write_config(config_file, v) ? 0 : 1;
+    return write_config(port::path(config_file), v) ? 0 : 1;
 }
 
 }  // extern "C"
 
 namespace {
 
-Pairs ini_values(const std::wstring &user_dir, const char *game) {
+Pairs ini_values(const fs::path &user_dir, const char *game) {
     Pairs values = ini_defaults();
     for (const std::string &line : settings_lines(user_dir, game)) {
         if (!is_setting(line)) continue;
@@ -266,7 +238,7 @@ Pairs ini_values(const std::wstring &user_dir, const char *game) {
     return values;
 }
 
-bool ini_update(const std::wstring &user_dir, const char *game, const Pairs &changes) {
+bool ini_update(const fs::path &user_dir, const char *game, const Pairs &changes) {
     std::vector<std::string> lines = settings_lines(user_dir, game);
     std::vector<bool> done(changes.size(), false);
     for (std::string &line : lines) {
@@ -283,9 +255,8 @@ bool ini_update(const std::wstring &user_dir, const char *game, const Pairs &cha
         }
     std::string text;
     for (const std::string &line : lines) text += line + "\r\n";
-    std::wstring dir = user_dir;
-    CreateDirectoryW(dir.c_str(), nullptr);
-    return write_bytes(settings_file(dir, game), text);
+    port::ensure_dir(user_dir);
+    return write_bytes(settings_file(user_dir, game), text);
 }
 
 // ------------------------------------------------------------------------------------------------ launcher.json
@@ -346,19 +317,40 @@ const Preset *preset_named(const Value &v) {
     return nullptr;
 }
 
+// strict UTF-8: no overlong forms, no surrogates, nothing above U+10FFFF
 bool valid_utf8(const std::string &s) {
-    return MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, s.data(), (int)s.size(), nullptr, 0) > 0 || s.empty();
+    for (size_t i = 0; i < s.size();) {
+        const unsigned char c = (unsigned char)s[i];
+        const size_t n = c < 0x80 ? 1 : (c & 0xe0) == 0xc0 ? 2 : (c & 0xf0) == 0xe0 ? 3 : (c & 0xf8) == 0xf0 ? 4 : 0;
+        if (!n || i + n > s.size()) return false;
+        if (n == 2 && c < 0xc2) return false;
+        for (size_t k = 1; k < n; ++k)
+            if (((unsigned char)s[i + k] & 0xc0) != 0x80) return false;
+        if (n == 3) {
+            const unsigned char c1 = (unsigned char)s[i + 1];
+            if (c == 0xe0 && c1 < 0xa0) return false;   // overlong
+            if (c == 0xed && c1 >= 0xa0) return false;   // UTF-16 surrogate
+        } else if (n == 4) {
+            const unsigned char c1 = (unsigned char)s[i + 1];
+            if (c > 0xf4 || (c == 0xf0 && c1 < 0x90) || (c == 0xf4 && c1 >= 0x90)) return false;
+        }
+        i += n;
+    }
+    return true;
 }
 
 // Loads a launcher.json and returns its top-level object (empty if the file does not exist). If the content does
 // not parse, for example because a write was interrupted, a copy is saved next to it with a .bad suffix and an
 // empty object is returned so the defaults take over.
-Value load_config_file(const std::wstring &path) {
+Value load_config_file(const fs::path &path) {
     std::string text;
     if (!read_text(path, text)) return Value::object();
     Value v;
     if (!valid_utf8(text) || !json::parse(text, v)) {
-        CopyFileW(path.c_str(), (path + L".bad").c_str(), FALSE);
+        fs::path bad = path;
+        bad += ".bad";
+        std::error_code ec;
+        fs::copy_file(path, bad, fs::copy_options::none, ec);
         return Value::object();
     }
     return v.is_object() ? v : Value::object();
@@ -373,7 +365,9 @@ double version_of(const Value &config) {
     return 1e18;   // non-numeric version: treat it as newer than everything so no migration step runs
 }
 
-std::string unix_path(const std::wstring &path) {
+// The Linux path behind a Wine drive-letter path (Wine only). On Linux the path already is one.
+std::string unix_path(const fs::path &path) {
+#ifdef _WIN32
     typedef char *(__cdecl * ToUnix)(LPCWSTR);
     ToUnix to_unix = (ToUnix)(void *)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "wine_get_unix_file_name");
     if (!to_unix) return std::string();
@@ -382,12 +376,15 @@ std::string unix_path(const std::wstring &path) {
     std::string s = p;
     HeapFree(GetProcessHeap(), 0, p);
     return s;
+#else
+    return port::utf8(path);
+#endif
 }
 
-Value read_config(const std::wstring &config_file, const std::wstring &prefix_file, const std::wstring &user_dir, bool wine) {
+Value read_config(const fs::path &config_file, const fs::path &prefix_file, const fs::path &user_dir, bool wine) {
     Value config = launcher_defaults();
     Value stored = load_config_file(config_file);
-    if (lstrcmpiW(config_file.c_str(), prefix_file.c_str()) != 0) {
+    if (!port::same_path(config_file, prefix_file)) {
         // An install's first start (GitHub #47): its own file does not exist yet, so the settings all installs used to
         // share fill it, per game; values already in its own file take priority
         Value older = load_config_file(prefix_file);
@@ -487,12 +484,10 @@ Value read_config(const std::wstring &config_file, const std::wstring &prefix_fi
     const Value *folder = config.get("game_dir");
     const Value *known = config.get("game_dir_unix");
     if (wine && folder && folder->kind == Value::String && !folder->s.empty() && !(known && known->truthy())) {
-        int n = MultiByteToWideChar(CP_UTF8, 0, folder->s.c_str(), -1, nullptr, 0);
-        std::wstring w(n, L'\0');
-        MultiByteToWideChar(CP_UTF8, 0, folder->s.c_str(), -1, w.data(), n);
-        w.resize(n - 1);
-        if (GetFileAttributesW(w.c_str()) != INVALID_FILE_ATTRIBUTES) {
-            std::string unix = unix_path(w);
+        const fs::path folder_path = port::path_utf8(folder->s);
+        std::error_code ec;
+        if (fs::exists(folder_path, ec)) {
+            std::string unix = unix_path(folder_path);
             if (!unix.empty()) config.set("game_dir_unix", Value::text(unix));
         }
     }
@@ -502,21 +497,18 @@ Value read_config(const std::wstring &config_file, const std::wstring &prefix_fi
 // Saves via <file>.<pid>.tmp and a rename, because the launcher and a shortcut-started game can save at the same
 // moment and an interrupted save must never leave a truncated file. If the rename is refused (the file held open
 // by an antivirus or another launcher instance), the file is written directly instead.
-bool write_config(const std::wstring &path, const Value &config) {
+bool write_config(const fs::path &path, const Value &config) {
     std::string text, raw = json::dump(config);
     for (char c : raw) {
         if (c == '\n') text += '\r';
         text += c;
     }
-    size_t cut = path.find_last_of(L"\\/");
-    if (cut != std::wstring::npos) {
-        std::wstring dir = path.substr(0, cut);
-        for (size_t k = 3; k <= dir.size(); ++k)
-            if (k == dir.size() || dir[k] == L'\\' || dir[k] == L'/') CreateDirectoryW(dir.substr(0, k).c_str(), nullptr);
-    }
-    std::wstring temp = path + L"." + std::to_wstring(GetCurrentProcessId()) + L".tmp";
-    if (write_bytes(temp, text) && MoveFileExW(temp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING)) return true;
-    DeleteFileW(temp.c_str());
+    port::ensure_dir(path.parent_path());
+    fs::path temp = path;
+    temp += "." + std::to_string(port::process_id()) + ".tmp";
+    if (write_bytes(temp, text) && port::replace(temp, path)) return true;
+    std::error_code ec;
+    fs::remove(temp, ec);
     return write_bytes(path, text);
 }
 

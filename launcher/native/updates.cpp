@@ -21,8 +21,7 @@
 //   "tick": about every 200 ms; it reports what the threads did and starts the automatic install when it is due.
 #include "native.h"
 #include "json.h"
-
-#include <windows.h>
+#include "port.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -56,16 +55,6 @@ int give(const std::string &s, char *out, int cap) {
     return 0;
 }
 
-std::wstring wide(const std::string &s) {
-    if (s.empty()) return L"";
-    const int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), nullptr, 0);
-    std::wstring w(n, L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), &w[0], n);
-    return w;
-}
-
-long long now_ms() { return (long long)GetTickCount64(); }
-
 // a text call of the DLL's convention; a step with side effects runs once (its buffer is big enough)
 template <typename Call> std::pair<int, std::string> text_call(Call call, int room = 1 << 16, bool repeatable = true) {
     std::string out(room, '\0');
@@ -80,7 +69,7 @@ template <typename Call> std::pair<int, std::string> text_call(Call call, int ro
 
 // the installed version as dotted numbers without leading zeros; empty when running from a git checkout
 std::string installed(const std::string &root) {
-    const std::wstring r = wide(root);
+    const std::wstring r = port::wide(root);
     auto t = text_call([&](char *o, int c) { return un_update_installed(r.c_str(), o, c); });
     if (t.first != 0) return "";
     std::string out;
@@ -213,14 +202,14 @@ void install(const Host &h, bool automatic, Value &out) {
     const Value release = g.release;
     const std::string root = h.root;
     g.worker = std::thread([release, root]() {
-        const std::wstring r = wide(root);
+        const std::wstring r = port::wide(root);
         const std::string request = json::dump(release, false);
         std::string staged, error;
         auto d = text_call([&](char *o, int c) { return un_update_download(request.c_str(), r.c_str(), o, c); }, 1 << 16, false);
         if (d.first != 0) {
             error = d.second;
         } else {
-            const std::wstring archive = wide(d.second);
+            const std::wstring archive = port::wide(d.second);
             const std::string version = version_text(release);
             auto s = text_call([&](char *o, int c) { return un_update_stage(archive.c_str(), r.c_str(), version.c_str(), o, c); },
                                1 << 16, false);
@@ -246,7 +235,7 @@ void tick(const Host &h, Value &out) {
             if (h.mode == "auto") {
                 if (!h.game_running) out.set("status", status("Version " + version + " is out.",
                                                               "It will install automatically shortly."));
-                g.auto_at = now_ms() + 1500;
+                g.auto_at = port::now_ms() + 1500;
             } else {
                 g.button = "UPDATE TO " + version;
                 show_button(out, true);
@@ -260,13 +249,13 @@ void tick(const Host &h, Value &out) {
             else out.set("status", status("You're up to date.", "Version " + g.current + " is the latest release."));
         }
     }
-    if (g.auto_at && now_ms() >= g.auto_at) {   // auto mode: install once neither a game nor an import is running
+    if (g.auto_at && port::now_ms() >= g.auto_at) {   // auto mode: install once neither a game nor an import is running
         g.auto_at = 0;
         if (h.mode == "auto" && g.release.is_object() && !g.busy) {
-            if (h.game_running) g.auto_at = now_ms() + 60000;
+            if (h.game_running) g.auto_at = port::now_ms() + 60000;
             else if (h.import_running) {   // the launcher goes first: a staged import update is stopped, a first import finishes
                 out.set("stop_staged_imports", Value::boolean(true));
-                g.auto_at = now_ms() + 5000;
+                g.auto_at = port::now_ms() + 5000;
             } else install(h, true, out);
         }
     }
@@ -293,7 +282,7 @@ void tick(const Host &h, Value &out) {
                 out.set("dialog", dialog("info", IMPORT_BUSY));
             } else {
                 out.set("status", status("Installing the new version...", "The launcher will reopen shortly."));
-                const std::wstring r = wide(h.root), s = wide(g.staged);
+                const std::wstring r = port::wide(h.root), s = port::wide(g.staged);
                 auto a = text_call([&](char *o, int c) { return un_update_start_apply(r.c_str(), s.c_str(), o, c); }, 1 << 16,
                                    false);
                 if (a.first != 0) {
@@ -347,7 +336,7 @@ UN_API int un_updates(const char *request_json, char *out, int cap) {
         if (g.release.is_object() && !g.busy) {
             if (h.mode == "auto") {
                 show_button(result, false);
-                g.auto_at = now_ms();   // the automatic install, at the next tick
+                g.auto_at = port::now_ms();   // the automatic install, at the next tick
             } else if (h.mode == "manual") {
                 show_button(result, true);
             }

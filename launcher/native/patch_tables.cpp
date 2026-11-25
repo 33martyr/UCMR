@@ -10,12 +10,12 @@
 
 #include "native.h"
 #include "json.h"
+#include "port.h"
 
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <windows.h>
 
 #include <algorithm>
 #include <map>
@@ -92,11 +92,8 @@ Variant several(const std::string &pattern, std::vector<Edit> edits) {
 Patch patch(const std::string &description, std::vector<Variant> variants) { return Patch{description, std::move(variants)}; }
 
 std::string env(const char *name, const char *fallback) {
-    char buf[4096];
-    SetLastError(0);
-    DWORD n = GetEnvironmentVariableA(name, buf, sizeof buf);
-    if (!n) return GetLastError() == ERROR_ENVVAR_NOT_FOUND ? fallback : "";
-    return n < sizeof buf ? std::string(buf, n) : fallback;
+    std::string value;
+    return port::env(name, value) ? value : fallback;
 }
 std::string strip(const std::string &s) {
     const char *ws = " \t\r\n\v\f";

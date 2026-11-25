@@ -7,10 +7,10 @@
 #include "native.h"
 #include "json.h"
 #include "inflate.h"
+#include "port.h"
 
 #include <cstdint>
 #include <cstring>
-#include <windows.h>
 
 #include <string>
 #include <vector>
@@ -18,61 +18,29 @@
 namespace {
 
 using json::Value;
+namespace fs = port::fs;
 
 int give(const std::string &s, char *out, int cap) {
     if ((int)s.size() + 1 > cap) return -(int)(s.size() + 1);
     std::memcpy(out, s.c_str(), s.size() + 1);
     return 0;
 }
-std::string utf8(const std::wstring &w) {
-    if (w.empty()) return std::string();
-    int n = WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(), nullptr, 0, nullptr, nullptr);
-    std::string s(n, '\0');
-    WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(), &s[0], n, nullptr, nullptr);
-    return s;
-}
-std::wstring widen(const std::string &s) {
-    if (s.empty()) return std::wstring();
-    int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), nullptr, 0);
-    std::wstring w(n, L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), &w[0], n);
-    return w;
-}
-// Normalises a path the way str(Path(p)) does: forward slashes turned into backslashes, runs of separators collapsed
-// (a leading UNC pair survives), no separator at the end
-std::wstring path_str(std::wstring p) {
-    for (auto &c : p) if (c == L'/') c = L'\\';
-    std::wstring o;
-    for (size_t i = 0; i < p.size(); ++i) {
-        if (p[i] == L'\\' && !o.empty() && o.back() == L'\\' && i > 1) continue;
-        o += p[i];
-    }
-    while (o.size() > 3 && o.back() == L'\\') o.pop_back();
-    return o;
-}
 
-bool read_file(const std::wstring &path, std::string &data) {
-    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
-    if (h == INVALID_HANDLE_VALUE) return false;
-    LARGE_INTEGER size{};
-    GetFileSizeEx(h, &size);
-    data.assign((size_t)size.QuadPart, '\0');
-    DWORD got = 0;
-    const bool ok = size.QuadPart == 0 || (ReadFile(h, &data[0], (DWORD)data.size(), &got, nullptr) && got == data.size());
-    CloseHandle(h);
-    return ok;
-}
+bool read_file(const fs::path &path, std::string &data) { return port::read(path, data, ~(uint64_t)0); }
 
 // Size of the file behind `path`, following links like Path.stat. Returns false if it can't be opened (e.g. absent).
-bool size_of(const std::wstring &path, long long &size) {
-    HANDLE h = CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
-                           OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
-    if (h == INVALID_HANDLE_VALUE) return false;
-    FILE_STANDARD_INFO info{};
-    const bool ok = GetFileInformationByHandleEx(h, FileStandardInfo, &info, sizeof info) != 0;
-    CloseHandle(h);
-    size = info.Directory ? 0 : info.EndOfFile.QuadPart;
-    return ok;
+bool size_of(const fs::path &path, long long &size) {
+    std::error_code ec;
+    const fs::file_status st = fs::status(path, ec);   // follows links
+    if (ec || st.type() == fs::file_type::not_found) return false;
+    if (fs::is_directory(st)) {
+        size = 0;
+        return true;
+    }
+    const uintmax_t n = fs::file_size(path, ec);
+    if (ec) return false;
+    size = (long long)n;
+    return true;
 }
 
 }  // namespace
@@ -84,10 +52,11 @@ extern "C" {
 // mismatch. If the game folder has a uroot subfolder, that subfolder is what gets checked. Returns 0 when everything
 // matches, 1 when something is absent or the wrong size, and 2 when the listing itself is unusable (out says why).
 UN_API int un_check_game_files(const wchar_t *root, const wchar_t *game, char *out, int cap) {
-    const std::wstring list_path = std::wstring(root ? root : L".") + L"\\tools\\game_files_102.json.gz";
+    const fs::path list_path = port::path(root ? root : L".") / "tools" / "game_files_102.json.gz";
     std::string gz, text;
     Value wanted;
-    if (!read_file(list_path, gz)) return give("The game file list is missing: " + utf8(list_path), out, cap) < 0 ? -1 : 2;
+    if (!read_file(list_path, gz))
+        return give("The game file list is missing: " + port::utf8(list_path), out, cap) < 0 ? -1 : 2;
     try {
         text = inflate::gunzip(gz);
     } catch (const inflate::InflateError &e) {
@@ -95,16 +64,14 @@ UN_API int un_check_game_files(const wchar_t *root, const wchar_t *game, char *o
     }
     if (!json::parse(text, wanted) || wanted.kind != Value::Object)
         return give("The game file list can't be read.", out, cap) < 0 ? -1 : 2;
-    std::wstring folder = path_str(game ? game : L"");
+    fs::path folder = port::path(game ? game : L"");
     long long ignored = 0;
-    if (size_of(folder + L"\\uroot\\eboot.bin", ignored)) folder += L"\\uroot";
+    if (size_of(folder / "uroot" / "eboot.bin", ignored)) folder /= "uroot";
     std::string missing, wrong;
     size_t missing_count = 0, wrong_count = 0;
     for (const auto &entry : wanted.fields) {
-        std::wstring rel = widen(entry.first);
-        for (auto &c : rel) if (c == L'/') c = L'\\';
         long long actual = 0;
-        if (!size_of(folder + L"\\" + rel, actual)) {
+        if (!size_of(folder / port::path_utf8(entry.first), actual)) {
             missing += "missing " + entry.first + "\n";
             ++missing_count;
             continue;
@@ -115,7 +82,7 @@ UN_API int un_check_game_files(const wchar_t *root, const wchar_t *game, char *o
             ++wrong_count;
         }
     }
-    const std::string report = utf8(folder) + ": " + std::to_string(wanted.fields.size()) + " files compared, " +
+    const std::string report = port::utf8(folder) + ": " + std::to_string(wanted.fields.size()) + " files compared, " +
                                std::to_string(missing_count) + " not found, " + std::to_string(wrong_count) +
                                " with a different size\n" + missing + wrong;
     const int status = give(report, out, cap);
