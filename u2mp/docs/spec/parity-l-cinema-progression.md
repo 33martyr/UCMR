@@ -36,7 +36,7 @@ replaces it (named), with the listed deltas. MISSING = player-visible PS3 behavi
 | `433c54` | replay Leave::Update: back to the menus once 150 frames passed with nothing loading | COVERED | PS4 `0x5e5490` |
 | `43402c` | send a film to a friend: system message (subject "Check out this Uncharted 2 cinema file!", tag "Cinema File") carrying the sender's server folder and the film's server name; failure only logged ("Error %x sending cinema message") | PLATFORM | remaining.cpp `cinema_send` (`0x5e4510`) -> online.cpp `send_cinema`; deltas 2.3 |
 | `434324` | download thread: copy the chosen server film into the local folder (page text "Downloading to Local Files..."), then refresh | PLATFORM (no equivalent) | no film server; 2.3 |
-| `434608` | replay Resetting::Enter (fade, reset the net game, remember whether a team game) | COVERED | PS4 `0x5e5b00`; needs 2.1 (file stays open) |
+| `434608` | replay Resetting::Enter (150-tick fade, reset the net game's round state, a roster flag) | COVERED | PS4 `0x5e5b00`; needs 2.1 (file stays open) |
 | `4346cc` | replay Resetting::Exit | COVERED | PS4 `0x5e5ad0` |
 | `434848` | replay Leave::Enter (speeds 1.0, close menus, end the net game, clear "quit") | COVERED | PS4 `0x5e5520` + E9 close |
 | `4348f0` | RePlaying::Enter ("multi-player-cinema", start net game, cinema camera, clock reset unless resuming after Resetting, re-find the followed player by name) | COVERED | PS4 `0x5e89d0` |
@@ -94,7 +94,7 @@ Behaviour required:
    so tests can count loops.
 
 Nothing else changes: the PS4 code keeps the speeds, cameras, followed player (re-found by name on RePlaying
-entry) and the 900-frame settle wait of RePlay::Update.
+entry) and the settle wait of RePlay::Update (900 ticks of the clock it reads).
 
 ### 2.2 L-T1: multiplayer trophies (PLATFORM delta MISSING; PS3 `1735b8`, `4c5268`, stat updaters)
 
