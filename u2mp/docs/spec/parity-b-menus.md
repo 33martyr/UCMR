@@ -339,6 +339,11 @@ Counts (81 rows): C 72, C + M 1 (4bc728), P 6 (4b8ebc, 4c1a08, 4c29f8, 4c2a18, 4
 P + M 2 (4bfac8, 4c1fe0). Behaviour to implement: sections 1 to 5 (4c1a08 has no PC equivalent; the
 presence writer of section 5 is outside this group but feeds sections 3 and 4).
 
+The queries above only give the rows their values; how a row opens is its control kind (menu.bin, the same on
+PS3 and PS4). PS4 draws kind 6 (conds 59..61, 63, 65) as an inline spinner without the PS3 box and adds a "<>" to
+focused closed kind-8 carousels (conds 40, 41, 55, 57, 58, 77, 78): fixed by the import's menu overlay (version 7,
+kind 6 -> 13) and menudraw.cpp (`MENUS.md` 3.2, `PORT-MENUDRAW.md`).
+
 ## 11. Clarifications (2026-11-25)
 
 Answers to section 9. Source types: **PS3** = PS3 1.10 EBOOT (Ghidra headless, read-only, and raw data

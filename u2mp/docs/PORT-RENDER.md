@@ -341,3 +341,34 @@ once by MeshInstance::Init from its descriptor at `0xc3b934`) against the frame'
 0xffff. Actors get cell 0 (init log: `+d4 0`); the menu level's cell 0 is visible, the match level's is not. Now an
 actor instance with cell 0 gets 0xffff at init (no cell test; the frustum test still runs). Log: `render: actor
 cell fix`; off switch `UNCHARTED_U2MP_ACTOR_CELL=0`. Not yet seen in a match.
+
+## The Temple: black water (2026-11-25, open until tested)
+
+Symptom: the pools of The Temple (`treasure-multi`) draw flat black: no floor seen through the water, no reflection,
+no ripple highlights, no fog (brightened screenshot: uniform 0). On PS3 the floor shows through and the pillars
+reflect.
+
+What the data says (not a conversion fault):
+
+* The stage pak is the retail PS4 `pak22/ps4/treasure-multi.pak`; the import converts only the server spawn pak
+  `treasure-multi-pak-ingame10` for this map. The registry keeps the PS4 entry.
+* Its three `water.fx` materials (`temple-mp-water-reflect`, `-foam-reflect`, `-foam-env`) have exactly the PS3
+  material's constants (base colour 0 0 0, fresnel 0.9 / 0.1, refraction and reflection brightness 1, ...) and the
+  same textures. Both pool materials use a planar reflection texture (`ND_REFLECTION_TEXTURE`, no env cube) and
+  refraction (`ND_WATER_REFRACTIONS`); PS3's pool materials have no env cube either.
+* The reflection regions (`waterreflect1-14/16/17`) are in both the PS3 and the retail PS4 `treasure-multi-ingame10`.
+* So porting the PS3 water would give the same material, and the same black. 56 other retail U2 paks (campaign and
+  the Gompa, Shambhala, Village, Warzone and Fort maps) use the same planar-reflection water.
+
+Cause (likely, not yet proven in game): the renderer. A water shader with valid inputs shows at least its bump
+highlights and fog; uniform black means an engine buffer it reads (the planar reflection, or the depth the
+refraction compares with) is garbage or black. Uncharted 1 (same engine) had exactly this, GitHub #161: its
+reflection pass uses a depth buffer the game clears only through HTILE, in memory a compute pass used earlier in the
+frame; the runtime lost that clear when the compute image freed the depth image, and the depth test failed on
+garbage. `GOW3_HTILE_KEEP_CLEARS=1` fixed it and was turned on for Uncharted 1 only (the runs then showed no change
+in Uncharted 2 and 3). The launcher now turns it on for Uncharted 2 too (`launcher/native/runtime_env.cpp`).
+
+Test (no build needed): put `GOW3_HTILE_KEEP_CLEARS=1` in `analysis/uncharted-user/test-env.txt`, play The Temple
+and look at the pools; `boot.log` then shows `HTILE fill by cs ...` / `HTILE clear kept for depth ...` when the
+case occurs. If the water stays black: a frame capture at the pool (`capture.trigger`) and the water draw's inputs
+(`GOW3_TRACE_PS` with the water pixel shader) are the next step, and the launcher line goes back to `u1` only.

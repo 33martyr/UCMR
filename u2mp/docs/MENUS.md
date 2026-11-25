@@ -18,8 +18,9 @@ Uncharted 2 multiplayer notes or code were used. Code: `gow3_pc/src/u2mp/menus.c
    (`+0x58..+0x5c` on PS4: action 22, condition 97..101/130/137, help-bar id). The only menu.bin
    difference that matters is the missing Multiplayer button in the main menus, which
    the menu overlay (`u2import --overlay`, overlay.cpp) already adds. The overlay also takes the Trophies mode
-   button (BUTTON_NETTROPHIES) off PAGE_MULTIPLAYER (owner 2026-11-25: PC has no trophies; 3.1). Nothing else is
-   patched in menu.bin.
+   button (BUTTON_NETTROPHIES) off PAGE_MULTIPLAYER (owner 2026-11-25: PC has no trophies; 3.1). Since overlay
+   version 7 it also makes PAGE_LOBBY's five custom game option rows drop-downs (kind 6 -> 13): the data is the
+   same as PS3, but the PS4 code draws kind 6 differently (3.2). Nothing else is patched in menu.bin.
    Since overlay version 6 (`spec/parity-n-remaining.md` N3) the overlay gives the three main menus new control
    lists with a new Multiplayer code button and leaves BUTTON_MULTIMEDALS as shipped, in the PS3 order:
    PAGE_NEWPROFILE New Game, Load Game, Multiplayer, Options, Multiplayer Medals; PAGE_NEWPROFILE_BETA Multiplayer,
@@ -125,6 +126,29 @@ State: **stub** = `ret`; **wrap** / **port** = changed by menus.cpp; otherwise i
   game becomes a game of that type (SetNetGame `63dc30`); Start Match then picks a random game of
   that type (session.cpp). The status line as in 3.1.
 
+**Option boxes and the stray "<>" (owner report 2026-11-25, PS3 video `u2menu.mp4`).** On PS3, X on an option
+row opens a box over the dimmed page: a list (Variation, Score Limit, Time Limit, Rounds, Co-op Difficulty,
+Friendly Fire, Team) or, for the picture carousels (Game Type, Map, Playlist; 3.3: Boosters, Hero, Villain), the
+row's label and value above a fan of pictures with the arrows at the box's edges; a focused, closed row shows no
+arrows. On PC Variation .. Co-op Difficulty had no box and every focused carousel showed a small "<>" pair right of
+(or above) its value. menu.bin is not the cause: PAGE_LOBBY and PAGE_MULTIPLAYER_PLAYER_OPTIONS have the same
+kinds, flags, columns, conditions and `+0x68` (PS3 `+0x44`) on both games. Kinds (PS4 control construction switch
+`0x5c5871`, jump table `0x5c7b30`, record `+0x10`):
+
+| kind | rows | PS4 class (vtable; update, draw) | PS4 behaviour |
+|---|---|---|---|
+| 6 | Variation, Score Limit, Rounds, Time Limit, Co-op Difficulty | `0x57df50` list, `0x1007090`; `0x57e410`, `0x581e60` -> `0x57e7c0` | inline: left / right change the value at once, arrows (type 6) at value right + 11 / + 31 when editable; no box |
+| 8 | Playlist, Game Type, Map, Boosters 0/1, Hero, Villain | `0x5881c0`, `0x1007220`; `0x588360`, `0x588ed0` | X / left / right open the box (`+0x24c`, fraction `+0x250` over 1/6 s), X commits, O reverts; box, fan (`0x58ab40`, `+0x254` = 5 per side) and arrows drawn while open |
+| 13 | Friendly Fire, Team, Co-op Difficulty (profile), Taunt, Matchmaking | `0x586b80`, `0x10071b0` (a kind-7 list `0x1007120` inside, box rows = record `+0x68`) | drop-down box as PS3 |
+
+PS4 kind 6 is Bluepoint's inline spinner of the Collection's options (their own rows BP_MENU_SPEEDRUN_TYPE, the
+audio output page and Motion Blur are kind 6); Bluepoint changed the campaign's difficulty row (PAGE_GAMEPLAY, PS3
+kind 6) to kind 13 for the box. Kind 8 still opens the PS3 box, but its draw adds an arrow pair for a focused
+closed row (`0x58a0ab..0x58a68d`, value rect + (11 / 31, -100)): the stray "<>".
+Fix: the overlay (version 7) makes the five kind-6 rows kind 13, the record otherwise unchanged (queries, flags 0,
+`+0x64` 0, `+0x68` 5 rows as Team); menudraw.cpp skips the kind-8 closed-row arrows while NET_SM > 1 (the
+campaign's chapter carousel, also kind 8, keeps them). Friendly Fire was kind 13 already. Not verified in the game.
+
 ### 3.3 PAGE_MULTIPLAYER_PLAYER_OPTIONS ("Profile"; page handler `5ed8b0` = remaining.cpp)
 
 Rank widget (k19, cond 105: rank and progress to the next rank from cash), Boosters Slot 1/2
@@ -132,7 +156,8 @@ Rank widget (k19, cond 105: rank and progress to the next rank from cash), Boost
 skin selection), co-op difficulty, taunt, matchmaking preference, toggles (108..110). All queries
 intact; their data is NetPlayerData (now loaded and saved). Restored texts: NET_CLANTAG label
 (d4143b18 "Clan Tag") and the empty-tag text (639e0fa8 "None"). The clan tag button explains it is
-not available on PC (remaining.cpp).
+not available on PC (remaining.cpp). Boosters and Hero / Villain are kind-8 carousels, Co-op Difficulty, Taunt and
+Matchmaking kind-13 drop-downs: no "<>" beside a focused closed carousel in multiplayer (3.2).
 
 ### 3.4 Store ("Rewards"): PAGE_MULTIPLAYER_STORE, PAGE_MULTIPLAYER_STORE_ITEMS
 
@@ -198,7 +223,17 @@ every 10 s while the strip is drawn and the previous line has come in (`spec/par
 
 ### 3.8 Leaderboards (PAGE_MENU_LEADERBOARD) and Trophies (PAGE_NET_TROPHIES, DROPPED)
 
-Leaderboard rows: progression.cpp (local boards). Leaderboard texts: 3.1.
+Leaderboard rows: progression.cpp (local boards, RPCN boards when linked). Leaderboard texts: 3.1 and section 4.
+
+The page (one LIST_LEADERBOARD control, kind 10) drew **nothing** but its help bar until 2026-11-25: PS4 builds the
+list object without its board / page / column fields and nothing on PS4 sets the leaderboard's reset request, so the
+list update never fetched and the column set stayed 0, and the kind-10 draw stops when a list has 0 columns.
+progression.cpp now registers a "page shown" handler for PAGE_MENU_LEADERBOARD (`0x8236d02a`) that sets the reset
+request (spec/progression.md 1.5.19): every visit shows the board's table as PS3 does ("Competitive Kills - Global",
+Rank / Level / Players / Kills / Deaths / Ratio, 11 stripes, empty when no scores; Money: Rank / Level / Players /
+Money / Time Played; Wins: ... Wins / Losses / Ratio; Co-op: ... Points / Time Played). Controls as on PS3: L1 / R1
+previous / next board, triangle Global / Friends, square first page, the D-pad pages (11 rows a page).
+Not fixed: our help bar draws no L1 / R1 glyph before Prev / Next (PS3 does).
 PAGE_NET_TROPHIES: DROPPED (owner 2026-11-25: PC has no trophies). Its only route, BUTTON_NETTROPHIES, is removed by
 the overlay (3.1); the page stays in menu.bin unused and its title MENU_TITLE_TROPHIES (85ed01cc) and the button label
 f1b9728c are no longer served. Its list LIST_STATS stays: it is the game's own code (it reads NetPlayerData), and
@@ -215,10 +250,10 @@ title updates and its server; they are in the BCUS dlc-patch7 networking bank, w
 
 | ids | used by | text (ours, English) |
 |---|---|---|
-| f67d9ad2, 70c81d2e, c0cd1b00 | profile panel k23 (`59ddb0`) stat labels | Competitive Wins / Competitive Kills / Cash |
-| 47a936dc, c21027d1 | mode 4 label / mode 4 and 5 description (`0xdef390`) | Leaderboards (GOTY base bank: "Rankings") / View your stats |
+| f67d9ad2, 70c81d2e, c0cd1b00 | profile panel k23 (`59ddb0`) stat labels; also the board titles (`0xdef0a0`) and c0cd1b00 the money column | Competitive Wins / Competitive Kills / Money (PS3; was "Cash" until 2026-11-25) |
+| 47a936dc, c21027d1 | mode 4 label / mode 4 and 5 description (`0xdef390`) | Leaderboards (as PS3; English replaces the GOTY base bank's "Rankings") / View your stats |
 | 780b62e0, e663a74e, b9602dbb, 966fa9ae, 4915c4b7, 7d24a9f9 | stats ticker k24 (`5b3240`) | Time Played, Global, Wins, Losses, Ratio, Rank |
-| 320a6fc8, 8994a031, 5ba2fdfb, d82785e7 | help bar table `0x1041560` (leaderboard footer) | Go to Top, Next, Previous, Filter |
+| 320a6fc8, 8994a031, 5ba2fdfb, d82785e7 | help bar table `0x1041560` (leaderboard footer) | Top of List, Next, Prev, Filter (PS3 wording; were Go to Top / Previous) |
 | 69cbee70 | status line, cond 49 | [A] players today |
 | d4143b18, 639e0fa8 | NET_CLANTAG label, clan tag query `6609e0` | Clan Tag / Enter Clan Tag... |
 | 64370402, 9b0dd3c2, e012d5e3 | scoreboard countdown `65cc80`, leave-game confirm `65e750` | Quit Penalty [A]... / If you leave now, you will get a [TEXT] second wait penalty ... |
@@ -228,7 +263,9 @@ title updates and its server; they are in the BCUS dlc-patch7 networking bank, w
 more (owner 2026-11-25, the Trophies button is removed, 3.1): f1b9728c (mode 5 label "Trophies") and 85ed01cc
 (MENU_TITLE_TROPHIES, the PAGE_NET_TROPHIES title).
 
-47a936dc comes from the GOTY base bank (the import merges every GOTY archive). The other 25 are our own texts in
+47a936dc comes from the GOTY base bank (the import merges every GOTY archive), except in English, where the base bank
+says "Rankings" and PS3 (title update) shows "Leaderboards": texts.cpp serves its own English text first for it
+(`kOwnFirstInEnglish`), and greek / czech / turkish (no GOTY bank) get ours too. The other 25 are our own texts in
 all 22 languages (texts.cpp `kOwn`), with the other ids no bank has: 041a85ca (DLC pack bought), 63801125
 (Guardians), the three DLC map titles, the Siege description, net-patch9's game type variants, playlists and 48
 skin names, the five server playlist texts of `kPlaylistDefs` (were `extra_text` in menus.cpp) and the PC message
@@ -288,7 +325,7 @@ Three causes cover most of the gaps:
 | PAGE_LOBBY, matchmaking (7) | Find Match, playlist "Deathmatch" with picture card | playlist "Machinima", empty picture box | Machinima (the cinema game type, text 5614c769) is no playlist; Deathmatch first; picture: type 0x25 replaced by the type 3 net image `general/net/playlists/<deathmatch, objective, coop, survival, default>` chosen by game type (the PS4 net.pak has these five) |
 | PAGE_LOBBY, custom game (8, 14-18) | Game Type with mode icon, Map with card + name, Variation, Score / Time Limit, Friendly Fire; party leader with badge; Team | rows on one line ("Variation/Game Type"), party leader and members empty | party rows: cond 26..35 have table args 10..19 and the roster query read them as rows 10..19 (empty); now row = arg % 10 as PS3 `0x4bc780` (and the PARTY_PLAYERn callback likewise). Rows / icons / map cards: cause 2. DLC map cards are not in the PS4 net.pak (IMPORT.md). Leader badge: cause 3 |
 | PAGE_MULTIPLAYER_PLAYER_OPTIONS, Profile (9-11) | rank ring and money, Boosters Slot 1/2 with names and icons, Clan Tag, Hero / Villain portraits, Co-op Difficulty, Taunt, Matchmaking, Golden Guns; booster carousel with descriptions | empty, footer UNTRANSLATED | Clan Tag label and "Enter Clan Tag..."; footer texts; booster and portrait images are type 3 (cause 2). Rank badge in the k19 widget (type 0x27): cause 3. Why the whole page was empty is not explained by the code (all its queries are intact): check with the new build |
-| PAGE_MENU_LEADERBOARD (12) | Rank, Level badge, Players, Kills, Deaths, Ratio; footer Filter / Prev / Next / Top of List | footer UNTRANSLATED | footer texts; rows from progression.cpp; level badge = type 0x27 (cause 3) |
+| PAGE_MENU_LEADERBOARD (12) | Rank, Level badge, Players, Kills, Deaths, Ratio; footer Filter / Prev / Next / Top of List | footer UNTRANSLATED; no table at all (column set never written, 3.8) | footer texts (PS3 wording); the table on every visit (page shown handler, 3.8); rows from progression.cpp; level badge = type 0x27 (cause 3) |
 | PAGE_NET_TROPHIES (13) | list with icons, progress bars, counts, description | title / label only | DROPPED (owner 2026-11-25: PC has no trophies): no button leads there (3.1, 3.8) |
 | PAGE_CINEMA (19) | Local Files, map picture, Author / Players / Length / Size / Date | not reported | texts; the list picture uses type 0x22 (cause 3) |
 

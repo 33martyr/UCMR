@@ -103,6 +103,19 @@ Fix (`install_streams`, called first in `install_menudraw`):
   - Dropping is safe: the flush `0xbdc670` (0x303c) draws (index count - batch start) and skips a
     draw of 0.
 
+## Picture carousels: no "<>" beside a focused closed row (install_carousel_hint)
+
+The kind-8 control's draw `0x588ed0` (Game Type, Map, Playlist, Boosters, Hero / Villain; MENUS.md 3.2) draws two
+arrow images (type 6) beside the value when the row has the focus (`[r14+8]`) and its box is closed (open
+fraction 0): the block `0x58a0d3..0x58a68d` (value rect from `0x57f060` + (11 / 31, -100)). PS3 draws arrows only
+in the open box; this pair is the stray "<>" of the owner's report.
+
+- `0x58a0ab` `cmpb [r14+8],0`, `0x58a0b0` / `0x58a0b7` loads, `0x58a0bf` `je 0x58a68d`, `0x58a0c5` `vxorps`: all
+  checked. The `je` becomes `jmp stub` + `nop`; the stub: `je 0x58a68d`; `cmp dword [rip -> 0x14ce97c],1` (NET_SM);
+  `jg 0x58a68d`; `jmp 0x58a0c5`. Flags are dead at `0x58a68d`.
+- Multiplayer only (NET_SM > 1): the campaign's chapter carousel (PAGE_CHAPTERS, also kind 8) keeps its arrows.
+- Log: `menu draw: picture carousels draw no focus arrows in multiplayer`.
+
 ## Left / to check
 
 - In game: the Profile page draws completely, also over the Multiplayer page; the log shows the

@@ -1604,6 +1604,7 @@ void register_handler() {
     }
     const uint32_t count = get<uint32_t>(menu() + 0x24f0);
     if (count != before) log("per-frame page handler registered (%u handlers)", count);
+    progression_register_leaderboard_page();
 }
 
 void unregister_handler() { remove_page_handler(reinterpret_cast<void *>(&page_handler)); }
