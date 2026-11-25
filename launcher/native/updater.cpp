@@ -668,8 +668,10 @@ UN_API int un_update_installed(const wchar_t *root, char *out, int cap) {
 
 // Looks up the best release above `current` (e.g. "0.10.62") and writes it to out as JSON with version (a list), tag,
 // page, notes, url, size and sha256, or writes "null" when there is nothing newer. Returns 1 with the reason in out
-// if the lookup failed.
+// if the lookup failed. Started by RecompLauncher (RECOMPLAUNCHER=1), the answer is always "null": RecompLauncher
+// installs the releases itself, so the launcher must not update its own folder.
 UN_API int un_update_latest(const char *current, int timeout, char *out, int cap) {
+    if (env(L"RECOMPLAUNCHER") == L"1") return give("null", out, cap);
     try {
         return give(json::dump(latest_release(version_of(current), timeout > 0 ? timeout : 15), false), out, cap);
     } catch (const UpdateError &e) {

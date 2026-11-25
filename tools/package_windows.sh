@@ -9,6 +9,7 @@
 #   u2mp\, u3mp\             the multiplayer importers (u2import.exe, u3import.exe, u3fix.exe, tables, the helper builds, ffmpeg, objdump)
 #   tools\                   the update installer and the base game's file list
 #   licenses\                the licenses of everything bundled
+#   recomplauncher.json      how RecompLauncher starts the port (docs/RECOMPLAUNCHER.md)
 # Never any game file: each player points the launcher at their own copy. No Python: everything is C or C++.
 #
 # Run from Git Bash or an MSYS2 CLANG64 shell after gow3_pc/build.sh and tools/build_ffmpeg.sh. Settings:
@@ -307,6 +308,7 @@ qt_window() {
 texts() {
     cp tools/VERSION "$out/VERSION"   # the update check compares this with the releases
     cp tools/README-Windows.txt "$out/README.txt"
+    cp recomplauncher.json "$out/"   # RecompLauncher reads it from the top of the zip (docs/RECOMPLAUNCHER.md)
     cp gow3_pc/LICENSE "$out/LICENSE.txt"
     cp tools/defaults/disabled-optimizations.txt "$out/analysis/uncharted-user/"   # what Uncharted can't take
 }

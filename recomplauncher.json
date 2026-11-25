@@ -1,0 +1,32 @@
+{
+  "$schema": "https://recomplauncher.com/schema/recomplauncher.json",
+  "format": 1,
+  "name": "UCMR: Uncharted Collection Multiplayer Resurrected",
+  "repo": "UC-Resurrected/UCMR",
+  "start": {
+    "program": ["UCMR_Launcher.exe"]
+  },
+  "folders": {
+    "saves": ["{install}/analysis/uncharted-user/savedata"],
+    "logs": ["{install}/analysis"]
+  },
+  "saves": ["{install}/analysis/uncharted-user/savedata"],
+  "actions": [
+    {
+      "id": "saves",
+      "label": "Open the save folder",
+      "open": "saves"
+    },
+    {
+      "id": "logs",
+      "label": "Open the log folder",
+      "open": "logs"
+    }
+  ],
+  "system": {
+    "windows": {
+      "version": "10",
+      "graphics": { "vulkan": "1.3" }
+    }
+  }
+}
