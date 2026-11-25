@@ -740,10 +740,42 @@ void world_setup(const Cfg &c) {
 }
 
 // ---- common steps ------------------------------------------------------------------------------------------------
+// Commit 6b34909 (issue #34, missing skins in the roster; u2mp/docs/UNLOCKS.md) added one install step right after
+// the IsLocked hook: the game's table lookups at 9 store call sites, the 2 Profile list sites and the store name
+// call are retargeted to the module (no image check before them). The old build lacks exactly that step, so its
+// install record gets it here, at its place and with its count; the rest of the install is compared as recorded.
+void install_6b34909_step(int &n) {
+    static const std::pair<uint64_t, const char *> finds[] = {
+        {0x5aea9d, "store list count"},   {0x5aecbe, "store list count"},   {0x5aedfe, "store list item"},
+        {0x5aeff0, "store item name"},    {0x5b00c7, "store item picture"}, {0x5b098f, "store item page"},
+        {0x65a4fa, "store section table"}, {0xa4ce88, "store activate skin"}, {0xa4d123, "store activate skin"},
+    };
+    std::vector<std::string> add;
+    auto retarget = [&](uint64_t site, uint64_t target, const char *what) {
+        char b[160];
+        std::snprintf(b, sizeof b, "retarget_call 0x%llx 0x%llx %s", (unsigned long long)site, (unsigned long long)target, what);
+        add.push_back(b);
+        if (!hx::fails_at(site)) return true;
+        std::snprintf(b, sizeof b, "retarget_call 0x%llx failed (test)", (unsigned long long)site);
+        add.push_back(b);
+        return false;
+    };
+    int hooked = 0;
+    for (const auto &[site, what] : finds) hooked += retarget(site, 0xa15e70, what) ? 1 : 0;
+    n += hooked ? 1 : 0;
+    if (retarget(0x6597e5, 0xa15e70, "profile skin table") && retarget(0x6597f3, 0xa15e70, "profile store table")) n += 1;
+    if (retarget(0x5aef11, 0x5aef40, "store name probe")) n += 1;
+    size_t at = 0;   // after the IsLocked hook's records (the last one naming 0xa4bb40)
+    for (size_t i = 0; i < hx::calls.size(); ++i)
+        if (hx::calls[i].find("0xa4bb40") != std::string::npos) at = i + 1;
+    hx::calls.insert(hx::calls.begin() + std::ptrdiff_t(at), add.begin(), add.end());
+}
+
 void do_install(const char *name = "install") {
     step(name, [] {
         int n = 0;
         side().install(n);
+        if (S == 0) install_6b34909_step(n);
         hx::rec("installed %d", n);
     });
 }

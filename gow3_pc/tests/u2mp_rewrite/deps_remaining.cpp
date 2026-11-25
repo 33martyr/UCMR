@@ -2,6 +2,8 @@
 // modules (frontend.cpp, session.cpp, texts.cpp, online.cpp, voice.cpp, progression.cpp, the runtime's text input).
 // Compiled once per namespace by run.sh; every call is recorded and answered from hx::fk::st (deps_remaining.h).
 // The C text-input functions get the OLD_FLAGS renames (..._old) for the old build.
+#include <algorithm>
+
 #include "u2mp_internal.h"
 #include "online.h"
 #include "progression.h"
@@ -177,9 +179,13 @@ int friend_index(const std::string &name) {
         if (st.friends[i].name == name) return int(i);
     return -1;
 }
-bool friend_view(int i, FriendView &) {
+bool friend_view(int i, FriendView &v) {
     hx::rec("online::friend_view %d", i);
-    return false;   // no presence in these scenarios: View Profile falls back to profile_text
+    // no presence in these scenarios (View Profile falls back to profile_text), except a friend made a member of our
+    // party (st.party_member_friend)
+    if (i < 0 || i != st.party_member_friend) return false;
+    v.party_member = true;
+    return true;
 }
 #endif
 }  // namespace online
@@ -199,7 +205,19 @@ bool mm_member_at(int row, uint32_t &net_id, std::string &name) {   // matchmaki
         }
     return false;
 }
+bool party_stranger(uint32_t net_id) {   // Mute All / Unmute All skip them (parity-h-session.md H7)
+    const bool r = std::find(st.strangers.begin(), st.strangers.end(), net_id) != st.strangers.end();
+    hx::rec("session::party_stranger %u -> %d", net_id, int(r));
+    return r;
+}
 }  // namespace session
+namespace online {
+bool friend_party(int i, std::vector<std::string> &names) {   // View Profile's party lines (parity-g-friends.md G4)
+    hx::rec("online::friend_party %d -> %d", i, int(st.party_known));
+    if (st.party_known) names = st.party;
+    return st.party_known;
+}
+}  // namespace online
 #endif
 
 // voice.cpp
@@ -212,11 +230,50 @@ bool toggle_mute(uint32_t net_id) {
     hx::rec("voice::toggle_mute %u", net_id);
     return st.toggle_result;
 }
+#ifndef u2mp   // new build only: the mute flags the popups read (parity J3) and Mute All / Unmute All (H7)
+namespace {
+bool is_muted(uint32_t id) { return std::find(st.muted.begin(), st.muted.end(), id) != st.muted.end(); }
+std::string ids(const std::vector<uint32_t> &v) {
+    std::string s;
+    for (uint32_t id : v) s += (s.empty() ? "" : ",") + std::to_string(id);
+    return s;
+}
+}  // namespace
+bool muted(uint32_t net_id) {
+    hx::rec("voice::muted %u -> %d", net_id, int(is_muted(net_id)));
+    return is_muted(net_id);
+}
+bool all_muted(const std::vector<uint32_t> &others) {
+    const bool r = std::all_of(others.begin(), others.end(), is_muted);
+    hx::rec("voice::all_muted [%s] -> %d", ids(others).c_str(), int(r));
+    return r;
+}
+bool none_muted(const std::vector<uint32_t> &others) {
+    const bool r = std::none_of(others.begin(), others.end(), is_muted);
+    hx::rec("voice::none_muted [%s] -> %d", ids(others).c_str(), int(r));
+    return r;
+}
+void set_all_muted(const std::vector<uint32_t> &others, bool on) {
+    hx::rec("voice::set_all_muted [%s] %d", ids(others).c_str(), int(on));
+    for (uint32_t id : others) {
+        if (on && !is_muted(id)) st.muted.push_back(id);
+        if (!on) st.muted.erase(std::remove(st.muted.begin(), st.muted.end(), id), st.muted.end());
+    }
+}
+#endif
 }  // namespace voice
 
 // progression.cpp
 void progression_publish() { hx::rec("progression_publish"); }
 void progression_publish_career() { hx::rec("progression_publish_career"); }   // new build only (parity A 2.1)
+#ifndef u2mp   // new build: Players Met rows replace the recent players (parity-g-friends.md G1, f11e480)
+std::vector<std::string> progression_players_met() {   // at most 50 rows (progression.h, store kMetShown)
+    hx::rec("progression_players_met");
+    std::vector<std::string> v = st.recent;
+    if (v.size() > 50) v.resize(50);
+    return v;
+}
+#endif
 std::vector<std::string> progression_recent_players(size_t max) {
     hx::rec("progression_recent_players %zu", max);
     std::vector<std::string> v = st.recent;

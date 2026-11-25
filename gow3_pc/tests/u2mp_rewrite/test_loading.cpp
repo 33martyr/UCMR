@@ -101,6 +101,7 @@ struct Queued {
 std::vector<Queued> queue;
 const uint8_t *cur_glyph = nullptr;
 const uint8_t *last_layout_desc = nullptr;
+int cur_side = 0;   // the side step() runs: 0 old, 1 new
 
 using CB = float(G *)(void *, uint8_t *);
 using FrameFn = uint64_t(G *)(void *, uint64_t, uint64_t);
@@ -214,7 +215,13 @@ G int32_t f_get38(uint8_t *l) {
     hx::rec("list_last %s", W(l));
     return 7;
 }
-G void f_slot_quad(void *ctx, void *list, uint8_t *quad, int slot) {
+// The PS4 0x5b4e90 takes (ctx, list, int slot, u8 *quad): it compares edx with 10 and 8 (0x5b4ebe, 0x5b4ed3) and
+// keeps rcx as the quad. Commit 49e7b63 (2026-11-16, in 9fd6134; spec loading.md, the 0x5b4e90 row and step 7 of
+// the card draw) changed the call to that order; the old code passed (ctx, list, quad, slot). The fake reads each
+// side's own order and records both the same way.
+G void f_slot_quad(void *ctx, void *list, uint64_t a2, uint64_t a3) {
+    uint8_t *quad = reinterpret_cast<uint8_t *>(uintptr_t(cur_side == 0 ? a2 : a3));
+    const int slot = int(uint32_t(cur_side == 0 ? a3 : a2));
     hx::rec("slot_quad ctx=%s list=%s slot=%d quad[al%d]=%s", W(ctx), W(list), slot, al(quad, 16), words(quad, 0x110).c_str());
 }
 G void f_mat_quad(uint8_t *ctx48, uint64_t *info, uint8_t *quad) {
@@ -283,6 +290,31 @@ std::vector<uint8_t> cmp_image() {
     return s;
 }
 
+// Commit 49e7b63 (2026-11-16, in 9fd6134) added to the Playing::Enter hook (slot 4) a repair of the curve copied
+// from DC c85e199d at 0x1139fe0 ("a zero count divides by zero in StartNetGame", loading.cpp kCurve): before and
+// after the original call, a count <= 0 is logged and the curve set to count 5 with its 0x2c bytes after the count
+// zeroed. The old code has no such repair, so where the old side calls the original of slot 4 (f_orig<4> /
+// f_chain<4>, only reached through that hook) the expected record gets the new log line before it and the expected
+// image the repaired curve. The original does not touch the curve here, so the check after it finds count 5.
+constexpr uint64_t kCurve = 0x1139fe0;
+void curve_expected(const std::vector<uint8_t> &before, std::vector<std::string> &r, std::vector<uint8_t> &img) {
+    int32_t count;
+    std::memcpy(&count, before.data() + kCurve, 4);
+    bool repaired = false;
+    for (size_t i = 0; i < r.size(); ++i) {
+        if (count > 0) break;
+        if (r[i].rfind("original 4 state=", 0) != 0 && r[i].rfind("chained 4 state=", 0) != 0) continue;
+        r.insert(r.begin() + long(i), "log playing: curve count " + std::to_string(count) +
+                                          ", using the 5-entry fallback");
+        count = 5;
+        repaired = true;
+    }
+    if (!repaired) return;
+    const int32_t five = 5;
+    std::memcpy(img.data() + kCurve, &five, 4);
+    std::memset(img.data() + kCurve + 4, 0, 0x2c);
+}
+
 bool step(const std::string &name, const std::function<void(Mod &)> &op) {
     std::vector<uint8_t> s0(hx::mem, hx::mem + hx::kImageSize);
     const long long c0 = hx::fake_clock_ns;
@@ -293,11 +325,13 @@ bool step(const std::string &name, const std::function<void(Mod &)> &op) {
         hx::fake_clock_ns = c0;
         hx::calls.clear();
         queue.clear();
+        cur_side = side;
         op(mods[side]);
         rec[side] = std::move(hx::calls);
         hx::calls.clear();
         img[side] = cmp_image();
     }
+    curve_expected(s0, rec[0], img[0]);
     const bool ok = hx::same(name.c_str(), rec[0], rec[1], &img[0], &img[1]);
     if (ok) {
         std::printf("PASS %s (%zu calls)\n", name.c_str(), rec[0].size());
@@ -410,7 +444,10 @@ void stubs_runtime() {
     hx::stub(0xa15e70, (void *)&f_dc);
     hx::stub(0xcddc00, (void *)&f_text);
     hx::stub(0x64abd0, (void *)&f_desc);
-    hx::stub(0x5b5450, (void *)&f_item_text);
+    // The new menu_text_in_rect (514bcfe) checks fItemText's prologue (55 48 89 e5, as in the PS4 1.02 image) on its
+    // first call: keep those bytes and the frame balanced (push rbp; mov rbp,rsp; pop rbp), then enter the stub.
+    bytes(0x5b5450, {0x55, 0x48, 0x89, 0xe5, 0x5d});
+    hx::stub(0x5b5455, (void *)&f_item_text);
     hx::stub(0x5b5920, (void *)&f_item_desc);
     hx::stub(0x5a2670, (void *)&f_layout);
     hx::stub(0x5b4e90, (void *)&f_slot_quad);

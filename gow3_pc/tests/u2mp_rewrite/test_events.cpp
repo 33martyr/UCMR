@@ -85,6 +85,17 @@ void check(const std::string &what, const std::vector<std::string> &a, const std
         hx::same((G->name + " [" + what + "]").c_str(), a, b, ia, ib);
     }
 }
+// A check of the new code alone (behaviour the old code did not have; the comment at each use names the commit /
+// spec section). On failure the record of the new code is printed.
+void expect(bool ok, const std::string &what) {
+    ++G->cases;
+    ++total_cases;
+    if (ok) return;
+    if (++G->fails <= 3) {
+        std::printf("FAIL %s [%s] (new only)\n", G->name.c_str(), what.c_str());
+        for (const std::string &l : hx::calls) std::printf("  new: %s\n", l.c_str());
+    }
+}
 
 std::string hex(const void *p, size_t n) {
     static const char d[] = "0123456789abcdef";
@@ -590,6 +601,71 @@ void scen_event() {
         }
 }
 
+// Commit 26ae7d5 and parity-c-match.md 3: the new NetEventEvent Read and Write log every message
+// (`net event 47 in/out ...`, the argument types as on the wire, `(dropped)` for types other than 1/2/3/6,
+// ` [read failed]` after a failed Read), up to 400 lines per process; the old code has no such line. Checked here
+// for the new code alone, with the rest of each record compared against the old code. It runs before any other
+// type 47 Read / Write and uses the 400 lines up, so the old-vs-new comparisons after it see no diagnostic line and
+// compare everything else unchanged.
+void scen_event47_log() {
+    set_games({});
+    known_sender = 0x1234;
+    begin("N1 type 47 diagnostic log, 400 lines (new only: commit 26ae7d5, parity-c-match 3)");
+    int lines = 0;
+    // one Write / Read of each side: the new record must be the old one with `line` in front
+    auto with_line = [&](const std::string &what, bool write, const Ev &ev, const Words &w, uint32_t max,
+                         const std::string &line) {
+        const auto a = write ? do_write(OLD, 47, ev, w, 0, max) : do_read(OLD, 47, ev, w, 0, max);
+        const auto b = write ? do_write(NEW, 47, ev, w, 0, max) : do_read(NEW, 47, ev, w, 0, max);
+        ++lines;
+        expect(!b.empty() && b[0] == "log " + line, what + ": the diagnostic line");
+        check(what + ": the rest", a, std::vector<std::string>(b.begin() + (b.empty() ? 0 : 1), b.end()));
+    };
+    const std::string head = "net event 47 %s: target a0a0a0a0 message 005eed1d sender 00001234, ";
+    auto msg = [&](const char *dir, const std::string &tail) {
+        std::string h = head;
+        h.replace(h.find("%s"), 2, dir);
+        return h + tail;
+    };
+    const std::string args4 = "4 arg(s): 1:00000001 2:0001fe02 3:0002fd03 6:0003fc04";
+    const std::string args8 = "8 arg(s): 1:00000001 2:0001fe02 3:0002fd03 6:0003fc04 1:00000001 0:0005fa06(dropped) "
+                              "4:0006f907(dropped) 15:0007f808(dropped)";
+    const Words clean(kWords, 0);
+    with_line("write count 4", true, typical(47, 4), clean, 1280, msg("out", args4));
+    with_line("write count 8", true, typical(47, 8), clean, 1280, msg("out", args8));
+    with_line("write count 9 (8 sent)", true, typical(47, 9), clean, 1280, msg("out", args8));
+    with_line("write count -1 (0 sent)", true, typical(47, -1), clean, 1280, msg("out", "0 arg(s):"));
+    // Reads: the stream typical(47, 8) writes, built here bit by bit
+    const uint32_t types[8] = {1, 2, 3, 6, 1, 0, 4, 15};
+    const uint32_t raws[8] = {1, 0x1fe02, 0x2fd03, 0x3fc04, 1, 0x5fa06, 0x6f907, 0x7f808};
+    for (uint32_t count : {8u, 4u}) {
+        BW bw;
+        bw.put(0xa0a0a0a0, 32).put(0x5eed1d, 32).put(0x1234, 32).put(count, 4);
+        for (uint32_t i = 0; i < count; ++i) bw.put(types[i], 4).put(raws[i], 32);
+        Ev pre;
+        fill(pre, 0x5a);
+        if (count == 8) {
+            with_line("read count 8", false, pre, bw.w, bw.n, msg("in", args8));
+            with_line("read maxBits 0", false, pre, bw.w, 0,
+                      "net event 47 in: target 00000000 message 00000000 sender 00000000, 0 arg(s): [read failed]");
+        } else {
+            // cut inside the 2nd argument's value (bit 150: header 100 bits, 36 per argument): what was read so far,
+            // zeros for the rest
+            with_line("read count 4 cut 150", false, pre, bw.w, 150,
+                      msg("in", "4 arg(s): 1:00000001 2:00000000 0:00000000(dropped) 0:00000000(dropped) [read failed]"));
+        }
+    }
+    // the rest of the 400 lines, then silence
+    const Ev e4 = typical(47, 4);
+    bool all = true;
+    for (; lines < 400; ++lines) {
+        const auto b = do_write(NEW, 47, e4, clean, 0, 1280);
+        all = all && b.size() == 4 && b[0] == "log " + msg("out", args4);
+    }
+    expect(all, "lines 8 .. 400: one line per Write");
+    cmp_write("write 401: no line (old and new records equal)", 47, e4, clean, 0, 1280);
+}
+
 // 6.13 types 52 / 53 flag bytes
 void scen_flags() {
     set_games({});
@@ -869,8 +945,10 @@ void record_game(const Side &s) {
             !g.lookup_process ? "null" : g.lookup_process == s.lookup_process ? "installed" : "other");
 }
 
-// Runs `body` for old and new on the same image (built by `setup`) and compares calls and image.
-void img_case(const std::string &what, const std::function<void()> &setup, const std::function<void(Side &)> &body) {
+// Runs `body` for old and new on the same image (built by `setup`) and compares calls and image. `expected_old`,
+// when set, maps the old record to the form a documented change gives it (the comment at each use names it).
+void img_case(const std::string &what, const std::function<void()> &setup, const std::function<void(Side &)> &body,
+              const std::function<void(std::vector<std::string> &)> &expected_old = {}) {
     setup();
     const std::vector<uint8_t> raw(hx::mem, hx::mem + hx::kImageSize);
     const Fake f0 = fake;
@@ -885,6 +963,7 @@ void img_case(const std::string &what, const std::function<void()> &setup, const
         rec[i] = hx::calls;
         img[i] = hx::snapshot();
     }
+    if (expected_old) expected_old(rec[0]);
     check(what, rec[0], rec[1], &img[0], &img[1]);
 }
 
@@ -909,6 +988,125 @@ void spawn_setup() {
     hx::put<uint32_t>(oNpc + 0x68, 0xffffffff);
     hx::put<uint32_t>(oNpc + 0x3708, 0x37083708);
     hx::put<uint64_t>(oProc + 0x38, 0x1122334455667788ull);
+    // A match client (context set, own id 1, host id 2). parity-c-match.md 2.1 PLATFORM / events.md 4.8 step 0: the
+    // new Apply stops at once on the match host, and on a client with no recorded local NPC runs the PS3 path that
+    // S15-S21 compare. The old code does not read these bytes. The host stop and the binding: scen_npc_bind.
+    hx::put<uint64_t>(kMatch + 0x10, 1);
+    hx::put<uint32_t>(kMatch + 0xb00, 1);
+    hx::put<uint32_t>(kMatch + 0xb04, 2);
+}
+
+// Commit 70949df, events.md 4.8 step 1 (parity-c-match.md 2.1 KEPT): the same stop after the lookup, with the log
+// line naming the deliberate difference from PS3.
+void npc_exists_text(std::vector<std::string> &r) {
+    const std::string head = "log NetEventNpcSpawn: npc ", tail = " already exists";
+    for (std::string &l : r)
+        if (l.rfind(head, 0) == 0 && l.size() > head.size() + tail.size() &&
+            l.compare(l.size() - tail.size(), tail.size(), tail) == 0)
+            l += "; not spawning a second one (deliberate difference from PS3)";
+}
+
+// ---- NpcSpawn client binding (new only: parity-c-match.md 2.1 PLATFORM, events.md 4.8 step 0) -------------------
+// The host stops at once; a client binds the event to a live local NPC from the same spawner (writes the npc id,
+// registers the tracker once) instead of spawning; a despawned NPC or one whose process id changed is never bound.
+// The log texts are the ones of events.cpp bind_remote_npc / record_local_npc (the spec names none); each is printed
+// for the first 8 cases of the process. This scenario runs before S15-S21 and uses the 8 "no local npc" lines up
+// (the last ones compared against the old PS3 path with the line in front), so S15-S21 compare the PS3 path alone.
+constexpr uint64_t gNpcSendSpawn = 0x6133d0, gNpcSendDespawn = 0x6135a0, oInfo = 0x1718000;
+U2MP_GUEST void f_send_spawn(void *info, void *params, void *npc) {
+    hx::rec("NpcSendSpawn(%s, %s, %s)", W(info).c_str(), W(params).c_str(), W(npc).c_str());
+}
+U2MP_GUEST void f_send_despawn(uint32_t name) { hx::rec("NpcSendDespawn(%08x)", name); }
+using LocalInitFn = void(U2MP_GUEST *)(void *, void *, void *);
+using LocalDespawnFn = void(U2MP_GUEST *)(uint32_t);
+
+void scen_npc_bind() {
+    begin("N2 NpcSpawn host stop and client binding (new only: parity-c-match 2.1, events.md 4.8 step 0)");
+    LocalInitFn init = nullptr;
+    LocalDespawnFn despawn = nullptr;
+    auto setup = [&] {
+        spawn_setup();
+        fake = Fake{};
+        fake.spawners = {{0xaaaa0001, oSpawner}, {0xbbbb0002, oSecond}};
+        hx::stub(gNpcSendSpawn, (void *)f_send_spawn);
+        hx::stub(gNpcSendDespawn, (void *)f_send_despawn);
+        hx::put<uint64_t>(oInfo + 0x40, hx::addr(oSpawner));   // SpawnInfo +0x40: the spawner
+        hx::put<uint32_t>(oSpawner + 0x28, 0xaaaa0001);         // its key: the event's spawner id
+        hx::put<uint32_t>(oNpc + 0x44, 0x77);                   // the local NPC's process id
+        int n = 0;
+        u2mp::install_npcsync(n);
+        expect(n == 2, "install_npcsync: 2 calls retargeted");
+        init = reinterpret_cast<LocalInitFn>(hx::retarget_host(0x23bb4c));
+        despawn = reinterpret_cast<LocalDespawnFn>(hx::retarget_host(0x240fd2));
+        NEW.game->lookup_process = NEW.lookup_process;
+        hx::calls.clear();
+        hx::recording = true;
+    };
+    auto apply = [] { port(NEW, 37).apply(hx::mem + oEv, hx::mem + 0x1234); };
+    const std::string no_local = "log npc sync: no local npc for 00001092, spawning it";
+    int no_local_lines = 0;
+
+    for (int by_ids = 0; by_ids < 2; ++by_ids) {
+        setup();
+        if (by_ids) hx::put<uint32_t>(kMatch + 0xb00, 2);   // own id = host id
+        else hx::put<uint64_t>(kMatch + 0x10, 0);           // no match context
+        const auto before = hx::snapshot();
+        apply();
+        expect(hx::calls.empty() && hx::snapshot() == before,
+               by_ids ? "host by equal ids: no call, no log, image unchanged" : "host by context 0: no call, no log, image unchanged");
+    }
+
+    setup();
+    if (!init || !despawn) {
+        expect(false, "install_npcsync gave the two hooks");
+        return;
+    }
+    init(hx::mem + oInfo, hx::mem + oOther, hx::mem + oNpc);
+    expect(hx::calls == std::vector<std::string>{"NpcSendSpawn(img+0x1718000, img+0x1712000, img+0x1713000)",
+                                                 "log npc sync: local 00000077 key aaaa0001"},
+           "client local init: the game's send, then the NPC recorded");
+    auto img = hx::snapshot();
+    hx::calls.clear();
+    apply();
+    expect(hx::calls == std::vector<std::string>{"AddNetNpcTracker(img+0x113b760, img+0x1713000, 37083708) -> 1",
+                                                 "log npc sync: bound 00001092 to a local npc"},
+           "client bind: tracker registered, no lookup, no spawn");
+    uint32_t id = 4242;
+    std::memcpy(img.data() + oNpc + 0x68, &id, 4);
+    expect(hx::snapshot() == img, "client bind: only the npc id at npc+0x68 written");
+    hx::calls.clear();
+    apply();
+    expect(hx::calls.empty() && hx::snapshot() == img, "same npc id again: already bound, nothing done");
+    despawn(4242);
+    expect(hx::calls.empty(), "client despawn: not sent");
+    apply();
+    ++no_local_lines;
+    expect(hx::calls.size() > 1 && hx::calls[0] == no_local && hx::calls[1].rfind("LookupProcessByUniqueId(", 0) == 0,
+           "after the despawn: not bound again, the PS3 path");
+
+    setup();
+    init(hx::mem + oInfo, hx::mem + oOther, hx::mem + oNpc);
+    hx::put<uint32_t>(oNpc + 0x44, 0x78);   // the recorded NPC's process id changed
+    hx::calls.clear();
+    apply();
+    ++no_local_lines;
+    expect(hx::calls.size() > 1 && hx::calls[0] == no_local && hx::calls[1].rfind("LookupProcessByUniqueId(", 0) == 0,
+           "process id changed: never bound, the PS3 path");
+
+    // the remaining "no local npc" lines: the old PS3 path with the line in front; after 8 lines the same as old
+    auto body = [](Side &s) {
+        s.game->lookup_process = s.lookup_process;
+        port(s, 37).apply(hx::mem + oEv, hx::mem + 0x1234);
+    };
+    auto plain = [] {
+        spawn_setup();
+        fake = Fake{};
+        fake.spawners = {{0xaaaa0001, oSpawner}, {0xbbbb0002, oSecond}};
+    };
+    for (; no_local_lines < 8; ++no_local_lines)
+        img_case("client, no local NPC: line " + std::to_string(no_local_lines + 1) + " of 8, then the PS3 path", plain, body,
+                 [&](std::vector<std::string> &r) { r.insert(r.begin(), no_local); });
+    img_case("client, no local NPC, after 8 lines: the PS3 path alone", plain, body);
 }
 
 void scen_npc_spawn() {
@@ -954,7 +1152,8 @@ void scen_npc_spawn() {
                  [&](Side &s) {
                      s.game->lookup_process = c.lk == LkInstalled ? s.lookup_process : nullptr;
                      port(s, 37).apply(hx::mem + oEv, hx::mem + 0x1234);
-                 });
+                 },
+                 npc_exists_text);
     // the Apply through the vtable slot the install wrote
     img_case("Apply via the installed slot 4", [&] {
         spawn_setup();
@@ -1323,7 +1522,8 @@ int main() {
     hx::clear();
     hx::bind_both();
     scen_table();
-    scen_write_overflow();   // first: owns the once-per-process overflow log
+    scen_event47_log();      // before any other type 47 Read / Write: owns the new code's 400 diagnostic lines
+    scen_write_overflow();   // first overflow: owns the once-per-process overflow log
     scen_round_trip_and_cuts();
     scen_time_read();
     scen_encodings();
@@ -1332,6 +1532,7 @@ int main() {
     scen_flags();
     scen_random();
     capture_installed();
+    scen_npc_bind();   // before S15-S21: owns the new code's 8 "no local npc" log lines
     scen_npc_spawn();
     scen_game_functions();
     scen_connections();

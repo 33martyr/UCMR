@@ -268,12 +268,28 @@ static const Check kNetanimChecks[] = {
                 0xc5, 0xf8, 0x29, 0x47, 0x20, 0xc6, 0x47, 0x30, 0x00, 0xc3}},
 };
 
+// More 1.02 bytes the current netanim.cpp checks before it installs (the old one does not read them): the anim
+// index site 0x66b637, the prefill site 0x5f3d63, the depth site 0x5f3dd1, the writer's three width constants
+// 0x6367cb / 0x6368a0 / 0x6368b7 (all part of the stream check), and the two bit count sites 0x60e296 / 0x60e9f3
+// (padding). Values read from the real PS4 1.02 image (boot-linked.bin); always written intact.
+static const Check kNetanimNewChecks[] = {
+    {0x66b637, {0x4c, 0x8d, 0x35, 0x3c, 0xc7, 0x81, 0x00}},
+    {0x5f3d63, {0x48, 0x8d, 0x0d, 0x16, 0x6f, 0xa1, 0x00}},
+    {0x5f3dd1, {0x41, 0x8b, 0x47, 0x0c, 0x49, 0x8b, 0x0f}},
+    {0x6367cb, {0x8d, 0x42, 0x04}},
+    {0x6368a0, {0x83, 0xf9, 0x03}},
+    {0x6368b7, {0x83, 0xc0, 0x04}},
+    {0x60e296, {0x41, 0x89, 0x84, 0x24, 0xbc, 0x00, 0x00, 0x00}},
+    {0x60e9f3, {0x89, 0x83, 0xbc, 0x00, 0x00, 0x00}},
+};
+
 // writes the 1.02 bytes; check `broken` gets byte `at` flipped
 static void netanim_bytes(uint8_t *base, int broken = -1, size_t at = 0) {
     for (int i = 0; i < 10; i++) {
         put_bytes(base, kNetanimChecks[i].off, kNetanimChecks[i].bytes);
         if (i == broken) base[kNetanimChecks[i].off + at] ^= 0x01;
     }
+    for (const Check &c : kNetanimNewChecks) put_bytes(base, c.off, c.bytes);
 }
 
 static int install_netanim() {

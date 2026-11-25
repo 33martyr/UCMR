@@ -126,7 +126,8 @@ std::string w(const void *p) { return hx::where(p); }
 constexpr uint64_t T = 0x105e370, NI = 0x104f1c8, NGM = 0x113b760, NPD = 0x11474f8, NETSM = 0x14ce97c,
                    TEXTDB = 0x1066660;
 constexpr uint64_t fStart = 0x655c40, fPanel = 0x65e890, fStatus = 0x659a90, fPlaylist = 0x6562d0,
-                   fMet = 0x65bcd0, fVolume = 0x65f3f0, fFriends = 0x65bbb0, fJoin = 0x659590;
+                   fMet = 0x65bcd0, fVolume = 0x65f3f0, fFriends = 0x65bbb0, fJoin = 0x659590,
+                   fFriendCard = 0x65bbc0;   // cond 38, stripped like fFriends (PS4 1.02: c3 66 66 66 66)
 constexpr uint64_t fTextFind = 0xcddc00, fDc = 0xa15e70, fSetNetGame = 0x63dc30;
 constexpr uint32_t kTraceConds[12] = {105, 77, 78, 134, 40, 41, 80, 82, 135, 108, 109, 110};
 constexpr uint64_t TRACE_FN = 0x1600000;   // + 0x40 * k
@@ -253,6 +254,44 @@ std::vector<uint8_t> masked_snapshot() {
     return v;
 }
 
+// Documented changes made after the rewrite: the old record gets exactly their new form before the comparison.
+uint32_t hex_u32(const std::string &h, size_t at) {   // little-endian u32 at byte `at` of a hex dump
+    uint32_t v = 0;
+    for (int b = 3; b >= 0; --b) v = v << 8 | uint32_t(std::stoul(h.substr(2 * (at + size_t(b)), 2), nullptr, 16));
+    return v;
+}
+void put_hex_u32(std::string &h, size_t at, uint32_t v) {
+    for (int b = 0; b < 4; ++b, v >>= 8) h.replace(2 * (at + size_t(b)), 2, hex(&v, 1));
+}
+void expected_old(std::vector<std::string> &r) {
+    for (auto &l : r) {
+        // f11e480 (spec parity-g-friends.md G1): the Players Met query takes progression_players_met() instead of
+        // progression_recent_players(50); the stand-ins answer the same rows.
+        static const std::string recent = "progression_recent_players 50 -> ";
+        if (l.rfind(recent, 0) == 0) {
+            l = "progression_players_met -> " + l.substr(recent.size());
+            continue;
+        }
+        // 475fba8 (playlist limits; spec parity-d-flow1.md 2.2): each playlist record carries the PS3 limits,
+        // +0x18 the maximum player count and +0x1c the maximum party size: 3 / 3 when every game type is co-op
+        // (4, 8, 9, 12), else 10 / 5. The old build left both 0.
+        static const std::string ngm = "ngm playlist[";
+        const size_t eq = l.find("] = ");
+        if (l.rfind(ngm, 0) != 0 || eq == std::string::npos || l.size() - (eq + 4) != 2 * 0x6c) continue;
+        std::string h = l.substr(eq + 4);
+        if (hex_u32(h, 0x18) != 0 || hex_u32(h, 0x1c) != 0) continue;   // not the old form: left to the comparison
+        const int32_t n = int32_t(hex_u32(h, 0x68));
+        bool coop = n > 0;
+        for (int32_t i = 0; i < n && i < 8; ++i) {
+            const int32_t t = int32_t(hex_u32(h, 0x48 + 4 * size_t(i)));
+            coop = coop && (t == 4 || t == 8 || t == 9 || t == 12);
+        }
+        put_hex_u32(h, 0x18, coop ? 3 : 10);
+        put_hex_u32(h, 0x1c, coop ? 3 : 5);
+        l = l.substr(0, eq + 4) + h;
+    }
+}
+
 void run(const std::string &name, const std::function<void(const Api &)> &body) {
     std::vector<std::string> c[2];
     std::vector<uint8_t> img[2];
@@ -265,6 +304,7 @@ void run(const std::string &name, const std::function<void(const Api &)> &body) 
         c[side] = hx::calls;
         img[side] = masked_snapshot();
     }
+    expected_old(c[0]);
     const bool ok = hx::same(name.c_str(), c[0], c[1], &img[0], &img[1]);
     if (ok) std::printf("PASS %s (%zu records)\n", name.c_str(), c[0].size());
     const char *dump = std::getenv("MENUS_DUMP");
@@ -277,8 +317,41 @@ void run(const std::string &name, const std::function<void(const Api &)> &body) 
     results.push_back({name, ok});
 }
 
+// New-only scenarios: a path a documented change rewrote runs on the new build alone and is checked against the
+// spec's exact values (EXPECT). The old build does not run it.
+const char *g_scenario = "";
+int g_failed_checks = 0;
+#define EXPECT(c)                                                                \
+    do {                                                                         \
+        if (!(c)) {                                                              \
+            std::printf("FAIL %s (line %d): %s\n", g_scenario, __LINE__, #c);    \
+            ++g_failed_checks;                                                   \
+        }                                                                        \
+    } while (0)
+void run_new(const std::string &name, const std::function<void(const Api &)> &body) {
+    hx::clear();
+    hx::bind_both();
+    reset_script();
+    g_scenario = name.c_str();
+    const int before = g_failed_checks;
+    body(A_new);
+    const bool ok = g_failed_checks == before;
+    if (ok) std::printf("PASS %s (new only, %zu records)\n", name.c_str(), hx::calls.size());
+    else hx::failures++;
+    if ((!ok && std::getenv("HX_VERBOSE")) || std::getenv("MENUS_DUMP"))
+        for (auto &l : hx::calls) std::printf("   | %s\n", l.c_str());
+    std::fflush(stdout);
+    results.push_back({name, ok});
+}
+// How many records equal `line`.
+int lines(const std::string &line) {
+    int n = 0;
+    for (auto &l : hx::calls) n += l == line;
+    return n;
+}
+
 // ---- menus image ---------------------------------------------------------------------------------------
-enum { E50 = 0, E133, E49, E55, E39, E104, E36, E3, ETRACE, ETERM = ETRACE + 12 };
+enum { E50 = 0, E133, E49, E55, E39, E104, E36, E3, E38, ETRACE, ETERM = ETRACE + 12 };
 
 void entry(int i, uint32_t cond, uint64_t fn_off) {
     put<uint32_t>(T + 0x18 * i, cond);
@@ -296,6 +369,7 @@ void menus_image() {
     entry(E104, 104, fVolume);
     entry(E36, 36, fFriends);
     entry(E3, 3, fJoin);
+    entry(E38, 38, fFriendCard);   // the PS4 1.02 table has it (entry 26); menus.cpp replaces it since b2782c2
     for (int k = 0; k < 12; ++k) entry(ETRACE + k, kTraceConds[k], TRACE_FN + 0x40 * (k == 10 ? 9 : k));   // 108, 109 share
     hx::stub(fStart, reinterpret_cast<void *>(&orig_q<50>));
     hx::stub(fPanel, reinterpret_cast<void *>(&orig_q<133>));
@@ -306,6 +380,7 @@ void menus_image() {
     static const uint8_t ret[] = {0xc3, 0x66, 0x66, 0x66, 0x66};
     std::memcpy(mem + fFriends, ret, 5);
     std::memcpy(mem + fJoin, ret, 5);
+    std::memcpy(mem + fFriendCard, ret, 5);
     stub_traces(std::make_index_sequence<12>());
     hx::stub(fTextFind, reinterpret_cast<void *>(&text_find));
     hx::stub(fDc, reinterpret_cast<void *>(&dc_lookup));
@@ -313,9 +388,42 @@ void menus_image() {
     put<int32_t>(NETSM, 2);
 }
 
+// Commit b2782c2 (parity group B, spec parity-b-menus.md: friend card) added one install step: after LIST_FRIENDS
+// and the join list, install_menus replaces the stripped friend card query (cond 38, 0x65bbc0) the same way. The
+// old build lacks exactly that step, so its run gets it here before the comparison: the line the step logs, the
+// replacement (a stub, masked like every stub) and its count. Everything else is compared as recorded.
+void U2MP_GUEST friend_card_not_in_old(uint8_t *) { rec("friend card query: not in the old build"); }
+
+void b2782c2_friend_card_step(int &n) {
+    // the step runs only when install_menus reached its stripped queries (the join list is the last one before it)
+    const std::string last = hx::calls.empty() ? "" : hx::calls.back();
+    if (last.find("0x659590") == std::string::npos) return;
+    bool found = false;
+    for (int i = 0; i < 132; ++i) {   // the first cond 38 entry before the end marker (fn 0)
+        if (get<uint64_t>(T + 0x18 * i + 8) == 0) break;
+        if (get<uint32_t>(T + 0x18 * i) != 38) continue;
+        static const uint8_t ret[] = {0xc3, 0x66, 0x66, 0x66, 0x66};
+        // (the image is at least the table's end here, so the 5 bytes are inside it)
+        found = get<uint64_t>(T + 0x18 * i + 8) == addr(fFriendCard) && std::memcmp(mem + fFriendCard, ret, 5) == 0;
+        break;
+    }
+    if (!found) {
+        rec("log friend card query at 0x65bbc0: not the stripped query this port expects, left alone");
+        return;
+    }
+    rec("replace_function 0x65bbc0 5 friend card query");
+    if (hx::fails_at(fFriendCard)) {
+        rec("replace_function 0x65bbc0 failed (test)");
+        return;
+    }
+    hx::stub(fFriendCard, reinterpret_cast<void *>(&friend_card_not_in_old));
+    n += 1;
+}
+
 void inst_menus(const Api &a) {
     int n = 100;
     a.install_menus(n);
+    if (a.install_menus == A_old.install_menus) b2782c2_friend_card_step(n);
     rec("installed %d", n);
 }
 void menus_ready(const Api &a) {
@@ -326,7 +434,7 @@ void menus_ready(const Api &a) {
 using QueryFn = void(U2MP_GUEST *)(uint8_t *);
 
 // One query call as the game makes it: through the table entry `e`.
-void ask(int e, uint32_t op, int32_t v = 0, uint32_t t = 0, uint32_t col = 0) {
+void ask(int e, uint32_t op, int32_t v = 0, uint32_t t = 0, uint32_t col = 0, uint32_t element = 0xc1c1c1c1) {
     uint8_t *q = mem + Q;
     std::memset(q, 0xc1, 0x80);
     put<uint32_t>(Q, op);
@@ -334,6 +442,7 @@ void ask(int e, uint32_t op, int32_t v = 0, uint32_t t = 0, uint32_t col = 0) {
     put<uint32_t>(Q + 8, t);
     put<uint32_t>(Q + 0x0c, 0x5a5a5a5a);
     put<uint64_t>(Q + 0x40, 0);
+    put<uint32_t>(Q + 0x50, element);
     put<uint32_t>(Q + 0x54, col);
     rec("ask entry %d op %u v %d t %u col %u", e, op, v, t, col);
     const uint64_t fn = get<uint64_t>(T + 0x18 * e + 8);
@@ -343,6 +452,16 @@ void ask(int e, uint32_t op, int32_t v = 0, uint32_t t = 0, uint32_t col = 0) {
     if (p && in_img(p)) text += " @" + w(reinterpret_cast<void *>(p));
     put<uint64_t>(Q + 0x40, 0);
     rec("  -> q %s text %s", hex(q, 0x60).c_str(), text.c_str());
+}
+// One query (as ask), for the new-only checks: q+4 afterwards and the text as ask records it ("null" or quoted).
+struct Answer {
+    int32_t v;
+    std::string text;
+};
+Answer answer(int e, uint32_t op, int32_t v = 0, uint32_t col = 0, uint32_t element = 0xc1c1c1c1) {
+    ask(e, op, v, 0, col, element);
+    const std::string &l = hx::calls.back();
+    return {get<int32_t>(Q + 4), l.substr(l.find(" text ") + 6)};
 }
 // every plain-list op, rows -1..n+1, column 1
 void list_sweep(int e, int rows) {
@@ -798,25 +917,108 @@ void menus_query_scenarios() {
         ask(E49, 2, 0);
         rec("ni+0x10 %d", get<int32_t>(NI + 0x10));
     });
-    run("9a cond 36 online: no friends", [](const Api &a) {
+    // Commit b2782c2 (parity group B; spec menus.md 1.9 "Online", parity-b-menus.md 3) made the online friends list
+    // the PS3 one: column 3 status block, op 3 images, the cursor following the selected friend, op 8 refresh, and
+    // the op log. That path runs on the new build only, checked against the spec (op 1, unchanged, stays compared
+    // in 9d; the LAN form in 10a-10c).
+    run_new("9a cond 36 online (b2782c2, new only): no friends", [](const Api &a) {
         menus_ready(a);
         s.online = true;
-        list_sweep(E36, 2);
+        EXPECT(answer(E36, 1).text == "\"Friends (0 of 0 online)\"");
+        EXPECT(answer(E36, 2, -1).text == "\"\"");
+        EXPECT(answer(E36, 2, 0).text == "\"Browse Online Games\"");
+        EXPECT(answer(E36, 2, 0, 3).text == "\"\"");
+        EXPECT(answer(E36, 2, 1).text == "\"No RPCN friends yet. Add friends in the launcher.\"");
+        EXPECT(answer(E36, 2, 1, 3).text == "\"\"");
+        EXPECT(answer(E36, 2, 1, 1).text == "\"\"");
+        EXPECT(answer(E36, 2, 2).text == "\"\"");
+        EXPECT(answer(E36, 5).v == 1);
+        EXPECT(answer(E36, 7).v == 1);
+        answer(E36, 9, 1);
+        EXPECT(answer(E36, 4).v == 1);
+        answer(E36, 9, 1000);
+        EXPECT(answer(E36, 4).v == 1);   // clamped to count - 1
+        answer(E36, 9, -2);
+        EXPECT(answer(E36, 4).v == 0);   // clamped to 0
+        EXPECT(lines("log friends query: op 4 row 0 cur -2 rows 2") == 1);
+        answer(E36, 8);
+        EXPECT(lines("online::refresh_friend_list") == 1);
+        EXPECT(answer(E36, 4).v == 0);
+        answer(E36, 3, 1, 0, 0xf5a294f3);   // no friend row: nothing written
+        EXPECT(get<uint32_t>(Q + 8) == 0 && get<uint32_t>(Q + 0x18) == 0xc1c1c1c1u);
+        int op1 = 0;
+        for (auto &l : hx::calls) op1 += l.rfind("log friends query: op 1 ", 0) == 0;
+        EXPECT(op1 == 0);   // op 1 is not logged
     });
-    run("9b cond 36 online: 3 friends, 2 online", [](const Api &a) {
+    run_new("9b cond 36 online (b2782c2, new only): 3 friends, 2 online", [](const Api &a) {
         menus_ready(a);
         s.online = true;
         s.friends = 3;
         s.friend_on = {1, 0, 1};
         s.friend_rows = {"alice - online", "bob - offline", "carol - in game"};
-        list_sweep(E36, 4);
+        g_texts[0x953825d0] = "Playing another game";
+        EXPECT(answer(E36, 1).text == "\"Friends (2 of 3 online)\"");
+        EXPECT(answer(E36, 2, -1).text == "\"\"");
+        EXPECT(answer(E36, 2, 0).text == "\"Browse Online Games\"");
+        EXPECT(answer(E36, 2, 1).text == "\"alice - online\"");
+        EXPECT(answer(E36, 2, 1, 3).text == "\"Playing another game\"");   // online, not in this game
+        EXPECT(answer(E36, 2, 1, 1).text == "\"\"");
+        EXPECT(answer(E36, 2, 2).text == "\"bob - offline\"");
+        EXPECT(answer(E36, 2, 2, 3).text == "\"\"");   // offline
+        EXPECT(answer(E36, 2, 3).text == "\"carol - in game\"");
+        EXPECT(answer(E36, 2, 4).text == "\"\"");
+        EXPECT(answer(E36, 5).v == 3);
+        EXPECT(answer(E36, 7).v == 1);
+        // op 3: the status dot of a friend row (1 online, 0 offline); element 0 outside this game: nothing
+        answer(E36, 3, 1, 0, 0xf5a294f3);
+        EXPECT(get<uint32_t>(Q + 8) == 0x20 && get<uint64_t>(Q + 0x10) == 0 && get<uint32_t>(Q + 0x18) == 1 &&
+               get<uint64_t>(Q + 0x1c) == 0 && get<int32_t>(Q + 0x24) == -1 && get<uint32_t>(Q + 0x28) == 0 &&
+               get<int32_t>(Q + 0x2c) == -1 && get<float>(Q + 0x30) == 1.0f);
+        answer(E36, 3, 2, 0, 0xf5a294f3);
+        EXPECT(get<uint32_t>(Q + 8) == 0x20 && get<uint32_t>(Q + 0x18) == 0);
+        answer(E36, 3, 1, 0, 0);
+        EXPECT(get<uint32_t>(Q + 8) == 0 && get<uint32_t>(Q + 0x18) == 0xc1c1c1c1u);
+        answer(E36, 3, 0, 0, 0xf5a294f3);   // row 0 is no friend
+        EXPECT(get<uint32_t>(Q + 8) == 0 && get<uint32_t>(Q + 0x18) == 0xc1c1c1c1u);
+        // the cursor follows the stored friend when the rows move
+        answer(E36, 9, 2);
+        EXPECT(answer(E36, 4).v == 2);
+        s.friend_rows = {"bob - offline", "alice - online", "carol - in game"};
+        EXPECT(answer(E36, 4).v == 1);
+        answer(E36, 9, 0);   // row 0: no name stored
+        EXPECT(answer(E36, 4).v == 0);
+        answer(E36, 9, 1000);
+        EXPECT(answer(E36, 4).v == 3);
+        answer(E36, 9, -2);
+        EXPECT(answer(E36, 4).v == 0);
+        // op 8: refresh, then the stored friend's row is stored with its name
+        answer(E36, 9, 3);   // carol
+        s.friend_rows = {"carol - in game", "bob - offline", "alice - online"};
+        answer(E36, 8);
+        EXPECT(lines("online::refresh_friend_list") == 1);
+        EXPECT(answer(E36, 4).v == 1);
+        s.friends = 2;   // carol gone: the stored row stays
+        s.friend_rows = {"bob - offline", "alice - online"};
+        EXPECT(answer(E36, 4).v == 1);
+        EXPECT(lines("log friends query: op 4 row 0 cur 1 rows 3") == 1);
     });
-    run("9c cond 36 online: friend_count negative", [](const Api &a) {
+    run_new("9c cond 36 online (b2782c2, new only): friend_count negative", [](const Api &a) {
         menus_ready(a);
         s.online = true;
         s.friends = -1;
         s.friend_rows = {"neg row"};
-        list_sweep(E36, 2);
+        EXPECT(answer(E36, 1).text == "\"Friends (0 of -1 online)\"");
+        EXPECT(answer(E36, 2, 0).text == "\"\"");   // count 1 + n = 0: no rows
+        EXPECT(answer(E36, 2, 1).text == "\"\"");
+        EXPECT(answer(E36, 4).v == -1);
+        EXPECT(answer(E36, 5).v == -1);
+        EXPECT(answer(E36, 7).v == 1);
+        answer(E36, 8);
+        EXPECT(lines("online::refresh_friend_list") == 1);
+        EXPECT(answer(E36, 4).v == -1);
+        EXPECT(lines("log friends query: op 4 row 0 cur -1 rows 0") == 1);
+        answer(E36, 3, 1, 0, 0xf5a294f3);
+        EXPECT(get<uint32_t>(Q + 8) == 0 && get<uint32_t>(Q + 0x18) == 0xc1c1c1c1u);
     });
     run("9d cond 36 online: long friend count title", [](const Api &a) {
         menus_ready(a);
