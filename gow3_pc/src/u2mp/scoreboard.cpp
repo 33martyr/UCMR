@@ -10,16 +10,23 @@
 // scoreboard is drawn. The call may already be wrapped by another module (loading.cpp), so we chain to whatever
 // it reached before.
 //
-// Reimplemented from the behaviour descriptions u2mp/docs/spec/gameplay.md (1), parity-m-features.md (M1, M2) and
-// parity-ticker-respawn.md (2).
+// The team lists' voice column (parity-j-voice-medals.md J4): the cell image query shows the muted icon for a muted
+// player before its own talking test, in the scoreboard's lists and in the Mute Players page's (the mute toggle of
+// that page is remaining.cpp, parity-n-remaining.md N2).
+//
+// Reimplemented from the behaviour descriptions u2mp/docs/spec/gameplay.md (1), parity-m-features.md (M1, M2),
+// parity-j-voice-medals.md (J4) and parity-ticker-respawn.md (2).
 #include <bit>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 
 #include "overlay_rules.h"
+#include "session_api.h"
 #include "u2mp_internal.h"
+#include "voice.h"
 
 
 namespace u2mp {
@@ -471,9 +478,117 @@ U2MP_GUEST uint64_t frame_hook(uint64_t a, uint64_t b, uint64_t c) {
     return result;
 }
 
+// ---- voice column muted icon (parity-j-voice-medals.md J4) ---------------------------------------------------------
+// The team list's cell image query (vtable 0x100a280 slot 15, PS4 0x5b2ac0) kept only the talking test of the voice
+// column (its tracker at [rbp-0x40] at 0x5b2cb0, the tracker's key +0x23c loaded at 0x5b2cb4, then the talking
+// record search). Every list of that vtable asks it: the scoreboard's team lists and the Mute Players lists.
+constexpr uint64_t kTeamListVtable = 0x100a280;
+constexpr unsigned kCellImageSlot = 15;
+constexpr uint64_t kCellImage = 0x5b2ac0;
+constexpr uint32_t kColumnTables = 0x7805beb9;      // lookup id of the team list column tables
+constexpr uint64_t kNetImages = 0x1130008 + 0x70;   // the image table the cell query indexes its icons in
+constexpr uint64_t kTrackerConnection = 0x23c;      // the tracker's connection key: its net id, -1 for the local player
+
+using CellImageFn = void *(U2MP_GUEST *)(void *, const unsigned char *, int32_t, int32_t);
+
+bool muted_icon_logged = false;
+
+// The id of column `column` of a team list, found as the cell query finds it: the list's key (+0x190) in the sorted
+// table 0x7805beb9 (16-byte entries: key, column list), then entry `column` (0x30 bytes, id at +8). 0 for none.
+uint32_t column_id(const unsigned char *list, int32_t column) {
+    const auto lookup = reinterpret_cast<LookupFn>(image.base + kLookupPointer);
+    const unsigned char *table = lookup(kColumnTables);
+    if (!table || column < 0) return 0;
+    const uint32_t key = peek<uint32_t>(list + 0x190);
+    const unsigned char *keys = reinterpret_cast<const unsigned char *>(peek<uint64_t>(table + 8));
+    int32_t lo = 0, hi = peek<int32_t>(table) - 1;
+    while (keys && lo <= hi) {
+        const int32_t mid = lo + (hi - lo) / 2;
+        const uint32_t k = peek<uint32_t>(keys + 16ull * uint64_t(mid));
+        if (k < key) {
+            lo = mid + 1;
+        } else if (k > key) {
+            hi = mid - 1;
+        } else {
+            const uint64_t at = 16ull * uint64_t(mid) + 8;
+            const unsigned char *columns = reinterpret_cast<const unsigned char *>(peek<uint64_t>(keys + at));
+            if (!columns || column >= peek<int32_t>(columns)) return 0;
+            const unsigned char *entries = reinterpret_cast<const unsigned char *>(peek<uint64_t>(columns + 8));
+            return peek<uint32_t>(entries + 0x30ull * uint64_t(column) + 8);
+        }
+    }
+    return 0;
+}
+
+// The icon's index in the net image table (u16 count at +2, 0x28-byte entries from +8 of the list at +8), -1 when
+// it is not there: the cell query stores this next to the icon id.
+int32_t net_image_index(uint32_t id) {
+    const unsigned char *table = reinterpret_cast<const unsigned char *>(peek_image<uint64_t>(kNetImages));
+    if (!table) return -1;
+    const uint16_t count = peek<uint16_t>(table + 2);
+    const unsigned char *entries = reinterpret_cast<const unsigned char *>(peek<uint64_t>(table + 8));
+    for (uint32_t i = 0; entries && i < count; ++i)
+        if (peek<uint32_t>(entries + 8 + 0x28ull * i) == id) return int32_t(i);
+    return -1;
+}
+
+// J4: the muted icon first, then the PS4 query (its talking test and every other column).
+U2MP_GUEST void *cell_image_hook(void *out, const unsigned char *list, int32_t row, int32_t column) {
+    const unsigned char *r = list + 0x14 * int64_t(row);
+    const int32_t kind = peek<int32_t>(r + 0x48);
+    const uint32_t page = peek<uint32_t>(list + 0x40);
+    const uint32_t index = peek<uint32_t>(r + 0x4c);
+    bool muted = false;
+    if (kind == overlay::kPlayerRow && index < overlay::kTrackers) {
+        const unsigned char *tracker = image.base + kNgm + 0x10 + kTrackerSize * uint64_t(index);
+        muted = voice::muted(peek<uint32_t>(tracker + kTrackerConnection));   // -1 (local player): never
+    }
+    if (!overlay::voice_cell_muted(kind, page, index, muted ? column_id(list, column) : 0, muted))
+        return reinterpret_cast<CellImageFn>(image.base + kCellImage)(out, list, row, column);
+    // The image record the query gives the talking icon, with the muted icon: type 3, icon, table 1, its index.
+    unsigned char *o = static_cast<unsigned char *>(out);
+    const int32_t at = net_image_index(overlay::kMutedIcon);
+    poke<uint32_t>(o + 0x00, 3);
+    poke<uint64_t>(o + 0x08, 0);
+    poke<uint32_t>(o + 0x10, 0);
+    poke<uint32_t>(o + 0x14, overlay::kMutedIcon);
+    poke<uint32_t>(o + 0x18, 1);
+    poke<int32_t>(o + 0x1c, at);
+    poke<uint32_t>(o + 0x20, 0);
+    poke<int32_t>(o + 0x24, -1);
+    poke<float>(o + 0x28, 1.0f);
+    if (!muted_icon_logged) {
+        muted_icon_logged = true;
+        log("scoreboard: voice column shows the muted icon %08x (net image index %d)", overlay::kMutedIcon, int(at));
+    }
+    return out;
+}
+
+void install_voice_column(int &installed) {
+    // J4: the cell query reads the row kind / tracker index / list key and the tracker's connection key as the hook
+    // does, and the voice column id is the one it tests.
+    static const unsigned char kRowKind[] = {0x41, 0x83, 0x7c, 0x86, 0x48, 0x02};         // cmp [r14+rax*4+0x48], 2
+    static const unsigned char kListKey[] = {0x45, 0x8b, 0xbe, 0x90, 0x01, 0x00, 0x00};   // mov r15d, [r14+0x190]
+    static const unsigned char kTables[] = {0xbf, 0xb9, 0xbe, 0x05, 0x78};                // mov edi, 0x7805beb9
+    static const unsigned char kVoiceCol[] = {0x3d, 0x7b, 0x21, 0x4c, 0x00};              // cmp eax, 0x4c217b
+    static const unsigned char kConnKey[] = {0x8b, 0x88, 0x3c, 0x02, 0x00, 0x00};         // mov ecx, [rax+0x23c]
+    uint64_t *slot = image.at<uint64_t>(kTeamListVtable + 8ull * kCellImageSlot);
+    if (image.matches(0x5b2ae2, kRowKind, sizeof kRowKind) && image.matches(0x5b2b65, kListKey, sizeof kListKey) &&
+        image.matches(0x5b2b6c, kTables, sizeof kTables) && image.matches(0x5b2c3b, kVoiceCol, sizeof kVoiceCol) &&
+        image.matches(0x5b2cb4, kConnKey, sizeof kConnKey) && *slot == uint64_t(uintptr_t(image.base + kCellImage))) {
+        *slot = uint64_t(uintptr_t(&cell_image_hook));
+        installed += 1;
+        log("scoreboard: team list cell image 0x%llx -> C++ (voice column muted icon, PS3 parity J4)",
+            (unsigned long long)kCellImage);
+    } else {
+        log("scoreboard: team list cell image query not as expected: no muted icon in the voice column");
+    }
+}
+
 }  // namespace
 
 void install_scoreboard(int &installed) {
+    install_voice_column(installed);   // the team lists' voice column muted icon, also without the overlay
     if (const char *env = std::getenv("UNCHARTED_U2MP_SCOREBOARD_BUTTON")) {
         // The runtime is Windows x64, where unsigned long is 32 bits: overflow saturates to 0xffffffff.
         button_mask = uint32_t(std::strtoul(env, nullptr, 16));

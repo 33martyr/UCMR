@@ -6,6 +6,7 @@
 //    sequence wrap-around, latency cap.
 // 3. Mixer clamp and the voice-activity gate.
 // 4. PS3 parity J1..J3 (spec parity-j-voice-medals.md): talking level decay, which packets light it, mute flag.
+// 5. PS3 parity N5 / N6 (spec parity-n-remaining.md): mouth loudness scale, the talking indicator table's slots.
 #include "../src/u2mp/voice.h"
 
 #include <cmath>
@@ -174,6 +175,7 @@ static void mixer_and_gate() {
     const std::vector<int16_t> quiet(kFrameSamples, 0), noise = tone(1, 3000, 150), speech = tone(1, 300, 6000);
     for (int i = 0; i < 50; ++i) CHECK(!gate.update(noise.data(), kFrameSamples));   // steady background
     CHECK(gate.update(speech.data(), kFrameSamples));
+    CHECK(std::fabs(gate.rms() - rms(speech.data(), kFrameSamples)) < 0.5);   // the frame's RMS, kept for N5
     int open = 0;
     for (int i = 0; i < 30; ++i) open += gate.update(quiet.data(), kFrameSamples) ? 1 : 0;
     CHECK(open == 14);   // held 300 ms (15 frames, counting the speech frame)
@@ -230,6 +232,35 @@ static void mute_transitions() {
     CHECK(!muted);
 }
 
+static void mouth_and_talk_table() {
+    // N5: L = 100 x rms / 32768 while transmitting, else 0; the gate threshold and ordinary speech land on the
+    // setter's range (weight min(v / 5, 1)): about 0.18 and full.
+    CHECK(mouth_loudness(3000.0f, false) == 0.0f);
+    CHECK(mouth_loudness(0.0f, true) == 0.0f);
+    CHECK(std::fabs(mouth_loudness(32768.0f, true) - 100.0f) < 1e-4f);
+    CHECK(std::fabs(mouth_loudness(300.0f, true) / 5.0f - 0.183f) < 0.001f);
+    CHECK(mouth_loudness(3000.0f, true) / 5.0f > 1.0f);
+    // N6: one slot per present remote member (net id >= 1, not the local player), the rest key 0 / level 0.
+    bool present[kMaxSpeakers] = {};
+    float levels[kMaxSpeakers] = {};
+    present[0] = true;   // id 0 is no member
+    present[1] = true;   levels[1] = 7.0f;
+    present[2] = true;   levels[2] = 3.0f;   // the local player
+    present[5] = true;   levels[5] = 0.0f;
+    levels[6] = 9.0f;                        // not present: no slot
+    TalkSlot slots[kTalkSlots];
+    for (TalkSlot &s : slots) s = TalkSlot{99, 99.0f};
+    CHECK(talk_table_slots(present, levels, kMaxSpeakers, 2, slots, kTalkSlots) == 2);
+    CHECK(slots[0].key == 1 && slots[0].level == 7.0f);
+    CHECK(slots[1].key == 5 && slots[1].level == 0.0f);
+    bool rest_zero = true;
+    for (int i = 2; i < kTalkSlots; ++i) rest_zero = rest_zero && slots[i].key == 0 && slots[i].level == 0.0f;
+    CHECK(rest_zero);
+    // no local id yet (0): every present member from 1 gets a slot; `max` bounds the slots written
+    CHECK(talk_table_slots(present, levels, kMaxSpeakers, 0, slots, 2) == 2);
+    CHECK(slots[0].key == 1 && slots[1].key == 2);
+}
+
 int main() {
     codec_round_trip();
     jitter_ordering();
@@ -239,6 +270,7 @@ int main() {
     talking_level();
     which_packets_count();
     mute_transitions();
+    mouth_and_talk_table();
     if (failures) {
         std::printf("%d failure(s)\n", failures);
         return 1;

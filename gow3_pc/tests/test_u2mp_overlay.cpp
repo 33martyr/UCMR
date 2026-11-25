@@ -1,7 +1,8 @@
 // u2mp overlay rules test (no game needed): ninja -C out/gpu u2mp-overlay-test
 // The scoreboard / result entry fade, priority and slide rules, the match-state entries, the automatic flag edges
 // and the hint fade (spec parity-m-features.md M1 / M2), and the ticker placement / finished / visible rules on a
-// stand-in ticker object (spec parity-ticker-respawn.md 1.2 - 1.6).
+// stand-in ticker object (spec parity-ticker-respawn.md 1.2 - 1.6), the team lists' voice column rule (spec
+// parity-j-voice-medals.md J4) and the Mute Players list rules (spec parity-n-remaining.md N2).
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -157,6 +158,48 @@ static void test_ticker() {
     CHECK(!ticker_visible(never.b, 300));
 }
 
+static void test_voice_column() {
+    // J4: muted icon only for a muted player's voice cell of a player row that names a tracker.
+    CHECK(voice_cell_muted(kPlayerRow, 0x1234, 3, kVoiceColumn, true));
+    CHECK(!voice_cell_muted(kPlayerRow, 0x1234, 3, kVoiceColumn, false));      // not muted: the PS4 talking test
+    CHECK(!voice_cell_muted(kPlayerRow, 0x1234, 3, 0x2b38314f, true));         // another column
+    CHECK(!voice_cell_muted(1, 0x1234, 3, kVoiceColumn, true));                // not a player row
+    CHECK(!voice_cell_muted(kPlayerRow, kPreviousGameList, 3, kVoiceColumn, true));   // names no tracker
+    CHECK(!voice_cell_muted(kPlayerRow, 0x1234, 10, kVoiceColumn, true));      // index past the ten trackers
+    CHECK(voice_cell_muted(kPlayerRow, 0x1234, 9, kVoiceColumn, true));
+}
+
+static void test_mute_action() {
+    // N2: the own list shows the own team, the other list the other team; other lists are not ours.
+    bool known = false;
+    CHECK(mute_action_team(kMutePlayersOwnList, 1, known) == 1 && known);
+    CHECK(mute_action_team(kMutePlayersOtherList, 1, known) == 0 && known);
+    CHECK(mute_action_team(kMutePlayersOtherList, 0, known) == 1 && known);
+    mute_action_team(0x649e809a, 0, known);
+    CHECK(!known);
+    // The current game's copy in NGM states 1 and 2, the previous game's otherwise.
+    CHECK(!mute_action_previous_game(1) && !mute_action_previous_game(2));
+    CHECK(mute_action_previous_game(0) && mute_action_previous_game(3) && mute_action_previous_game(5) &&
+          mute_action_previous_game(-1));
+    // Row r of a team's list = the first entry on that team at position r + 1.
+    const TeamEntry e[] = {{0, 1}, {1, 1}, {0, 2}, {1, 2}, {0, 2}};
+    CHECK(team_row_entry(e, 5, 0, 0) == 0);
+    CHECK(team_row_entry(e, 5, 1, 0) == 1);
+    CHECK(team_row_entry(e, 5, 0, 1) == 2);   // the first of two entries at position 2
+    CHECK(team_row_entry(e, 5, 1, 1) == 3);
+    CHECK(team_row_entry(e, 5, 0, 2) == -1);
+    CHECK(team_row_entry(e, 3, 1, 1) == -1);  // only `count` entries are searched
+    CHECK(team_row_entry(e, 5, 2, 0) == -1);  // no team 2
+    CHECK(team_row_entry(e, 5, 0, -1) == -1); // position 0 is no row
+    CHECK(team_row_entry(e, 0, 0, 0) == -1);
+    // The entry's player: a tracker holds that net id, and it is not the local player.
+    const uint32_t trackers[] = {1, 3, 0, 5};
+    CHECK(mute_list_target(3, 1, trackers, 4));
+    CHECK(!mute_list_target(1, 1, trackers, 4));   // the local player
+    CHECK(!mute_list_target(4, 1, trackers, 4));   // gone: no tracker
+    CHECK(!mute_list_target(5, 1, trackers, 3));   // only `count` trackers are searched
+}
+
 int main() {
     test_fade();
     test_priority();
@@ -165,6 +208,8 @@ int main() {
     test_auto_edge();
     test_hint();
     test_ticker();
+    test_voice_column();
+    test_mute_action();
     std::printf("%s\n", failures ? "u2mp overlay test FAILED" : "u2mp overlay test passed");
     return failures ? 1 : 0;
 }

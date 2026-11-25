@@ -18,6 +18,11 @@ Uncharted 2 multiplayer notes or code were used. Code: `gow3_pc/src/u2mp/menus.c
    (`+0x58..+0x5c` on PS4: action 22, condition 97..101/130/137, help-bar id). The only menu.bin
    difference that matters is the missing Multiplayer button in the main menus, which
    the menu overlay (`u2import --overlay`, overlay.cpp) already adds. Nothing else is patched in menu.bin.
+   Since overlay version 6 (`spec/parity-n-remaining.md` N3) the overlay gives the three main menus new control
+   lists with a new Multiplayer code button and leaves BUTTON_MULTIMEDALS as shipped, in the PS3 order:
+   PAGE_NEWPROFILE New Game, Load Game, Multiplayer, Options, Multiplayer Medals; PAGE_NEWPROFILE_BETA Multiplayer,
+   Beta Trailer, Options, Multiplayer Medals; PAGE_PROFILE as before (no medals there, as PS3). Before version 6 the
+   medals button itself became Multiplayer, so PAGE_MULTIMEDALS had no route.
 2. **Query table.** Query controls call `fn(query)` from the table at `0x105e370` (PS3
    `0xe15b50..0xe16168`, 12-byte entries `{cond, OPD, arg}`): 132 entries, the same conditions in the
    same order on both, ended by `fn == 0`, read on every call by the helpers `0x65f4e0..0x660660`
@@ -237,6 +242,8 @@ per language ("texts: no text for ...", "texts: ... shown in English").
   get their data from NetPlayerData / NetStatGame / the trackers.
 - Playlist descriptions are the game types' descriptions, not the PS3 server playlists (Deathmatch,
   Objective, Co-op Arena, ...): those were server data.
+- Multiplayer Medals (N3, `spec/parity-n-remaining.md` 4.3): not looked at in the game yet. Whether PS4 condition 9
+  shows the button on a fresh profile and whether LIST_MEDALS (condition 1) lists the multiplayer medals is a CHECK.
 
 ## 6. Page by page against the PS3 game (2026-11-08)
 

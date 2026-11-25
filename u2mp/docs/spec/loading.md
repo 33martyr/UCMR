@@ -47,8 +47,9 @@ Hook points:
 3. **Tip glyph callback.** A host function is placed in the tip's text struct as its per-glyph callback;
    the game's text printer calls it for every character (see 4.9).
 
-Not in scope (nothing is drawn for them): the PS3 letterbox bars (only below 719 lines), a PS3 tunable
-read at the start of the PS3 draw, and the PS3 condition "draw rosters only while a certain menu field
+Not in scope (nothing is drawn for them): the PS3 letterbox bars (only below 719 lines), the PS3 call at
+the start of the PS3 draw that publishes the "loading screen shown" byte under the name id `cdf70794`
+(identified, no visible effect: nothing reads it, `parity-n-remaining.md` N4), and the PS3 condition "draw rosters only while a certain menu field
 is 0".
 
 ## 2. Interface

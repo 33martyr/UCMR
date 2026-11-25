@@ -28,7 +28,7 @@ only as hints; every fact below was checked against the PS3 or PS4 binary or dat
 | Dead-player hint line | "\|SELECT\| Scoreboard    \|D-PAD\| Camera" at the bottom while the death camera runs | drawn while the local player is dead (2026-11-25, `scoreboard.cpp`) | CHECK (camera field, menu-blocking word, glyph open) | M1, section 9 |
 | Scoreboard / result overlay rules | four overlay entries, priority, PS3 fade and slide, open / close sounds, auto-open rules | four entries, PS3 fade / priority / slide, sounds, auto open on death; result pages still from our timers; no dim | CHECK / **MISSING** (dim, states) | M2, M3, section 9 |
 | Respawn countdown / co-op tries | in the scoreboard header (query cond 44) | the query is intact; the board now opens by itself on death | CHECK | M4 |
-| Film spectating HUD | score panel and the watched player's name at the top, boosters on the left, compact camera bar | theater bar only | CHECK / possibly MISSING | M6 |
+| Film spectating HUD | score panel and the watched player's name at the top, boosters on the left, compact camera bar | theater bar only | COVERED (N1: boosters only in the follow camera) | M6 |
 | Leaderboard tables | 4 boards, global / friends filter, "my page", 11 rows, Rank / badge / name / score columns, footer Filter / Previous / Next / Go to Top | local + RPCN boards, same list object | COVERED | `progression.md` 1.5.11-1.5.15, `parity-a` |
 | MP assets (images, icons, sounds, texts, models) | GOTY net.pak, hud.pak, hud.bnk, music stingers, MP vox, DLC voices | net-u2mp.pak (96 images), stingers, DLC voices, all texts | COVERED (two known holes, M11) | `IMPORT.md` audit, `ASSET-INVENTORY.md` |
 
@@ -166,7 +166,7 @@ death camera's position (`visibility.cpp` uses the camera position, `gameplay.md
 camera process creation can fail when the default process heap is exhausted after long sessions; if a run shows an
 assert in CreateControlFromName with the follow / spot camera, treat it as a robustness item, not parity.
 
-### M6. Film spectating HUD (theater) - CHECK / possibly MISSING
+### M6. Film spectating HUD (theater) - COVERED (`parity-n-remaining.md` N1)
 
 PS3 in a film shows the normal match score panel and the watched player's name at the top and the booster icons on
 the left, besides the compact theater bar. Ours draws the theater bar (`hud.md` 4.11) and the HUD parts whose PS3
@@ -179,7 +179,7 @@ and give the PS4 port the same gates. A third-party tester report names the same
 Every MP page of PS4 `menu.bin` was listed and checked against our docs and code. All pages a PS3 player reaches are
 covered by `MENUS.md`, `menus.md`, `parity-b/d/e/f/g` and `CINEMA.md`, except:
 
-### M7. Mute Players (PAGE_MULTIPLAYER_MUTE_PLAYERS, from the in-match pause page) - CHECK
+### M7. Mute Players (PAGE_MULTIPLAYER_MUTE_PLAYERS, from the in-match pause page) - COVERED (`parity-n-remaining.md` N2)
 
 PAGE_PAUSE_MULTIPLAYER: Options, Mute Players (BUTTON_MP_MUTE_PLAYERS), Leave Game (-> LEAVEGAME_CONFIRM); in a film
 also Render Settings, Camera, Fog, Lighting. The Mute Players page has two team lists LIST_MUTEPLAYERS0 / 1 (title
@@ -198,7 +198,7 @@ spec it here).
   dead on PS3 1.10 as well. The visible friend stats are the ticker (`parity-d-flow1.md` 2.10).
 - PAGE_TWITTER_MESSAGES: PLATFORM (`remaining.md`).
 
-### M9. PAGE_MULTIMEDALS (BUTTON_MULTIMEDALS, label MENU_MEDALS, title "MULTIPLAYER MEDALS") - CHECK
+### M9. PAGE_MULTIMEDALS (BUTTON_MULTIMEDALS, label MENU_MEDALS, title "MULTIPLAYER MEDALS") - COVERED in the import, CHECK in game (`parity-n-remaining.md` N3)
 
 Two controls of PS4 menu.bin open it (records at menu.bin `0x53b0`, `0x5660`, beside the PS4 collection's bonus
 pages), neither binary refers to its id in code. Decide after one look in the game: if the button appears on a
@@ -300,7 +300,7 @@ loading screen). Behaviour as built: `gameplay.md` 1.4.
 | 4. M2 rule 5: sounds | DONE (CHECK) | `d9b465e1` on open, `2f118f31` on close, button only, through `0x3dd780` / `0x9b5c20`; logged once each. Silent if no loaded bank has them (open question 9). |
 | 5. M2 rule 4: dim | OPEN | The PS4 menu dim fields are unknown (open question 4): logged once when a dimmed entry draws, nothing dimmed. |
 | 6. M2 rule 8: pages from match states | PARTLY, opt-in | States 3 -> entry 2, 4 -> entry 3, 5 -> entry 0 (round sub-state unknown: PS3 shows entry 3 when it is 3), cinema only 3 / 4, only while in the match and when the page is loaded, only with `UNCHARTED_U2MP_SCOREBOARD_STATES=1`: it is not known whether PS4 keeps a stale state 3 after the match (that would draw RESULTS over the lobby). NGM state changes are logged so a run shows it. Our round-end timers still come first (stand-in for the request bytes). Request bytes and DC switch `e68ae001`: open question 6. |
-| 7-10 (M6, M7, M9, M10 b) | not started | Checks first, as written in their sections (open questions 7, 8; M10 b unidentified tunable). |
+| 7-10 (M6, M7, M9, M10 b) | DONE (M6, M7, M9: CHECK in game) | Built 2026-11-25 (`parity-n-remaining.md` 10): M6 = N1 (booster condition fixed), M7 = N2 (Mute Players toggle, remaining.cpp), M9 = N3 (overlay version 6 keeps Multiplayer Medals on the no-save main menus), M10 b = N4 (nothing to do). Resolved by static reading in `parity-n-remaining.md`: M6 = N1 (one inverted booster condition, no separate name element), M7 = N2 (rows covered, toggle missing; same item as J5), M9 = N3 (PS3 button on the no-save main menu; our overlay removes it), M10 b = N4 (not a setting, no visible effect). |
 
 Remaining visible differences from PS3: no background dim; pause / menu pages do not hide the hint; co-op down
 state does not open the board; result pages come from our timers (12 s / 60 s) unless the state rules are turned on;

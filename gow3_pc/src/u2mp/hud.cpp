@@ -810,7 +810,8 @@ void booster_pair(uint64_t a, uint64_t b, float fade) {
 
 void boosters(uint64_t element, uint64_t local, uint32_t flags, bool coop) {
     float fade = load<float>(element + 0x1920);
-    if (load<uint8_t>(abs_of(kNgm) + 0x209c) != 0 && (flags & 0x40000) && global<int32_t>(kCinemaMode) != 0 &&
+    // Film site: only in the follow camera (cinema mode 0), as PS3 0x8af18c (parity-n-remaining.md N1).
+    if (load<uint8_t>(abs_of(kNgm) + 0x209c) != 0 && (flags & 0x40000) && global<int32_t>(kCinemaMode) == 0 &&
         local) {
         uint64_t a = booster_by_index(load<int32_t>(local + 0x2a0));
         uint64_t b = booster_by_index(load<int32_t>(local + 0x2a4));
