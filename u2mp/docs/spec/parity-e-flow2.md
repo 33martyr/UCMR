@@ -38,7 +38,8 @@ word at `0xe10b80` (= `0xdbb66c`). Every global, constant and string named below
 
 **Player trackers.** PS3 trackers are 0x270 bytes from NetGameManager `+0x10`; PS4 trackers are 0x2c0 bytes from
 NetGameManager `+0x10`. Fields used here (PS3 offset / PS4 offset): used `+0x18 / +0x20`; net id `+0x118`;
-connection handle `+0x204`; NpId (36 bytes) `+0x208`; party id `+0x11c / +0x128`; excluded (left) `+0x234 / +0x26c`;
+connection handle `+0x204`; NpId (36 bytes) `+0x208`; party id `+0x11c / +0x124` (PS4 `+0x128` is the rank, 2.6);
+excluded (left) `+0x234 / +0x26c`;
 "connection done" `+0x23d`; ready `+0x140`; "can talk to all" (NAT) `+0x244`; team `+0x12c` (PS3).
 
 **Times.** "now" is the wall clock in seconds; "frames" is the 300 Hz game clock. Constants quoted below are the
@@ -230,18 +231,44 @@ custom game `0x465da0` or a matchmaking room). Each slot: the player's NpId, a p
   party id field (PS3 tracker `+0x11c`); players without a reservation get 0. It then counts party-mates (same id) and
   keeps parties on the same team when balancing.
 
-PS4 has no table; its AssignTeams (`0x6400d0`, loop at `0x640200..0x640245`) writes the same constant into every
-tracker's party id (PS4 tracker `+0x128`): 1, or a match-session byte when the session's room id is zero and its kind
-word is 0x30. So every player counts as one party and parties are not kept together. online.cpp's join list checks
-only the room's free-slot count from the search result (no host-side reservation, so two parties joining at once can
-overfill; no 10 s hold). Parity:
+PS4 has no table. Its AssignTeams (`0x6400d0`) balances the 10 tracker slots (NGM `+0x10 + k * 0x2c0`) with two
+values per slot whose PS3 sources are gone:
+
+- **Party group** (tracker `+0x124`, held at `+0x134` of the sort array; PS3 tracker `+0x11c`). In the path without
+  team choices (lobby kind 0: every matchmaking match, and a custom game where nobody chose a team, `0x6407b6..0x640ed1`)
+  PS4 reads each slot's group from the removed session member list (`0x113a048`, 10 entries of 0x34, word `+0x2c`;
+  0 when there is no member) and stores it with `mov [rbx+r14+0x134], eax` at `0x640884` (bytes `42 89 84 33 34 01 00
+  00`; r13 = the slot index 0..9; eax is set again at `0x64089d`). It then sorts the groups biggest first, then by the
+  per-slot value `+0x12c`, puts each whole group on the team with the smaller sum (5 a side at most) and evens the
+  counts. The list is never filled on PS4: every slot is in group 0 and the best half of the players lands on one
+  team.
+- **Level** (the per-slot value). PS3 read the slot's room member's level (member stats `+8`; with a ranked index the
+  skill value at `+0x14 + 4 * index`). PS4 reads it at `0x6405a1..0x6405b5` (bytes `45 85 c9 78 09 c4 a1 fa 2c 7c 87
+  14 eb 04 0f b6 7f 08 48 89 c3`: r9d the ranked index, rdi the stats block, rdx the slot's offset `0x27c + k * 0x2c0`,
+  result in edi) from one match-session block for every slot (`0x640583..0x6405a0`, patched at `0x640598` so the block
+  is never NULL), so all players have the same level and the teams come out in join order.
+
+Tracker `+0x128` is not the party id: it is the rank, which the player info carries and MatchStats::Init copies at
+match start (session.cpp `add_tracker` writes it so; `+0x130` holds it too).
+
+online.cpp's join list checks only the room's free-slot count from the search result (no host-side reservation, so
+two parties joining at once can overfill; no 10 s hold). Parity:
 
 1. The match host (session.cpp on PC) keeps the reservation table with the rules above; a joining party leader asks
    for its whole party before joining (session message for 0x100/0x101), and the join is refused when the reply says
    no. A reservation not used within 10 s expires.
-2. At team assignment each tracker gets the party id of its reservation (0 when none) instead of the constant, so the
+2. At team assignment each slot gets the party id of its player's reservation (0 when it has none, and on LAN, where
+   there is no slot table), in every mode that takes the path without team choices (custom games too, as PS3), so the
    intact PS4 balancing keeps parties together.
-3. Log lines as PS3 (adding / updating / timeout / removing / failed, with the player name and party id).
+3. Each slot's level is its player's own: the level shown for its rank (rank index + 1; an empty slot reads 1). PS3's
+   ranked skill value lived on Sony's servers; PC has none, so the level stands for it in a ranked match.
+4. Log lines as PS3 (adding / updating / timeout / removing / failed, with the player name and party id).
+
+Ours: teams.cpp (byte-checked, each site left alone with a log line when its bytes differ): the store at `0x640884`
+takes the slot's group from a table, the read at `0x6405a1` takes the slot's level from a table (`0x6405a1..0x6405b2`
+jump to the stub, which ends with `test r9d, r9d` so the flags are the original's, and returns to `0x6405b3`, the
+original `mov rbx, rax`). session.cpp `teams_frame` fills both tables every frame from the trackers' net ids, the
+members' ranks and the reservations, and logs "team balance values: slot k: party p level l" when they change.
 
 ### 2.7 Player popups in the lobby rows (BUTTON_MULTIPLAYER_PLAYER0..9 `0x440620`, PARTY_PLAYER0..9 `0x4417f0`)
 
@@ -385,7 +412,9 @@ co-op exclusion is in session.cpp).
    the leader quits; the members stay in the match, one of them is the new party leader.
 6. Reservation (2.6): host with 8 of 10 slots used; two parties of 2 ask at the same time: one is granted, the other
    refused. A granted party that never arrives frees its slots after 10 s. Team assignment keeps each party on one team
-   (log the party ids written to the trackers).
+   ("team balance values" in the host's log: the party ids and levels per slot). One party of 2 plus 2 solo players,
+   team deathmatch by matchmaking: the party is on one team. Custom game, 6 solo players of different levels, nobody
+   picks a team: the two teams' level sums are close (not the best three on one side).
 7. Popups (2.7, 2.8): mute player A, open A's row: "Unmute"; Mute All disappears once everyone is muted, Unmute All
    once nobody is; a friend already in the party shows only View Profile (and the PC rows).
 8. Players Met (2.9): quit a match after 10 s: the other players are in Players Met.
@@ -406,8 +435,8 @@ co-op exclusion is in session.cpp).
    what are `0x4df7190f`, `0x1623a914`, `0x01e6c27f` (not in the sid dictionary)?
 6. Pause gate `0x441d78`: the PS4 copy of the per-frame pause state (`0x56c74`'s counterpart) was not traced; matches
    so far did not pause while online, so it is treated as covered.
-7. AssignTeams party grouping (2.6): the exact balancing rule that uses the party-mate counts was not read in full;
-   the requirement is only to feed the real party ids, the intact PS4 code does the rest.
+7. AssignTeams party grouping (2.6): settled. The store site and the level read are known (2.6); the intact PS4 code
+   does the balancing with the real party ids and levels.
 
 ## 6. Status table
 
@@ -489,7 +518,7 @@ co-op exclusion is in session.cpp).
 | 449e88 | NdiNetUpdate per frame | PLATFORM | session.cpp frame work (3.1) |
 | 4d987c | slot manager: remove user | COVERED | 2.6 session.cpp `release_reservation` |
 | 4d9a78 | slot manager: remove a list of users | COVERED | 2.6 session.cpp `reserve_party` (all or nothing before adding) |
-| 4d9af0 | slot manager: party id of a user | MISSING | 2.6: ids kept in the table, not fed to AssignTeams (patch site bytes not in the spec, 7) |
+| 4d9af0 | slot manager: party id of a user | COVERED | 2.6 session.cpp `teams_frame` -> teams.cpp group store `0x640884` |
 | 4d9be8 | slot manager: add / update user (10 s expiry) | COVERED | 2.6 session.cpp `reserve_party` |
 | 4da168 | slot manager: reserve a party as one group | COVERED | 2.6 session.cpp `reserve_party`, `slots_frame` (own party) |
 | 4da278 | slot manager: answer reservation requests 0x100 -> 0x101 | COVERED | 2.6 session.cpp `on_reserve` (Reserve message), `admit_peer` |
@@ -500,7 +529,7 @@ co-op exclusion is in session.cpp).
 | 4da484 | bitstream read helper of NetCharacter state code | COVERED | snapshot path (netanim.md) |
 | 4da504 | optional-byte read helper (default 75) of NetCharacter state code | COVERED | snapshot path (netanim.md) |
 
-Counts: COVERED 65, PLATFORM 18, MISSING 3 (before the implementation: 51 / 18 / 17).
+Counts: COVERED 66, PLATFORM 18, MISSING 2 (before the implementation: 51 / 18 / 17).
 
 ## 7. Implementation (2026-11-25, branch `u2mp-ps3-parity-2`)
 
@@ -516,21 +545,16 @@ skipped (meaning unknown).
 | 2.3 | done | session.cpp ClockSync (type 12, see session.md "Parity group E changes"): 8 samples at 20..120 ms, best 4 by round trip, half-RTT correction, game clock moved once per connection setup; net.cpp ping / pong every 10 s per connection, `Transport::rtt_ms(slot)`. |
 | 2.4 | done (PC flow) | session.cpp `party_up_frame` / `party_up_group` / `party_up_answer` (type 13); online.cpp `party_up_join`. The wait popup is recognised by its page (`0x471007a1` over POSTGAME); PS4 `0x5ec4e0` stays `ret`. |
 | 2.5 | done | session.cpp: custom-game leader's voluntary leave sends LeaderLeave (type 15) before kLobby; members post 0x117 (PS4 consumer) and stay; a member's own voluntary leave ends with `host_own_party` (a party of its own; the matchmaking leader too: the party room hands the party on). |
-| 2.6 | partly | session.cpp slot manager (type 14, `slots_frame`, `reserve_party`, `admit_peer`, member left), online.cpp `take_led_party` / `reservation_refused`. **Not done: feeding the party ids to AssignTeams** (below). |
+| 2.6 | done | session.cpp slot manager (type 14, `slots_frame`, `reserve_party`, `admit_peer`, member left), online.cpp `take_led_party` / `reservation_refused`; AssignTeams' party groups and levels: teams.cpp (`0x640884`, `0x6405a1`) filled by session.cpp `teams_frame` (below). |
 | 2.7 | done | remaining.cpp `player_options` (Unmute), `match_player_row` (Mute / Unmute, Mute All, Unmute All, no host options, no title), voice.cpp `set_muted`. |
 | 2.8 | done | remaining.cpp `friend_options`. |
 | 2.9 | done | session.cpp `note_players_met` (every Playing entry), progression.cpp `progression_note_met`, progression_store.cpp `note_met`. Compatible with group G: one call with a name list; filtering friends / batching can go into `note_players_met`. Group G1 (2026-11-25) changed it: friends and players already listed are skipped (no move to the top), batches of 16; see parity-g-friends.md. |
 | 2.10 | not possible | online.cpp `stats_ticker_text` now puts the local player's entry first (LAN: own entry only). **Missing call:** the PS4 function (or control field) that sets the ticker control's text, and its "visible" / "finished a full scroll" state, are not named by this spec or group D; without them nothing shows the text and the 10 s / full-scroll refresh cannot be wired. |
 | 2.11 | done | session.cpp `draw_version_text` (page handler) -> hud.cpp `hud_menu_text`: "1.09.078" from netInfo +0 (PS4 leaves it 0, so PS3's 0x0009004e stands in) at (1140, 60), scale 0.4, while `menu-temple` is ready. |
 
-**2.6 party ids, not possible from this spec:** the PS4 AssignTeams store loop at `0x640200..0x640245` is named, but
-not its instruction bytes, the register that holds the constant, or a safe hook point. Without them neither a patch
-(it must be byte-checked) nor a wrapper is possible (`replace_function` drops the original; the clean-room rule forbids
-reading the code). Needed: the bytes of the store to tracker `+0x128` (or of the instruction that loads the constant)
-and the register holding the tracker pointer there, so the value can come from a host call `party_id(tracker)` that
-looks the tracker's NpId up in the slot table. Note also: session.cpp `add_tracker` writes the money rank to `+0x128`
-(and `+0x130`) for the score lists; the parity-e spec names `+0x128` the party id. One of the two is wrong and must be
-settled before the patch.
+**2.6 party ids (2026-11-25):** the store site and the level read are now known (2.6 above): the party group is
+stored at `0x640884` from the removed session member list, not written to tracker `+0x128` (which is the rank, as
+`add_tracker` has it). teams.cpp feeds both from session.cpp's tables.
 
 Remaining differences from PS3: the per-tracker timing field PS3 cleared after the clock sync (PS3 `+0x22c`, PS4
 offset unknown); the clock samples use the frame-granular game clock on both sides (error up to a frame); the Party Up
@@ -538,4 +562,4 @@ popup texts are what the PS4 page shows (no "Joining Party..." popup `0xe4e03363
 Party Up still groups (PS3 grouped only in the host's own popup), and the party room is not "made visible again" on
 opening; members a leader told to follow are on their way before the owner's slot reply (PC transport order), so after
 a refusal those who already got a free slot stay and the others fall to the existing "owner not reached" path; the
-ticker is not shown (2.10); AssignTeams still writes the constant (2.6).
+ticker is not shown (2.10); a ranked match balances by level, not by the server skill PS3 had (2.6).

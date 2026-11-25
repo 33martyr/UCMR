@@ -171,7 +171,12 @@ struct alignas(16) Playlist {
     int32_t type_count() const { return get<int32_t>(bytes + 0x68); }
     int32_t type(int i) const { return get<int32_t>(bytes + 0x48 + 4 * i); }
     int8_t ps3_index() const { return int8_t(bytes[0x6c]); }
+    int32_t max_players() const { return get<int32_t>(bytes + 0x18); }
+    int32_t max_party() const { return get<int32_t>(bytes + 0x1c); }
 };
+
+// The game types of co-op (4, 8, 9, 12).
+bool coop_game_type(int32_t t) { return t == 4 || t == 8 || t == 9 || t == 12; }
 
 constexpr int kMaxPlaylists = 32;
 Playlist playlists[kMaxPlaylists];
@@ -185,6 +190,12 @@ void make_record(Playlist &p, uint32_t id, uint32_t name, uint32_t desc, uint32_
     put<uint32_t>(p.bytes + 0x04, name);
     put<uint32_t>(p.bytes + 0x08, desc);
     put<uint32_t>(p.bytes + 0x10, picture);
+    // The PS3 *playlists* records' limits: +0x18 the maximum player count (the size of a matchmaking room, PS3
+    // 0x49a958), +0x1c the maximum party size (Start Match): 10 / 5 for competitive playlists, 3 / 3 for co-op ones.
+    bool coop = n > 0;
+    for (int i = 0; i < n; ++i) coop = coop && coop_game_type(types[i]);
+    put<int32_t>(p.bytes + 0x18, coop ? 3 : 10);
+    put<int32_t>(p.bytes + 0x1c, coop ? 3 : 5);
     put<int32_t>(p.bytes + 0x34, -1);
     put<int32_t>(p.bytes + 0x40, types[0]);
     put<uint32_t>(p.bytes + 0x44, picture);
@@ -772,9 +783,19 @@ bool playlist_game_types(std::vector<int32_t> &types) {
     return !types.empty();
 }
 
-// PS3 kept a maximum party size in each playlist record (+0x1c), checked by Start Match (parity-d-flow1.md
-// 2.2). The PS3 values are not known to this port, so no playlist limits the party (0).
-int32_t playlist_max_party(uint32_t) { return 0; }
+// PS3 kept a maximum party size in each playlist record (+0x1c), checked by Start Match (parity-d-flow1.md 2.2),
+// and the maximum player count (+0x18, PS3 0x49a958: 0 when the id is not found).
+int32_t playlist_max_party(uint32_t id) {
+    for (int k = 0; k < built; ++k)
+        if (playlists[k].id() == id) return playlists[k].max_party();
+    return 0;
+}
+
+int32_t playlist_max_players(uint32_t id) {
+    for (int k = 0; k < built; ++k)
+        if (playlists[k].id() == id) return playlists[k].max_players();
+    return 0;
+}
 
 int32_t playlist_index(uint32_t id) {
     for (int k = 0; k < built; ++k) {

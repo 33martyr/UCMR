@@ -138,7 +138,10 @@ button_start_match` returns at once for a non-host; PS3 does not test that (memb
 
 1. Party size check: party members > the current playlist's maximum party size (playlist record PS3 `+0x1c`;
    playlist found by the id in the local member data, PS3 NetPlayerData `+0xc0`) -> message box `0x58b7e078`
-   / `0x3a586923`, stop. **[missing]**
+   / `0x3a586923`, stop. The PS3 *playlists* records hold 5 for the competitive playlists (Deathmatch,
+   Elimination, Plunder, Objectives, Ranked, All Competitive Modes, The Lab) and 3 for the co-op ones; their
+   maximum player count (`+0x18`, read by PS3 `0x49a958`, 0 for an unknown id) is 10 and 3. Done (2026-11-25):
+   menus.cpp `make_record` writes both fields, `playlist_max_party` / `playlist_max_players` read them.
 2. Party host: hide the party room. **[missing]** (item c)
 3. Mailbox 0x114 to the party; close an open NP dialog; the 5 s "Starting in [A]..." countdown (done
    `4055f45f`, cancel `bbb649ef`). COVERED: `frontend6::leader_starting(true)`.
@@ -418,7 +421,7 @@ statistics. `0x438350`: ascending order by the s32 at `+8`, used to sort inside 
 | 43a3dc | 8e2767d9 Replay | C | PS4 `0x5ebdb0` |
 | 43a444 | lobby status / party mailbox handler | P | session.cpp, frontend3.cpp, frontend6.cpp (2.5) |
 | 43aa30 | PAGE_MULTIPLAYER_FRIENDS_LIST page callback | P | session.cpp page handler (2.5) |
-| 43aab0 | BUTTON_MULTIPLAYER_STARTMATCH | C* | session.cpp `button_start_match`: all checks in PS3 order, room hide, mode 3 plays the cinema, other modes nothing; gaps: playlist maximum party sizes unknown (0 = no check), net game content bits (PS3 `+0x7c`) not checked (map pack only), mode 3 netInfo flag; deliberate: co-op starts with 1 player (2.2) |
+| 43aab0 | BUTTON_MULTIPLAYER_STARTMATCH | C* | session.cpp `button_start_match`: all checks in PS3 order (playlist maximum party size 5 / co-op 3), room hide, mode 3 plays the cinema, other modes nothing; gaps: net game content bits (PS3 `+0x7c`) not checked (map pack only), mode 3 netInfo flag; deliberate: co-op starts with 1 player (2.2) |
 | 43b150 | BUTTON_MULTIPLAYER | P | session.cpp `button_multiplayer` (2.1) |
 | 43b1dc | boot into multiplayer | P | none (2.9, question 8) |
 | 43b200 | invite / message counts | P | online.cpp (2.6) |
@@ -450,7 +453,8 @@ boxes dropped). "MP auto-on" (question 8) unchanged.
 - 2.1: session.cpp `button_multiplayer`: transport start failure -> log, close, `game_message_box(0x88a082af,
   0)`, no PAGE_MULTIPLAYER, no error byte.
 - 2.2: session.cpp `button_start_match` with the checks of mode 1 (party size against
-  `playlist_max_party`, menus.cpp; returns 0 = no limit, the PS3 values are not known) and mode 2 (map pack of
+  `playlist_max_party`, menus.cpp: the playlist record's `+0x1c`, 5 for competitive playlists and 3 for co-op
+  ones as in the PS3 *playlists* records; 0 = no limit only for an unknown playlist id) and mode 2 (map pack of
   the map: this PC via `dlc_net_game_pack`, every member via the packs byte our Info message now carries;
   too many; too few; type 10 one team), each with the game's text ids through `game_message_box`
   (remaining.cpp; it logs an id the PS4 banks lack, so question 4 is answered by the first run's log). Item c:
@@ -464,13 +468,23 @@ boxes dropped). "MP auto-on" (question 8) unchanged.
   package and the 21 preload packages that are present, then `frontend6::preload_net_game(false, true,
   false)`, then our own net game index reset. The preload sets the bit again on packages already present
   at the next entry. Open: the PS4 call that releases a package request (question 6); the global keep byte
-  (PS3 `0xe1cef1`) has no PC counterpart. No cinema transfer can be running on PC.
+  (PS3 `0xe1cef1`) has no PC counterpart. No cinema transfer can be running on PC. The PS4 level manager
+  (`0x1130390`) is expected to drop a package nothing asks for any more at its next update (its slot bitmap
+  `+0x80..+0x97`: free = 180 - the bits set), so clearing the bit may be the whole release. Check (diagnostics
+  only, no behaviour change): 5 s after the teardown a page handler of its own logs "leaving multiplayer, 5 s
+  later: of N released package(s) G gone, L still loaded, O in another state; level manager packages in use
+  A -> B" (taken out of the handler table when Multiplayer is entered again). G = N with B < A confirms it.
 - 2.4: Promote -> PAGE_LOBBY after a successful `online::promote` (pages above it popped, else opened);
   Kick From Party blocks the online id (session.cpp `kick`, shared with the griefer kick); Mute silent.
 - 2.10: online.cpp presence version 3 (80 bytes, within the ABI's 128; versions 1 and 2 still read; a
   version 2 reader takes the first 48 bytes) carries cash, kills, wins, losses, deaths, headshots and seconds
   played; `stats_ticker_text`, `ticker_append_entry`, `ticker_time` build the text as described. Not shown:
   the PS4 call that sets the ticker control's text, and its visible / idle tests (question 9), are not
-  known. Headshots: no NetPlayerData offset is known for them (sent as 0). Time played uses the
+  known. Headshots: no NetPlayerData offset is known for them; the local progression store keeps the
+  career count (progression.cpp `match_headshots` at Leave: the match's kill records, NetStatGame `0x1147bd0`
+  count `+0xe8`, records of 0x1c from `+0xec`, kind byte 1 = a headshot, `+2` killer net id, `+4` victim net
+  id; the local player's kills of kind 1, not its own deaths; competitive matches only, as the career kills;
+  whether PS3 also counted co-op kills is not known), sent in presence v3 and shown as the local entry of the
+  Headshots category. Time played uses the
   competitive seconds (NetPlayerData `+0x198`); whether PS3 added the co-op seconds is not known. Friends
   with an older presence (no stats) are left out of the ticker. LAN: no friends, heading only.

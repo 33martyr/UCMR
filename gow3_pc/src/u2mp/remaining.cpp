@@ -833,7 +833,8 @@ void install_remaining(int &installed) {
         replace_function(0x644130, 14, reinterpret_cast<void *>(&level_record_package), "level record package (644130)"))
         ++installed;
 
-    // 2. tracker values: read the match session's own block instead of the NULL room accessor
+    // 2. tracker values: read the match session's own block instead of the NULL room accessor (no NULL read; the
+    //    level itself comes per slot from teams.cpp's hook right after it, 0x6405a1)
     static const unsigned char tracker_old[] = {0xbf, 0x00, 0x00, 0x00, 0x00, 0x48, 0x0f, 0x45, 0xfe};
     static const unsigned char tracker_new[] = {0x48, 0x89, 0xf7, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90};
     if (bytes_at(0x640598, tracker_old)) {

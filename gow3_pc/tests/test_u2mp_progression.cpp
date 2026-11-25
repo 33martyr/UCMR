@@ -55,6 +55,27 @@ static void test_roundtrip() {
     CHECK(!decode(bytes.data(), 16, x));
 }
 
+// Format 2 keeps the local career headshots; a format 1 file (no headshots word) still reads, with 0.
+static void test_headshots() {
+    Store s = sample();
+    s.headshots = 41;
+    const std::vector<uint8_t> bytes = encode(s, 5);
+    Store d;
+    CHECK(decode(bytes.data(), bytes.size(), d) && d.headshots == 41 && d.recent.size() == 1);
+    std::vector<uint8_t> old(bytes.begin(), bytes.end() - 8);   // without the headshots word and the CRC
+    old[8] = 1, old[9] = old[10] = old[11] = 0;
+    const uint32_t crc = crc32(old.data(), old.size());
+    for (int i = 0; i < 4; ++i) old.push_back(uint8_t(crc >> (8 * i)));
+    Store o;
+    CHECK(decode(old.data(), old.size(), o) && o.headshots == 0 && o.recent.size() == 1 && o.local_name == "Drake");
+    // the local line adds its headshots; the other players' lines do not
+    std::vector<MatchPlayer> m(2);
+    m[0].name = "Drake", m[0].local = true, m[0].headshots = 3;
+    m[1].name = "Chloe", m[1].headshots = 9;
+    note_match(s, m, 300);
+    CHECK(s.headshots == 44);
+}
+
 static void test_files() {
     namespace fs = std::filesystem;
     const fs::path dir = fs::temp_directory_path() / "u2mp-progression-test";
@@ -240,6 +261,7 @@ int main() {
     const char *check = "123456789";
     CHECK(crc32(reinterpret_cast<const uint8_t *>(check), 9) == 0xcbf43926u);
     test_roundtrip();
+    test_headshots();
     test_files();
     test_matches();
     test_met();

@@ -43,6 +43,7 @@ struct MatchPlayer {
     bool local = false;
     int result = 0;   // 1 won, -1 lost, 0 no result (draw / no teams)
     uint32_t kills = 0, deaths = 0, seconds = 0, coop_points = 0, money = 0, rank = 0;
+    uint32_t headshots = 0;   // the local player's headshot kills (the match's kill records); others: 0
 };
 
 struct Store {
@@ -51,6 +52,9 @@ struct Store {
     std::array<uint8_t, kBlobSize> blob{};
     std::string local_name;
     std::vector<PlayerStats> recent;
+    // The local player's career headshots (the friends ticker's and the presence's Headshots; PS3 kept them with
+    // the progression, but no field of the Data block is known for them, so the store keeps them itself).
+    uint32_t headshots = 0;
 };
 
 // File format (little-endian), see progression_store.cpp.
@@ -61,7 +65,7 @@ bool decode(const uint8_t *data, size_t size, Store &store);
 bool load(const std::string &path, Store &store);
 bool save(const std::string &path, const Store &store, uint64_t now);
 
-// Adds a finished match. The local player's line only updates `local_name`; the others are merged
+// Adds a finished match. The local player's line only updates `local_name` and adds its headshots; the others are merged
 // by name into `recent` (most recent kept, at most kMaxRecent). A name not stored yet comes in `unlisted`
 // (Players Met membership is decided at match start only, PS3 parity G1).
 void note_match(Store &store, const std::vector<MatchPlayer> &players, uint64_t now);
