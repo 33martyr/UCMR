@@ -50,7 +50,7 @@ Four CPU cores can hold 60 FPS in Drake's Fortune and Uncharted 3. On Ryzen 7000
 - **Saves and logs:** In `analysis` beside the launcher.
 - **Updates:** Use **UPDATE TO x.y.z** in the launcher. It checks SHA-256, preserves saves, settings and shader caches, and rolls back if an update fails.
 - **RecompLauncher:** Installed through [RecompLauncher](https://recomplauncher.com/game/uncharted-the-nathan-drake-collection-pc-port-2), UCMR is updated there instead ([details](docs/RECOMPLAUNCHER.md)).
-- **Code signing:** How release programs are signed: see the [code signing policy](docs/CODE-SIGNING.md).
+- **Code signing:** Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by [SignPath Foundation](https://signpath.org) ([code signing policy](docs/CODE-SIGNING.md)).
 
 See [Controls and PC setup](tools/README-Windows.txt) for more help.
 
