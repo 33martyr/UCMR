@@ -251,8 +251,8 @@ random (as ours).
 Ours: `frontend3.cpp end_vote` only at the deadline. To do: evaluate the rule above every host update during phase 2
 (n = `session::member_count() - 1`), end the vote early with the same result message.
 
-Open question 1: the host takes this branch only when a check of the current net game record (PS3 `0x499908`, a field
-of the `*net-games*` record of NGM's current game) is non-zero; otherwise it waits for the timer. Read that field.
+Open question 1 (answered, see "F7 clarification" in section 5): the gate is not a record field. The host takes this
+branch only while NGM has **no** current net game (PS3 `0x499908` returns NULL); once a game is set it skips it.
 
 ### F8. Voice of strangers in matchmaking (PS3 `0x4b0700`, `0x4b0868`, `0x4c40f0`) - MISSING
 
@@ -347,8 +347,8 @@ result (the player ends in the friend's party lobby). Nothing to add.
 
 ## 5. Open questions
 
-1. F7: what the net-game record field read by PS3 `0x499908` means (decides whether the majority rule or the plain
-   timer ends the vote).
+1. ANSWERED (2026-11-25): F7: what the net-game record field read by PS3 `0x499908` means (decides whether the
+   majority rule or the plain timer ends the vote). See "F7 clarification" below.
 2. F8: where PS3 mutes non-party players when they arrive in a matchmaking room (not in this group; search the callers
    of PS3 `0x4e6f50` with mute 1).
 3. F1: whether "other members with an active connection" excludes members still in the reservation stage (PS3 checks
@@ -360,6 +360,19 @@ result (the player ends in the friend's party lobby). Nothing to add.
 6. 4c36c8 / 4c4a88 ("leave the party" flag at party +0x1174 PS3): PORT-FRONTEND3 9 said not needed; F3/F9 now use
    the behaviour (a player whose game join failed, or a member who left matchmaking, leaves its party). Confirm with
    the owner that a failed join should drop the player out of its party as on PS3.
+
+**F7 clarification (question 1, PS3 1.10 GOTY EBOOT).** `0x499908` reads no field of a record. It takes NGM, reads
+NGM's current net-game index (s16 at PS3 NGM `+0x18EC`, -1 = none), and returns the address of that entry of the
+`*net-games*` table (PS3 record stride 0x80), or NULL when the index is negative or not below the table count. The
+only writer of `+0x18EC` is the SetNetGame core `0x49c458`; the matchmaking machine `0x4b0a58` sets the index to -1
+when it starts, and `0x4afee8` (the vote result) sets it to the winning game. In host state 20 the early majority
+check (`0x4afe48`) runs when `0x499908` returns **NULL**, i.e. while no game has been chosen yet in this vote; when it
+returns a record (a winner is already set) the host takes the other branch and does not decide again. So the gate is
+"current net game index is -1 / out of range", the same for every net game; there is no per-game flag and no list of
+net games "that have it set". PS4 1.02 equivalent: the same index at PS4 NGM `+0x1ca0` (s16, -1 none; PS4 record
+stride 0x90), as already read by `natives.cpp current_net_game` and `frontend3.cpp current_net_game`. Note for the
+implementer: ours (`early_vote_allowed` = a record exists) is the inverse of PS3; it must be true while the current
+net game is -1 (or out of range) during phase 2.
 
 ## 6. Status table
 
@@ -447,7 +460,7 @@ drops out of its party (PS3 behaviour).
 | F4 | COVERED | the abort is kOpPartyIn {0} (F2). A member that cannot follow its leader (JoinLeader refused) leaves the party and goes back to PAGE_MULTIPLAYER with NET_SM 18, no error box (before: network error box). |
 | F5 | COVERED (distance PLATFORM) | frontend3.cpp `start_search_pass` / `host_start_matchmaking_step`: passes = rows of `b25ab071` (at most 3, read at run time; stride 0x14, ping limit s32 at +8), "Searching Game with Criteria %i", tip index = pass, created-by-me 0 while searching; online.cpp `mm_search_done` / `mm_pick`: pass 1 only rooms within 20 ranks, the fullest room wins (no location: no distance score, no party-size penalty); `mm_check_tick`: after the RPCN join the link to the owner comes up (20 s), RTT vs the row's limit ("retRtt", "PingCriteria failed"), too slow / failed -> room marked bad, next room of the same pass (`mm_room_failed`); only then the transport and the party go to the owner, which must admit within 6 s. No room: kMmNoRoom -> random 1..3 s -> next pass; after the last: `mm_create` (GATHER). The row's limit applies on every pass (PS3 state 7). |
 | F6 | COVERED | frontend3.cpp `host_gather_online` + session.cpp `balance_kick_slot`: N odd, playlist maximum even (not co-op only), last of the sorted slot list alone -> kMsgBalanceKick to it, 5 s quiet, gathering goes on; the kicked player: "removed to balance the teams", room marked bad, searches again (`online::mm_host_gone(.., true)`). The room is not hidden for the kick. |
-| F7 | COVERED, one open fact | frontend3.cpp `majority_winner` with n = all players of the room (`session::member_count()`), h = n / 2. Note: the rule text says "other members", but only n = all players gives scenario 6 (2 players, 1 vote each -> random) and a real majority; implemented so. Gate: `early_vote_allowed` = the current net game has a `*net-games*` record (PS3 `0x499908` returns that record); **the field the PS3 check reads is not given by this spec: still to be named.** |
+| F7 | COVERED, one open fact | frontend3.cpp `majority_winner` with n = all players of the room (`session::member_count()`), h = n / 2. Note: the rule text says "other members", but only n = all players gives scenario 6 (2 players, 1 vote each -> random) and a real majority; implemented so. Gate: `early_vote_allowed` = the current net game has a `*net-games*` record (PS3 `0x499908` returns that record); **PS3 gates the other way: early end only while there is NO current net game (index -1), see "F7 clarification" in section 5; to fix.** |
 | F8 | COVERED | frontend3.cpp `strangers_muted` (online room, phase 1, from `begin` until `open_vote`), voice.cpp `receive` drops the voice of `session::party_stranger` players; party members never; the player's own mute (`voice::muted`) is separate and unchanged. After a match a new gathering mutes strangers again (question 2 still open). |
 | F9 | COVERED | frontend3.cpp `update` (leave branch) + `leave(.., Exit)`: transport host (LAN host, gather host, solo) -> kMsgLeave, its party back to the lobby, strangers search again; a member (LAN too) -> `session::leave_party` (online `drop_out_of_party`; LAN: transport closed, UDP host of its own); a leader inside a stranger's room -> kMsgPartyLeave {party id} relayed by the host (PS3 0x108), leaves 0.3 s later; its members `mm_leave_to_leader` (room left, transport back to the leader, lobby). The host only logs a member's kMsgLeave now. |
 | F10 | COVERED (owner decision PS3) | online.cpp `on_host_lost` (transport host lost), MEMBER_LEFT of the host, kMsgLeave from a stranger host ("Host Asked to leave the room") -> `mm_host_gone` -> next frame "HOST %s LEFT", room left, then alone / leader: own party + `matchmaking::on_host_left(true)` (NET_SM 19, criteria 1; a leader waits up to 10 s for `party_missing()` members to come back); party member: transport back to the leader, waits in 19. The party room is now kept while in a matchmaking room (`join_succeeded`), so party ids, colours and the leader are known there. In-match host handling unchanged. |
@@ -458,6 +471,6 @@ room events; the ABI and the online program are unchanged.
 
 Remaining differences from PS3: no distance / region in the criteria (no location on PC) and no party-size penalty in
 the room score (fullest room instead); the slot reservation is the RPCN join + transport admit, so a player is briefly a
-room member before a ping or fit refusal; F7's record field; F8 re-mute after a match; a leader that drops out after a
+room member before a ping or fit refusal; F7's gate (inverted vs PS3, see F7 clarification); F8 re-mute after a match; a leader that drops out after a
 refused list join leaves its members without a host (no party migration on PC: they get the host-lost path); a leader
 not admitted after its party was told to follow leaves the members in that room on their own.

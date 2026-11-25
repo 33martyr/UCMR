@@ -340,15 +340,14 @@ int majority_winner() {
     return -1;
 }
 
-// The host takes the early end only while the current net game has a record (PS3 0x499908, the current
-// *net-games* record; the record field the PS3 check reads is not named in the spec, see spec F7).
+// The host takes the early end only while no net game has been chosen yet: the current net-game index is
+// none (-1) or outside the *net-games* table (spec F7 clarification). Once the vote has a winner it stops.
 bool early_vote_allowed() {
     const uint8_t *table = dc_lookup(kNetGamesTable);
-    if (!table) return false;
-    const int32_t count = get_at<int32_t>(uintptr_t(table));
-    const uint64_t records = get_at<uint64_t>(uintptr_t(table) + 8);
+    const int32_t count = table ? get_at<int32_t>(uintptr_t(table)) : 0;
+    const uint64_t records = table ? get_at<uint64_t>(uintptr_t(table) + 8) : 0;
     const int16_t game = current_net_game();
-    return records && game >= 0 && game < count;
+    return !(records && game >= 0 && game < count);
 }
 
 // winner: 0 / 1 decided by the majority, -1 at the deadline (the higher count, a tie at random).
