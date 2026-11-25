@@ -48,8 +48,9 @@ list of PAGE_MENU_LEADERBOARD no longer fetches any rows. This file:
    is retargeted). On Leave it also records the players of the match just left into the store and, when the
    online link is up, posts online scores.
 3. Leaderboards: the leaderboard list update at `0x5b3000` is replaced whole. It fills the game's leaderboard
-   object with rows from the online score service when linked, else from the local store. A page event handler
-   for PAGE_MENU_LEADERBOARD (1.5.19) asks it to start over each time the page is shown.
+   object with rows from the online score service when linked, else from the local store. When Multiplayer is
+   entered, the leaderboard object is set back to board 0, Global, "my page" and asked to start over (1.5.19, the
+   PS3 NetInit leaderboard init); a list object that never fetched starts over by itself (1.5.15 step 4).
 
 ### 1.2 Interface
 
@@ -59,7 +60,7 @@ list of PAGE_MENU_LEADERBOARD no longer fetches any rows. This file:
 namespace u2mp {
 void install_progression(int &installed);
 void progression_publish();
-void progression_register_leaderboard_page();   // 1.5.19
+void progression_multiplayer_entered();   // 1.5.19 (replaces progression_register_leaderboard_page)
 std::vector<std::string> progression_players_met();   // was progression_recent_players(max), see parity group G
 std::string progression_player_summary(const std::string &name);
 uint32_t progression_headshots();   // the local career headshots of the store (1.5.7)
@@ -72,7 +73,8 @@ Callers: `install.cpp` calls `install_progression(installed)` once (after `insta
 `install_cinema`). `session.cpp` calls `progression_publish()` when Multiplayer is left; `clantag.cpp` calls it after
 the clan tag changed. `menus.cpp` (LIST_PLAYERSMET) and `remaining.cpp` call `progression_players_met()` (parity group G);
 `remaining.cpp` (Players Met: View Profile) calls `progression_player_summary(name)`. `session.cpp` calls
-`progression_register_leaderboard_page()` (1.5.19) each time it registers its own per-frame page handler.
+`progression_multiplayer_entered()` (1.5.19) in `button_multiplayer`, right after `netinit_prepare()` (the PS3
+NetInit point); it no longer calls anything from `register_handler`.
 
 `gow3_pc/tests/test_u2mp_progression.cpp` tests only `progression_store.cpp`; it does not link progression.cpp.
 
@@ -108,7 +110,6 @@ CRC-32, chainable: passing the previous result as `crc` continues the same check
 | player info update | function `0x64e810`, replaced whole (19 bytes) | `55 48 89 e5 53 50 48 8d 1d db 8c af 00 8b 83 c0 06 00 00` at `0x64e810` | no arguments used; returns nothing meaningful (rax not set on purpose) |
 | leave publish | the call instruction at `0x5f0952` (originally calls `0xa15e70`) | `bf 9d 19 5e c8` at `0x5f094d` (mov edi, 0xc85e199d) | one argument: u32 symbol id in edi (the game passes 0xc85e199d); returns a pointer (rax) |
 | leaderboard list update | function `0x5b3000`, replaced whole (18 bytes) | `4c 8d 0d 59 a9 b8 00 49 83 79 58 00 0f 85 03 01 00 00` at `0x5b3000`, and the board table check (1.5) | one argument: pointer to the list object (rdi); returns nothing |
-| leaderboard page event | an entry of the menu page registry for PAGE_MENU_LEADERBOARD (1.5.19), added at run time | none (registry entries are data) | one argument: pointer to the event (rdi), u32 at +0 = event; returns nothing |
 
 ### 1.3 Game facts
 
@@ -382,9 +383,11 @@ Returns "wait" (the list update stops at once) or "go on".
 1. Online fetch progress (1.5.14). On "wait", return.
 2. If LB u64 +0x58 is non-zero, return.
 3. first = LB s32 +0x74; write it to list +0x4c.
-4. If LB u8 +0x78 is non-zero (reset): list +0x50 = -1; clear list bytes +0x40..+0x4f (this also clears the page just
-   written and the delta); list u8 +0x54 = 0; LB u8 +0x78 = 0. Then shown = -1, delta = 0, first = 0.
+4. If LB u8 +0x78 is non-zero (reset), **or list u32 +0x40 (column set) is 0** (a list object that never fetched,
+   1.5.19): list +0x50 = -1; clear list bytes +0x40..+0x4f (this also clears the page just written and the delta);
+   list u8 +0x54 = 0; LB u8 +0x78 = 0. Then shown = -1, delta = 0, first = 0.
    Otherwise delta = list s32 +0x44 and shown = list s32 +0x50.
+   (The column-set test is ours, not PS3's; see 1.5.19 for why and when it differs.)
 5. b = LB u32 +0x80, refresh = LB u8 +0x85. Compare shown with b as s32.
    - shown == b and delta == 0: if list u8 +0x54 differs from LB u8 +0x84, or refresh is non-zero, go to step 7;
      otherwise return.
@@ -415,9 +418,54 @@ Load the store. For the first recent player whose name equals `name` exactly, re
 `%s: %u matches with you, %u kills, %u deaths, %u wins, %u losses, rank %u.` with name, matches, kills, deaths,
 wins, losses, rank, cut to at most 255 characters. When no player has that name, return `name` unchanged.
 
-#### 1.5.19 Leaderboard page shown (`progression_register_leaderboard_page()`, the page event)
+#### 1.5.19 Leaderboard start-over (`progression_multiplayer_entered()` and the fresh-list rule)
 
-Why (PS4 1.02 facts, found 2026-11-25 from the owner's empty leaderboard page): PAGE_MENU_LEADERBOARD (page id
+Settled 2026-11-25 from PS3 1.10 (replaces the page-shown handler of the same day). Rule:
+
+1. **Multiplayer entered** (`progression_multiplayer_entered()`, called by `session.cpp` `button_multiplayer` right
+   after `netinit_prepare()`): nothing when `image.base` is NULL. Otherwise end a running online fetch (online
+   fetch stage 0, as the failure path of 1.5.14 does, without its local fetch) and write LB: u64 +0x58 (busy) = 0,
+   u32 +0x24 (total) = 0, u32 +0x70 (rows) = 0, s32 +0x74 (page shown) = -1, u8 +0x78 (reset) = 1, u32 +0x80
+   (board) = 0, u8 +0x84 (friends) = 0, u8 +0x85 (refresh) = 0. Log
+   `rankings: multiplayer entered: leaderboards back to board 0, global`. Nothing else (no fetch here).
+2. **Page visits** within the same Multiplayer stay: nothing is reset. The list keeps the board, the Global / Friends
+   filter and the page the player left; the next visit draws the same table without a new fetch (1.5.15 step 5
+   returns at once). Leaving the page does nothing for this list.
+3. **Fresh list object** (1.5.15 step 4, column set 0): takes the reset path once, with the board and filter the LB
+   object holds (so a list built after a menu reload shows the current board, "my page").
+
+PS3 facts (1.10, `EBOOT.elf`, TOC `0xe183b8`; PS3 LB object `0xf1fd20`, its fields are the PS4 ones minus 0x10 from
+the busy word on: busy +0x48, page shown +0x64, reset +0x68, board +0x70, friends +0x74, refresh +0x75):
+- The only PS3 code that sets the reset byte is the leaderboard init `0x4ab854`, called once by the NetInit thread
+  (`0x447a5c`; LB loaded at `0x449498`, `bl` at `0x4494ac` = `48 06 23 a9`, right after the net state is set to 18
+  at `0x4494a8`), i.e. each time the player enters
+  Multiplayer. In the same pass it clears busy and the two other fetch words, sets page shown -1, friends 0, refresh 0,
+  the transaction id 0, reset 1, board 0, total 0, rows 0, clears the four pending score slots (0x160 bytes) and
+  allocates the row buffers. Check bytes (file offset = address - 0x10000): `39 20 00 01` (li r9,1) at `0x4ab964`,
+  `99 3d 00 68` (stb r9,0x68(r29)) at `0x4ab988`, `91 7d 00 70` (stw r11,0x70(r29)) at `0x4ab98c`.
+- The static constructor `0x4aa0c4` -> `0x4aa084(1, 0xffff)` -> LB reset `0x4aa000` (board 0, friends 0, page -1,
+  counters 0) runs once at boot and does **not** set the reset byte (PS4 equivalent: the static initializer `0x64e479`).
+- The PS3 list update `0x411fd8` (vtable `0xd70098` slot 2; PS4 `0x5b3000`) consumes the byte exactly as 1.5.15 step
+  4 (clears it); no other PS3 code writes LB +0x68: the four buttons `0x4ab9f0` (prev), `0x4ab9b0` (next),
+  `0x4a9e94` (filter), `0x4a9eb4` (top) write board / filter / refresh only; the leaderboard term `0x4ab66c` (Multiplayer
+  left) only ends the transaction and the title context; the list class has no shown / hidden method that touches LB.
+- The PS3 list object (0x44 bytes, constructor `0x412b80`, made by the item-source factory at `0x424e5c`) leaves
+  column set, delta, page, board shown and friends shown uninitialized, like PS4 (`0x5d3a4f..0x5d3ac0`). Its column
+  count (slot 17 `0x411f10`) is 0 when the column set is 0, so PS3 too draws nothing for a list that never fetched.
+  Both games build the list objects with the menu (PS4: the menu update `0x5d0530` rebuilds every page through
+  `0x5c53a0` when menu.bin's data pointer (`menu + 0x17a8`) differs from the loaded symbol `0x74ffceeb`), which on PS3
+  happens before NetInit, so the NetInit reset always reaches the list. Rule 3 is our only addition: it acts only on
+  a list that has never fetched, where PS3 would show an empty page (or act on leftover memory); in the PS3 flow (menu
+  built, then NetInit) it never changes the result. Not verified on PC yet: whether the menu is rebuilt after a match
+  (in-game test 4 below shows it either way).
+
+Remove from the implementation: the page event function, `progression_register_leaderboard_page()`, its registry
+entry for `0x8236d02a`, its two logs (`... handler registered`, `... page shown: board %u%s`) and the call in
+`session.cpp` `register_handler`.
+
+The L1 / R1 pictures of this page's help bar are a menus matter: `MENUS.md` 3.8.1.
+
+PS4 background (found 2026-11-25 from the owner's empty leaderboard page): PAGE_MENU_LEADERBOARD (page id
 `0x8236d02a`, title MENU_TIMETRIALS) holds one control, LIST_LEADERBOARD, kind 10 (control class vtable
 `0x1007900`, update `0x58c6a0`, draw `0x58c7a0`). Its item source is the leaderboard list object (vtable
 `0x100a360`; slot 2 = `0x5b3000`, slot 18 = 12 rows, slot 19 = the column count: the entry of the column set list
@@ -433,22 +481,9 @@ something (boot.log of 2026-11-25 13:41: fetches only after Filter / Top of List
 Registry: the menu manager (`0x1136640`) keeps page event handlers: u32 count at +0x24f0, at most 32 entries of 0x18
 bytes from +0x24f8 (u32 page id, 0 = every page; u64 function; u64 argument). The game calls every entry whose id
 is 0 or the page's id with a pointer to {u32 event, u32 page id, u64 argument, ...}; event 1 = the page was shown.
-PS4 registers no entry for `0x8236d02a`.
-
-`progression_register_leaderboard_page()`: nothing when `image.base` is NULL. Otherwise, when an entry with id
-`0x8236d02a` and our event function exists among the first min(count, 32), nothing. When count >= 32: log
-`rankings: menu page handler table full: the leaderboard page is not reset when shown`. Otherwise write entry
-`count` = {`0x8236d02a`, our event function, 0}, count + 1, log
-`rankings: leaderboard page handler registered (%u handlers)` (the new count).
-
-Event function: only event 1. LB u8 +0x78 (reset) = 1; log `rankings: leaderboard page shown: board %u%s` (LB u32
-+0x80, then `, friends` when LB u8 +0x84 != 0). The next list update then runs the reset path of 1.5.15 step 4:
-board shown -1, page -1 ("my page"), fetch start (local or online), column set written, so the table (panel, title
-"<board> - Global/Friends", headers, 11 stripes) is drawn even when the board has no rows, as on PS3. Board index and
-filter (LB +0x80, +0x84) are kept from the last visit.
-
-PS3 itself is not read for this: what PS3 used to set the reset byte is unknown (likely the page's own shown event);
-the visible result (a fresh board on every entry, "my page" first) is what the 1.5.15 reset path defines.
+PS4 registers no entry for `0x8236d02a`. The first version of this fix (2026-11-25) added one that set the reset byte
+on every page shown, keeping board and filter; that is not what PS3 does (PS3: reset once per Multiplayer entry with
+board 0 / Global, and every later visit keeps board, filter and page) and is removed (see above).
 
 ### 1.6 Install (`install_progression(installed)`)
 
@@ -526,14 +561,23 @@ Others:
 - P-O2 recent players: three entries with times 5, 9, 5 and max 2 -> the time-9 name, then the first time-5 name.
 - P-O3 summary for a known and an unknown name.
 - P-O4 `UNCHARTED_U2MP_NAME` of 40 characters: local name cut to 31 in the local board rows.
-- P-L1 (1.5.19) registry with 20 entries: one entry added (id `0x8236d02a`), count 21, log; called again: nothing.
-  Count 32: table-full log, nothing written. `image.base` NULL: nothing.
-- P-L2 event 6 (or 0): nothing. Event 1: LB +0x78 = 1 and the log; the next list update with a list object whose
-  +0x40..+0x54 are zero (board 0, no filter) takes the reset path: board shown -1 -> 0, page -1, a fetch, column set
-  of board 0 written (without 1.5.19 the same update returned at step 5 and the column set stayed 0).
-- In game: open Multiplayer > Leaderboards on a new profile: the table with "Competitive Kills - Global", the
-  columns Rank / Level / Players / Kills / Deaths / Ratio and 11 empty stripes; logs `rankings: leaderboard page
-  shown: board 0` and (linked) `online: rankings: board 300 mode 2`.
+- P-M1 (1.5.19) `progression_multiplayer_entered()` with LB board 2, friends 1, refresh 1, page 3, busy 1 and an
+  online fetch at stage 2: afterwards busy 0, total 0, rows 0, page -1, reset 1, board 0, friends 0, refresh 0,
+  online fetch stage 0, the log; no host call (no board_request). `image.base` NULL: nothing.
+- P-M2 the next list update after P-M1 with a list object of column set 7, board shown 2, friends shown 1: reset path,
+  board shown -1 -> 0, page -1, fetch of board 0 Global, column set of board 0 written.
+- P-M3 no MP entry between two updates, list column set non-zero, board shown = LB board, same filter, no delta, no
+  refresh, reset 0: step 5 returns (no fetch, page kept) - a second visit shows the table as left.
+- P-M4 fresh list (+0x40..+0x54 all zero), LB reset 0, LB board 1, friends 1: reset path (rule 3), fetch of board 1
+  Friends with page -1, column set of board 1 written; the same list on the next update: no reset.
+- Fixtures of P-B3..P-B7 need a non-zero column set at list +0x40 (with 0 they now take the reset path).
+- In game, PS3 rules: (1) enter Multiplayer, open Leaderboards: "Competitive Kills - Global", Rank / Level / Players /
+  Kills / Deaths / Ratio, 11 stripes (empty or "my page"); log `rankings: multiplayer entered: ...` once at the
+  Multiplayer button and (linked) `online: rankings: board 300 mode 2` at the first visit only. (2) R1 to Competitive
+  Wins, Triangle to Friends, page down, Back, open Leaderboards again: still "Competitive Wins - Friends" on the same
+  page, no new `online: rankings` line. (3) Leave Multiplayer to the main menu, enter again, open Leaderboards:
+  back to "Competitive Kills - Global", my page. (4) Play a match, return to the lobby, open Leaderboards: a table is
+  drawn (board and filter as left before the match).
 
 ---
 
