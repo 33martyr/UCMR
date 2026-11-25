@@ -115,7 +115,7 @@ bool friend_party(int i, std::vector<std::string> &names);
 // ---- PAGE_MULTIPLAYER's friends stats ticker (PS3 0x446c60 / 0x43b30c / 0x43b290, spec parity-d-flow1.md 2.10) ----
 // One ticker text: a random category (0 cash .. 6 time played), then up to 5 random friends (of the first 101)
 // whose presence is this build's multiplayer with stats (presence version 3). No such friend: the heading only.
-// The PS4 call that puts a text into the ticker control is not known yet, so nothing shows it so far.
+// ticker.cpp hands it to the game's ticker add function 0x5d6500 (spec parity-ticker-respawn.md 1).
 std::string stats_ticker_text();
 // The ticker's pieces, for tests: one friend entry appended to `out` (false, `out` unchanged, when it would reach
 // 511 characters), and the time played text ("Nd Nh Nm", "Nh Nm", "Nm").

@@ -61,6 +61,10 @@ void install_menuimages(int &installed); // menuimages.cpp: net image ids, lost 
 void install_unlocks(int &installed); // unlocks.cpp: every MP item unlocked, GOTY skin/booster tables (UNLOCKS.md)
 void install_loading(int &installed);  // loading.cpp: PS3 match loading screen (PORT-FRONTEND4.md)
 void loading_hide(const char *why);
+// loading.cpp: the menu's text-in-rect item (0x5b5450) as the loading screen draws its texts: colour transform
+// `xform` (10 floats), text centred in (x, y, w, h) of the 1280x720 canvas. False, nothing drawn, when the
+// function's start is not as expected or there is no text.
+bool menu_text_in_rect(const float *xform, const char *text, float x, float y, float w, float h);
 void install_dlc(int &installed);       // dlc.cpp: DLC maps offered only when imported (u2mp/docs/DLC.md)
 void install_menudraw(int &installed);  // menudraw.cpp: 2D command arena 192 KiB -> 2 MiB (PORT-MENUDRAW.md)
 void install_frontend2(int &installed); // frontend2.cpp: partial menu functions vs PS3 (PORT-FRONTEND2.md)
@@ -81,6 +85,8 @@ void hud_menu_text(float x, float y, float scale, const char *text);
 void install_scoreboard(int &installed); // scoreboard.cpp: in-match scoreboard, PS3 0x4cbf00 / 0x4cbc10
 void sync_netstat_ranks();               // session.cpp: copy current NetStatGame levels from the trackers
 void show_round_results();               // scoreboard.cpp: round/end results page from the session state
+void install_ticker(int &installed);     // ticker.cpp: PAGE_MULTIPLAYER stats ticker refresh (parity-ticker-respawn.md 1)
+void ticker_refresh();                   // ticker.cpp: from the multiplayer page's per-frame update (main thread)
 void install_rosternames(int &installed); // rosternames.cpp: player display names in the team lists (NetStatGame +0x3918)
 void install_matchend(int &installed); // matchend.cpp: match-end watch, test time limit (PORT-GAMEPLAY3.md 6)
 void install_solocoop(int &installed); // solocoop.cpp: co-op minimum players 2 -> 1

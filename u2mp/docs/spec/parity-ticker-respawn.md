@@ -45,7 +45,8 @@ address image + `0x1138e40`. There is one ticker for the whole game; the menu.bi
 | +0x18 + k×0x208 | f32 | entry k: text width (measured when added) |
 | +0x1c + k×0x208 | char[0x200] | entry k: the text, NUL ended; an entry is in use while its first byte is not 0 |
 
-The object spans `0x1c + 8×0x208 = 0x105c` bytes. (The third-party note's "scroll position +4" and "slide position
+The object spans `0x14 + 8×0x208 = 0x1054` bytes (the last entry's text ends there; an earlier version of this
+line said `0x1c + 8×0x208 = 0x105c`, which counts from the first text instead of the first entry). (The third-party note's "scroll position +4" and "slide position
 +0x10" are this strip width and this last-draw time.)
 
 ### 1.3 Scroll and draw, every frame the strip is drawn (PS3 `0x42de40`, PS4 `0x5d6860`)
@@ -104,7 +105,13 @@ and the clock (seconds) is past the next-refresh time, set the next-refresh time
 (`0x446c60`), which ends by adding its one text with the add function (1.4). Ours: `online.cpp stats_ticker_text`
 builds the text; the missing piece is only this refresh with the add call. LAN: own entry only (group E 2.10).
 
-Status: **MISSING** (the call and the two tests are now known; nothing in our code calls them yet).
+Status: **DONE (CHECK)** 2026-11-25. `gow3_pc/src/u2mp/ticker.cpp`: install checks every verification byte of 1.4
+(else `ticker: bytes at 0x... not as expected`); `ticker_refresh()` runs from session.cpp's multiplayer page handler
+(per-frame update, main thread) while PAGE_MULTIPLAYER is open: visible (1.6), finished (1.5) and the frame clock
+/ 300 past the next-refresh time -> next = now + 10 s, `online::stats_ticker_text()` (not added when empty or
+0x200 bytes or longer), add through `0x5d6500`. The entry it fills is compared with the placement rule (1.4) and
+logged once (`ticker: first text added ...` or `ticker: add left entry ...`). Rules: `overlay_rules.cpp`, test
+`u2mp-overlay-test`.
 
 ## 2. "Respawn in [A]..." and the co-op "Tries Remaining" line
 
@@ -186,7 +193,10 @@ there; what is missing is PS3's automatic show while the local player is dead (2
 automatic flag turns on, hide it when it turns off. No HUD drawing of our own is needed (the third-party overlay
 drawing is not PS3 behaviour).
 
-Status: **MISSING** (automatic show on death). The row's text: **COVERED** (intact PS4 code, our texts).
+Status: automatic show on death **DONE (CHECK)** 2026-11-25 (`scoreboard.cpp`, `gameplay.md` 1.4 step 6): the
+automatic flag is "no local character, or died time >= spawn time" (the rule 2 fields above, used only when the
+`0x65b830` verification bytes match); the state-record bit 15 is not used (its PS4 call is not mapped, section 4).
+The row's text: **COVERED** (intact PS4 code, our texts). No HUD drawing of our own.
 
 ## 3. Test scenarios
 
@@ -219,9 +229,9 @@ Status: **MISSING** (automatic show on death). The row's text: **COVERED** (inta
 
 | Item | PS3 | PS4 | Status |
 |---|---|---|---|
-| ticker add | `0x42da98` | `0x5d6500` (uncalled, intact), object image + `0x1138e40` | MISSING (not called by ours) |
-| ticker finished scrolling | `0x42d870` | none: fields +0x04, +0x14/+0x18/+0x1c per entry | MISSING |
-| ticker visible | `0x42da40` | none: field +0x10 vs `[0x1116180+0x104]`/300 | MISSING |
-| ticker refresh (10 s, finished, visible) | `0x447248` | none | MISSING |
+| ticker add | `0x42da98` | `0x5d6500` (uncalled, intact), object image + `0x1138e40` | DONE (`ticker.cpp`), CHECK |
+| ticker finished scrolling | `0x42d870` | none: fields +0x04, +0x14/+0x18/+0x1c per entry | DONE (`overlay_rules.cpp`) |
+| ticker visible | `0x42da40` | none: field +0x10 vs `[0x1116180+0x104]`/300 | DONE (`overlay_rules.cpp`) |
+| ticker refresh (10 s, finished, visible) | `0x447248` | none | DONE (`ticker.cpp`, from session.cpp page_handler), CHECK |
 | respawn / tries row (cond 44) | `0x4bf4a8` | `0x65b830` intact | COVERED |
-| scoreboard shown by itself while dead | `0x4cbf00` with `0x6b6b3c` | none (`scoreboard.cpp`: button and results only) | MISSING |
+| scoreboard shown by itself while dead | `0x4cbf00` with `0x6b6b3c` | `scoreboard.cpp` (died / spawn test, not bit 15) | DONE, CHECK |
