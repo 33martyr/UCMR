@@ -535,7 +535,8 @@ Counts: COVERED 66, PLATFORM 18, MISSING 2 (before the implementation: 51 / 18 /
 ## 7. Implementation (2026-11-25, branch `u2mp-ps3-parity-2`)
 
 Owner decisions: open question 1 = **20 s silent-peer limit in every mode** (custom games too); question 5 = **add
-the version text** as PS3 does; minimum players stay 2 in every mode, 1 in co-op (group F); the lobby keeps the party
+the version text** as PS3 does; matchmaking's minimum players stay 2 in every mode, 1 in co-op (group F; custom
+games start with 1 player in every mode, owner rule 2026-11-25); the lobby keeps the party
 size where PS3 showed the daily player count (question 2). The three script values PS3 held during results are
 skipped (meaning unknown).
 

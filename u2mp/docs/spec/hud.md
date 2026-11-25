@@ -352,6 +352,10 @@ and an alpha:
    with: what; the C string at the u64 pointer at widget+0 (or `(no name)` when that pointer is
    0); id; table; table name; table name again; `set` or `NULL` (material table of that number);
    that table's count (0 when NULL).
+   **Since 934a6ca** (see "Changes after the rewrite" at the end): the name pointer is read as a
+   C string only when it is at least 0x100000000 (4 GiB; guest memory starts at 0x1000000000,
+   `runtime_memory.c` USER_MIN). Below that, the same line is logged with `(widget %llx)`, the
+   pointer value in hex, so a NULL name logs `(widget 0)` instead of `(widget (no name))`.
 
 "Frame image of field F" means: image widget draw of the set's field F, position temporary
 (0, 0), alpha 1.0f, what `frame`.
@@ -646,7 +650,8 @@ count = s32 +0x7c.
 3. Text 1 non-empty: DrawText measure (cx, y, ts, colour 1, flags 12, box 999999 x 40); then, when
    drawing, DrawText (same, flags 8); cx += the measured w.
 4. cx += 10 * s.
-5. Weapon icon: when the pointer at +0x68 is non-NULL, its name pointer non-NULL with a non-empty
+5. Weapon icon (since 934a6ca "non-NULL" means at least 0x100000000 for both pointers, as in the
+   image widget log; below that the icon counts as absent): when the pointer at +0x68 is non-NULL, its name pointer non-NULL with a non-empty
    string, and 0 < size x < 1024 and 0 < size y < 1024: k = 0.45 * s; w = sx * k; h = sy * k;
    advance = (w * mul) / div when div > 0, mul > 0 and mul / div < 4, else w. When drawing: guest
    call 0x555140(name, 0); quad of handle {low u32, high u32 of the first returned value,
@@ -815,6 +820,18 @@ Tick (step 9 of 4.2):
 7. When weapon != 0 and now - show-until < 0 (s32): own count += 1; guest call
    0x954740(ctrl, -100.0) directly (not through the probe).
 
+**Since 934a6ca** (see "Changes after the rewrite" at the end):
+
+- The tick is no longer step 9 of the Draw: `hud_weapon_tick()` (u2mp_internal.h) runs it from the session frame
+  work (session.cpp, every frame, after the weapon damage patch and before `voice::frame`), also on frames with no
+  HUD Draw.
+- Weapon switch: one ShowWeaponHud. Step 7 is gone; step 6 becomes: when weapon != last weapon: when both are
+  non-zero, switch count += 1; last weapon = weapon; when weapon != 0: own count += 1 and guest call
+  0x954740(ctrl, -100.0) directly. So the panel is asked for once per change to a non-zero weapon (the game's own
+  callers, e.g. RunNGun 0x8fe50a, also call it once per event) and not on every frame of the 3 s window; how long it
+  stays up is the game's. There is no show-until frame any more (934a6ca still wrote it and read it nowhere; removed
+  2026-11-25 with step 5's `now`), and the install line names the one call per switch (5 step 9).
+
 ## 5. Install
 
 `install_hud(installed)`:
@@ -895,8 +912,10 @@ Tick (step 9 of 4.2):
    - when the u64 at 0x1027030 is B + 0x954740, replace it with the ShowWeaponHud probe; when the
      u64 at 0x103f768 is B + 0x563a20, replace it with the panel draw probe (each independent; a
      different value is left alone without a log);
-   - trigger on; log `hud: weapon panel: shown for 3 s after a weapon switch (ShowWeaponHud
-     0x954740 from the multiplayer draw), probes on` (the 3 comes from `%.0f` of 3.0).
+   - trigger on; log `hud: weapon panel: ShowWeaponHud 0x954740 once per weapon switch (from the
+     frame work), probes on` (since 2026-11-25; before, `hud: weapon panel: shown for 3 s after a
+     weapon switch (ShowWeaponHud 0x954740 from the multiplayer draw), probes on`, which described
+     the window 934a6ca removed; the differential test maps the old line to the new one).
 
 ## 6. Test scenarios
 
@@ -986,3 +1005,21 @@ Weapon trigger:
 `hud_menu_text(x, y, scale, text)`: `draw_text` with white, flags 8, box 999999 x 40, only after `install_hud`
 passed its byte checks (the flag is set before the draw stub check). Used for the multiplayer menu version text.
 The unused marker mask read keeps its read (`[[maybe_unused]]`).
+
+## Changes after the rewrite (differential test, `gow3_pc/tests/u2mp_rewrite/test_hud.cpp`)
+
+The old-vs-new comparison runs the pre-rewrite build (62fc26b) against the current one. These changes of the
+current code are documented here and mapped in the test (`hud_expected`, `n1_old_input`); everything else is
+compared unchanged.
+
+| change | origin | spec | how the test maps it |
+| --- | --- | --- | --- |
+| Weapon trigger from the frame, not the Draw | squash 934a6ca (no message; u2mp_internal.h comment "from the frame (not the HUD draw)") | 4.12 "Since 934a6ca" | the new side runs `hud_weapon_tick()` right after each Draw (22bc129) |
+| One ShowWeaponHud per weapon change instead of one per frame of the 900-frame window | squash 934a6ca (no comment; the call moved into the weapon-change branch, show-until kept) | 4.12 "Since 934a6ca" | the old record keeps its own ShowWeaponHud only on a tick whose weapon differs from the last one and is non-zero; the periodic log's own count drops by the calls removed |
+| Install line names one ShowWeaponHud per switch; the unread show-until frame is gone | 2026-11-25 (cleanup of the 934a6ca leftovers) | 4.12 "Since 934a6ca", 5 step 9 | the old install line `... shown for 3 s after a weapon switch (... from the multiplayer draw), probes on` -> `... ShowWeaponHud 0x954740 once per weapon switch (from the frame work), probes on` |
+| Image widget log: name pointers below 4 GiB printed in hex (`widget 0` for NULL) | squash 934a6ca (no comment; the same 4 GiB test guards the message weapon icon) | 4.1 image widget draw step 5 | `(widget (no name))` -> `(widget 0)` |
+| Message weapon icon: pointers below 4 GiB count as absent | squash 934a6ca | 4.8b step 5 | none needed: the scenarios use image or NULL pointers |
+| Film boosters in cinema mode 0 (follow camera) instead of != 0 | 50a6b69, parity-n-remaining.md N1 | 4.7 step 1 | the old side gets the input with the same film-site decision: mode != 0 -> local tracker booster indices +0x2a0 / +0x2a4 = -1 (its only reader; nothing drawn); mode 0 -> mode 1 when the theater HUD (the other reader) returns before reading it; the bytes are put back after each frame |
+
+Not verified in the game: whether one ShowWeaponHud keeps the weapon panel up as long as the per-frame calls did
+(TEST-LOG 2026-11-09 tests 68-69 checked the per-frame version).

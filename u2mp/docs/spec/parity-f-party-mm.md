@@ -446,9 +446,11 @@ Counts (2026-11-25, after section 7): 42 COVERED, 21 PLATFORM, 0 MISSING; KEPT: 
 
 ## 7. Implementation (2026-11-25, branch `u2mp-ps3-parity-2`)
 
-Owner decisions: **minimum players** (F1 and every place a minimum decides whether matchmaking or a match may begin):
-2 in every game mode, 1 in co-op (types 4, 8, 9, 12) - frontend3.cpp `matchmaking_min_players`, session.cpp
-`type_min_players` (custom game "too few players"; PS3 asked 2 only for type 10 and co-op). PS3 wait times otherwise.
+Owner decisions: **minimum players** (F1 and every place a minimum decides whether matchmaking may begin): 2 in
+every game mode, 1 in co-op (types 4, 8, 9, 12) - frontend3.cpp `matchmaking_min_players` (`start_rules.h`
+`playlist_min_players`). Owner rule 2026-11-25: the minimum is for **matchmaking only**; a custom game starts with
+1 player in every game mode (session.cpp `custom_start_ok`, `start_rules.h` `may_start(kCustom, ..)`; PS3 asked 2
+for type 10 and co-op; in the match: solocoop.cpp, `parity-n-inlined.md` NI2). PS3 wait times otherwise.
 **F10**: PS3 behaviour (no lobby host migration in matchmaking). **Question 5/6**: a player whose game join failed
 drops out of its party (PS3 behaviour).
 

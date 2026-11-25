@@ -43,7 +43,9 @@ Our runtime replaces or wraps these PS4 hosts: the match state updates (`0x5f100
 `0x5f2830` (`cinema.cpp`, original called; `nullsites.cpp` patches only its replay-stream writer at `0x5f2a8c..`),
 the profile query `0x65e890` (`menus.cpp query_profile`, original called), the tracker state helpers `0x634970` /
 `0x60ded0` (`session.cpp` traces that call the originals; `netanim.cpp` stubs at other sites of `0x634970`), and the
-co-op minimum at `0x63f60b` (`solocoop.cpp`, 2 -> 1, owner rule). No host named in this file is stubbed.
+co-op minimum at `0x63f60b` (`solocoop.cpp`, 2 -> 1, owner rule) and the two Elimination one-team tests at
+`0x63f48b` / `0x63f837` (`solocoop.cpp`, skipped only in a custom game begun alone, NI2). No host named in this file
+is stubbed.
 
 ## 2. Corrections to the audit's PS4 column
 
@@ -164,12 +166,12 @@ ours. Ids are the DC string ids the PS3 function uses.
 | 49e2b0 | 5f1000 | current co-op task's script id, default task fallback | COVERED-OURS | natives.cpp `net-coop-script-id` (`parity-c` row 4cd8ac) |
 | 49e368 | 5f1000 | current co-op task's host script id, fallback | COVERED-OURS | natives.cpp `net-coop-host-script-id` (`parity-c` row 4ccab8) |
 | 49e4a0 | 5f1000 | game type of the current net game | COVERED-INLINED | inlined at every use (40+ PS3 callers) |
-| 49e518 | 5f1000 | minimum players per game type | COVERED-OURS | Start Match: session.cpp `type_min_players` (owner rule: 2, co-op 1); in-match check inline in `0x63e6a0` (section 2), co-op lowered by solocoop.cpp |
+| 49e518 | 5f1000 | minimum players per game type | COVERED-OURS | Start Match: session.cpp `custom_start_ok` with `start_rules.h` (owner rule 2026-11-25: custom 1 in every type; matchmaking 2, co-op 1 in frontend3.cpp); in-match check inline in `0x63e6a0` (section 2), co-op lowered by solocoop.cpp |
 | 49e620 | 5f1000 | room size per type (10, co-op 3) | COVERED-INLINED | PS3 caller `0x444bb0` = PS4 `0x5eb830` |
 | 49e6e0 | 5f2830 | map record of the current net game | COVERED-INLINED | ids inside |
 | 49eb80 | 647a50 | StartNetGame: remember the flag object (`ad66fbf6`) | COVERED-INLINED | id inside |
 | 49f058 | 5f1000 | current co-op task record | COVERED-INLINED | PS3 callers `0x4caa28` / `0x4cca70` / `0x4cd850` = PS4 `0x6640a0`, `0x669780`, `0x6697e0` |
-| 49f114 | 63e6a0 | CheckRoundOver (5 s after round start; one team left; time) | COVERED-INLINED | second 1500-tick test at `0x63f761` |
+| 49f114 | 63e6a0 | CheckRoundOver (5 s after round start; one team left; time) | COVERED-INLINED | second 1500-tick test at `0x63f761`; one-team-alive branch `0x63f837` skipped in a solo custom game (NI2) |
 | 49f450 | 5f1000 | maximum players per type (10, co-op 3) | COVERED-OURS | session.cpp `type_max_players` (`parity-d` 2.2) |
 | 49f510 | 5f1000 | co-op task step: two calls on the co-op score object, the first only when the current task has its value field set | COVERED-INLINED | PS3 caller = CompleteTask Apply PS4 `0x62d820` |
 | 49f958 | 5f1000 | type 11 flag | COVERED-INLINED | inlined |
@@ -178,7 +180,7 @@ ours. Ids are the DC string ids the PS3 function uses.
 | 4a0c98 | 5f1000 | co-op type or a page-mode test | COVERED-INLINED | inlined |
 | 4a1120 | 5f1000 | team test for the local player | COVERED-INLINED | inlined |
 | 4a1790 | 640fc0 | end the net game: state 0, kill characters, clear lists, fade audio | COVERED-INLINED | callers `0x5e9b3a`, `0x5f2e7d`; netinit.cpp only checks bytes |
-| 4a49e8 | 63e6a0 | CheckGameOver | COVERED-INLINED | audit's manual check (`0x63f31d..0x63f3e5`); co-op player tests at `0x63f529..0x63f637`, minimum lowered by solocoop.cpp |
+| 4a49e8 | 63e6a0 | CheckGameOver | COVERED-INLINED | audit's manual check (`0x63f31d..0x63f3e5`); one-team test `0x63f42b..0x63f4e2` (type 10 outside matchmaking skipped in a solo custom game, NI2); co-op player tests at `0x63f529..0x63f637`, minimum lowered by solocoop.cpp |
 | 4a5548 | 5f1000 | "is a competitive type" | COVERED-INLINED | inlined |
 | 4a8af8 | 63e6a0 | NetGameManager::HostUpdate | COVERED-INLINED | audit's manual check; `0x63e6a0` called at `0x5e730e`, `0x5f226f` |
 | 4c5268 | 661a50 | trophy stat: award the trophy when the counter reaches its target | DROPPED | trophies |
@@ -221,13 +223,58 @@ range, or the record's game type is 4, 8, 9 or 12, or `int(limit x 300)` is 0 or
 Test: host a co-op game (any variation) with a friend looking at the friends list or the friend card: no "Match ends
 in" line; a competitive game still shows it.
 
+### NI2. Custom game started alone, any game mode (owner rule 2026-11-25) - OURS, implemented 2026-11-25
+
+Owner rule: the minimum players are a matchmaking limit only (2 in every mode, 1 in co-op); a custom game can be
+started by one player in any game mode, and it must run and end by its own limits.
+
+Every place that stopped a solo custom game:
+
+1. Ours, Start Match (session.cpp `custom_start_ok`): "too few players" with 2 for every competitive type (and PS3's
+   "every player is on one team" for type 10, which one player always is). Now: minimum 1 for every type in a
+   custom game; the one-team box only with 2 or more players (`start_rules.h` `may_start`, `one_team_refused`).
+2. PS4 game over, "only one team has players" (`0x63e6a0`, `0x63f42b..0x63f4e2`, after the 5 s / time / score tests):
+   used trackers (NGM `+0x30` set, `+0x27c` clear) all on one team (`+0x144`), or none, end the match with reason 2.
+   It runs for every competitive type in matchmaking (netInfo `+0x2c4` == 1) and outside matchmaking only for game
+   type 10 (the test `cmp r8d, 10; jne 0x63f4e7` at `0x63f48b`). A solo custom Elimination ended 5 s after it began.
+3. PS4 Elimination round end (`0x63f6e4..0x63f8a4`, type 10 while rounds remain, 5 s after the round mark NGM
+   `+0x1d60`): it counts the living players per team; when they are all on one team (or nobody lives) it sends the
+   round end at once (`0x617ed0`, reason 2, winner = that team or -1); only with both teams alive does it test the
+   round time limit (NGM `+0x21b8` seconds x 300). A solo Elimination ended every round after 5 s and the match after
+   the needed rounds.
+4. Not blockers (checked): the co-op in-match minimum (`0x63f529..0x63f637`) runs only for co-op types and is 1
+   (solocoop.cpp); the matchmaking-only score limit by player count (`0x63e707`); the other readers of NGM `+0x1b90`
+   and of the player count `0x63ffb0` (stats, co-op waves); the other game types outside matchmaking have no
+   team or player-count end. Run 41 (PORT-GAMEPLAY3.md 6) already ran solo custom deathmatches.
+
+Custom game against matchmaking: netInfo `+0x2c4` (page mode; 1 matchmaking, 2 custom game) stays set during the
+match and is what the PS4 code itself tests. "Begun alone": NGM `+0x1b90` (players in the start event; written by
+the start event's writer and Apply for every game type) is 1 or less.
+
+Implemented (solocoop.cpp `install_solo_elimination`, both sites byte-checked, left alone with a log line when
+they differ):
+- `0x63f48b` (`41 83 f8 0a 75 56`) -> jump to a stub that asks `one_team_ends_game(type)`: game type 10 and not
+  (custom and begun alone). True -> the team test `0x63f491`, false -> `0x63f4e7`. Matchmaking and multi-player
+  custom games behave as before.
+- `0x63f837` (`bf 02 00 00 00 f6 c2 01 74 63`) -> stub: both teams alive -> the time test `0x63f841` as before;
+  otherwise `round_runs_to_time(alive team)` (custom, begun alone, the player alive): true -> the time test
+  `0x63f841` (the round ends at its time limit, the solo team ahead, reason 2), false -> the round end call
+  `0x63f8a4` as before (a dead solo player ends the round). eax and esi are kept across the call.
+- The match then ends by the round count (`0x63f63d`) like any Elimination.
+
+Test: custom Elimination alone (UNCHARTED_U2MP_TIME_LIMIT=30 shortens the round): the match does not end after 5 s;
+each round ends at its time limit; the log shows `solo custom game: Elimination round N runs to its time limit`;
+the match ends after the rounds needed. Custom TDM / Plunder / Turf War / King of the Hill alone: run until time or
+score limit. Two players in custom Elimination: unchanged (a team wiped ends the round; a team leaving ends the
+match). Matchmaking with 1 player: no vote (minimum 2, co-op 1).
+
 ## 5. Open points
 
 1. In-match minimum (PS4 `0x63f529..0x63f637`, PS3 `0x4a49e8`): only co-op games end for too few players (fewer than
    at the start, or fewer than the co-op minimum, which solocoop.cpp lowers to 1). Competitive games never end for
-   player count there. That matches PS3; the owner rule "minimum 2 in every mode" is applied at Start Match and in
-   matchmaking only. Whether a competitive match should also end when it drops below 2 is an owner question (not a
-   PS3 behaviour).
+   player count there (only for one team left, NI2). That matches PS3; the owner rule "minimum 2 in every mode" is
+   applied in matchmaking only (owner rule 2026-11-25: custom games start with 1 player in any mode). Whether a
+   competitive match should also end when it drops below 2 is an owner question (not a PS3 behaviour).
 2. The PS3 role of `0x439df8` was read only as far as needed (it is intact in PS4 `0x5ec010` and runs); its two
    NetPlayerData fields are not named here.
 3. `0x4729f0`'s PS4 site `0x60f480` was identified by the event's vtable and the "most damage" loop, not compared

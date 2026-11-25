@@ -669,7 +669,7 @@ uint32_t row_rank(size_t k) {
 }
 
 // ---- documented changes: old record -> new form -------------------------------------------------------------
-// netinit, in 934a6ca (after the rewrite; reasons in netinit.cpp, no spec section): the first netinit_prepare /
+// netinit, in 934a6ca (after the rewrite; spec progression.md 2.4.5, reasons from netinit.cpp): the first netinit_prepare /
 // netinit_match whose code checks pass also runs the net bit writer pass first (the fake image holds none of the 342
 // 1.02 sites: logged, nothing patched) and, after the boosters, turns the player-setup slot reset (0x632148, the real
 // call bytes) into NOPs. The other two additions (NetCharacter heap, foreground meshes) need guest state these

@@ -164,6 +164,7 @@ button_start_match` returns at once for a non-host; PS3 does not test that (memb
    4, 8, 9, 12; 0 for any other type, so any party fails) -> `0x4a936499` / `0x13cabc15`. **[missing]**
 3. Too few (skipped when a tuning byte, PS3 `0xf2264c+0x7c`, is set; 0 in retail): members < the type's
    minimum (1 for types 0, 1, 2, 3, 5, 6, 7, 11; 2 for 4, 8, 9, 10, 12) -> `0xb90de2b1` / `0xcca3ca1f`.
+   (Implemented 2026-11-25 as owner rule: custom games start with 1 player in every game type, see 6.)
    **[missing]** Conflict: our solo co-op (solocoop.cpp) starts co-op with 1 player on purpose (open
    question 2).
 4. Game type 10 only: count the members of the 10 party slots that have member data; if all of them are on
@@ -446,8 +447,10 @@ Counts (after the implementation of 2026-11-25): COVERED 41 (2 of them C*: cover
 ## 6. Implementation status (2026-11-25)
 
 Owner decisions applied: question 1 yes (start failure shows `0x88a082af`, the main menu stays); question 2
-solo co-op stays (a co-op type starts with 1 player: the "too few players" check uses minimum 1 for types 4,
-8, 9, 12, a deliberate difference; type 10 keeps minimum 2); question 7 yes (Mute is a silent toggle, both
+solo co-op stays; owner rule 2026-11-25 widens it: the minimum players are for matchmaking only, a custom game
+starts with 1 player in every game type (the "too few players" check uses minimum 1 for every type, a deliberate
+difference; the type 10 one-team check runs only with 2 or more players; solo Elimination in the match:
+`parity-n-inlined.md` NI2); question 7 yes (Mute is a silent toggle, both
 boxes dropped). "MP auto-on" (question 8) unchanged.
 
 - 2.1: session.cpp `button_multiplayer`: transport start failure -> log, close, `game_message_box(0x88a082af,

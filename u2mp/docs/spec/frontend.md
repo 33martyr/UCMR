@@ -263,8 +263,9 @@ Criteria rows (PS3 data table `0xb25ab071`, one row per search pass): rows of 0x
 pointer (+8), s32 ping limit in ms at row+0x08 (0 or less: none), the status text the status line shows for tip index
 = pass. Passes: the table's row count, at most 3, 1 when the table is missing.
 
-Minimum players (owner rule 2026-11-25, also issue 104): 2 in every game mode, 1 for a playlist of co-op types only
-(4, 8, 9, 12); `UNCHARTED_U2MP_MM_MIN` (1..10) overrides it for tests.
+Minimum players of matchmaking (owner rule 2026-11-25, also issue 104; the minimum is for matchmaking only, custom
+games start with 1 player in every game mode): 2 in every game mode, 1 for a playlist of co-op types only
+(4, 8, 9, 12) (`start_rules.h` `playlist_min_players`); `UNCHARTED_U2MP_MM_MIN` (1..10) overrides it for tests.
 
 Session messages (type byte first; multi-byte fields little-endian, unaligned):
 

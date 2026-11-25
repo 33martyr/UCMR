@@ -125,6 +125,7 @@ uint8_t *g_skins = nullptr;  // merged skin table
 int32_t g_skin_count = 0;
 uint8_t *g_slot_table = nullptr;  // the 10-entry per-slot table the game reads
 char g_slot_art[10][48];
+const char *g_record_pkg[10] = {};  // records 0..9's own packages (their +8 names the slot art)
 uint8_t *g_store = nullptr;  // store copy with the added skin items
 uint8_t *g_boosters = nullptr;  // net-patch9's own booster table
 int32_t g_booster_count = 0;
@@ -350,6 +351,13 @@ const char *actor_source(const char *name) {
     return std::strstr(host, "CUSA02320") ? "PS4 game" : "import overlay";
 }
 
+// The package of skin record i. Records 0..9 of the merged table name the slot art buffers that 5.8
+// rewrites per net slot; their own package is the one kept aside when the table was built.
+const char *record_package(const uint8_t *recs, int32_t i) {
+    if (g_skins && recs == rdptr(g_skins, 8) && i >= 0 && i < 10 && g_record_pkg[i]) return g_record_pkg[i];
+    return reinterpret_cast<const char *>(rdptr(recs + 0x30 * uint64_t(i), 8));
+}
+
 // Position of a skin id in the bound skin table (-1 when absent) and its package name.
 std::pair<int32_t, const char *> skin_index(uint32_t id) {
     const uint8_t *t = dc_find(kSkinSym);
@@ -357,7 +365,7 @@ std::pair<int32_t, const char *> skin_index(uint32_t id) {
     const uint8_t *recs = rdptr(t, 8);
     for (int32_t i = 0; recs && i < rds32(t) && i < 512; ++i) {
         const uint8_t *rec = recs + 0x30 * uint64_t(i);
-        if (rd32(rec, 0x10) == id) return {i, reinterpret_cast<const char *>(rdptr(rec, 8))};
+        if (rd32(rec, 0x10) == id) return {i, record_package(recs, i)};
     }
     return {-1, nullptr};
 }
@@ -368,9 +376,8 @@ uint32_t skin_id_of(const char *name) {
     if (!t || !name || !*name) return 0;
     const uint8_t *recs = rdptr(t, 8);
     for (int32_t i = 0; recs && i < rds32(t) && i < 512; ++i) {
-        const uint8_t *rec = recs + 0x30 * uint64_t(i);
-        const char *pkg = reinterpret_cast<const char *>(rdptr(rec, 8));
-        if (pkg && std::strcmp(pkg, name) == 0) return rd32(rec, 0x10);
+        const char *pkg = record_package(recs, i);
+        if (pkg && std::strcmp(pkg, name) == 0) return rd32(recs + 0x30 * uint64_t(i), 0x10);
     }
     return 0;
 }
@@ -548,8 +555,7 @@ U2MP_GUEST uint64_t random_skin_pick(void *list, int32_t side) {
         const int32_t i = int32_t(uint32_t(r));
         const uint8_t *t = dc_find(kSkinSym);
         const char *pk = nullptr;
-        if (t && i >= 0 && i < rds32(t) && rdptr(t, 8))
-            pk = reinterpret_cast<const char *>(rdptr(rdptr(t, 8) + 0x30 * uint64_t(i), 8));
+        if (t && i >= 0 && i < rds32(t) && rdptr(t, 8)) pk = record_package(rdptr(t, 8), i);
         log("skins: random pick (0x64b430), side %d -> index %d '%s'", side, i, or_dash(pk));
     }
     return r;
@@ -674,7 +680,9 @@ void build_skin_table() {
     if (np9) {
         np9_n = rds32(np9);
         np9_recs = rdptr(np9, 8);
-        if (np9_recs && np9_n > 0 && np9_n <= 512 && in_copy(np9_recs, 0x28 * uint64_t(np9_n)))
+        if (skin_records_ok(np9_recs, np9_n, 0x30, true, true))
+            np9_stride = 0x30;
+        else if (np9_recs && np9_n > 0 && np9_n <= 512 && in_copy(np9_recs, 0x28 * uint64_t(np9_n)))
             np9_stride = 0x28;
     }
     if (!np9_stride && !stub) return;
@@ -734,13 +742,15 @@ void build_skin_table() {
     for (int32_t i = 0; i < stub_n; ++i) add_record(stub_recs + 0x30 * uint64_t(i), false);
     for (int32_t i = 0; i < np9_n && np9_stride; ++i) {
         const uint8_t *r = np9_recs + np9_stride * uint64_t(i);
+        if (np9_stride == 0x30) {
+            add_record(r, false);
+            continue;
+        }
         alignas(8) uint8_t rec[0x30] = {};
         wr32(rec, 4, rd32(r, 4));
         wrptr(rec, 8, rdptr(r, 8));
         wr32(rec, 0x10, rd32(r, 0x10));
-        wr32(rec, 0x18, rd32(r, 0x14));
-        wr32(rec, 0x1c, rd32(r, 0x18));
-        wr32(rec, 0x20, rd32(r, 0x1c));
+        for (int k = 0; k < 5; ++k) wr32(rec, 0x18 + 4 * k, rd32(r, 0x14 + 4 * k));   // name, photo, icon, +0x24, +0x28
         add_record(rec, false);
     }
     if (!has_id(kBaseballDrake)) {
@@ -784,9 +794,12 @@ void build_skin_table() {
         put_skin(rec_at(at), uint32_t(at), f.villain, f.package, f.id, f.name, f.photo, f.icon);
     }
     for (int32_t i = 0; i < count; ++i) wr32(rec_at(i), 0, uint32_t(i));
-    for (int32_t i = 0; i < 10 && i < count; ++i) {
+    for (int32_t i = 0; i < 10; ++i) {
+        g_record_pkg[i] = nullptr;
+        if (i >= count) continue;
         const char *pkg = reinterpret_cast<const char *>(rdptr(rec_at(i), 8));
-        std::snprintf(g_slot_art[i], sizeof g_slot_art[i], "%s", pkg ? pkg : "mp-hero");
+        g_record_pkg[i] = pkg ? pkg : "mp-hero";
+        std::snprintf(g_slot_art[i], sizeof g_slot_art[i], "%s", g_record_pkg[i]);
         wrptr(rec_at(i), 8, g_slot_art[i]);
     }
     wr32(block, 0, uint32_t(count));
@@ -934,7 +947,7 @@ void build_store_copy() {
             for (int32_t k = 0; k < g_skin_count; ++k) {
                 const uint8_t *rec = skin_recs + 0x30 * uint64_t(k);
                 if ((rd32(rec, 4) == 1) != villain) continue;
-                offer(rd32(rec, 0x10), rdptr(rec, 8));
+                offer(rd32(rec, 0x10), reinterpret_cast<const uint8_t *>(record_package(skin_recs, k)));
             }
         } else {
             for (const ExtraSkin &e : kExtraSkins)

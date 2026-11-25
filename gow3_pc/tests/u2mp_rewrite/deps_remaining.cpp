@@ -309,3 +309,10 @@ extern "C" int gow3gpu_text_input_poll(char *out_utf8, uint64_t size) {
     }
     return r;
 }
+
+#ifndef u2mp
+// New build only: the Mute Players lists (50a6b69, parity-n-remaining.md N2) take their row and target rules from
+// overlay_rules.cpp, pure functions with no other dependency (not in the old build); the real ones are linked so
+// the new code behaves as it ships.
+#include "overlay_rules.cpp"
+#endif

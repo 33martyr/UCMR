@@ -290,7 +290,7 @@ std::vector<uint8_t> cmp_image() {
     return s;
 }
 
-// Commit 49e7b63 (2026-11-16, in 9fd6134) added to the Playing::Enter hook (slot 4) a repair of the curve copied
+// Spec loading.md 4.2 "Curve repair". Commit 49e7b63 (2026-11-16, in 9fd6134) added to the Playing::Enter hook (slot 4) a repair of the curve copied
 // from DC c85e199d at 0x1139fe0 ("a zero count divides by zero in StartNetGame", loading.cpp kCurve): before and
 // after the original call, a count <= 0 is logged and the curve set to count 5 with its 0x2c bytes after the count
 // zeroed. The old code has no such repair, so where the old side calls the original of slot 4 (f_orig<4> /
@@ -448,6 +448,13 @@ void stubs_runtime() {
     // first call: keep those bytes and the frame balanced (push rbp; mov rbp,rsp; pop rbp), then enter the stub.
     bytes(0x5b5450, {0x55, 0x48, 0x89, 0xe5, 0x5d});
     hx::stub(0x5b5455, (void *)&f_item_text);
+    // The roster gate menu_up() (6d52c86, spec loading.md 4.7 step 1 and parity-m-features.md 10.2) checks the three
+    // PS4 1.02 users of the menu state word [M + 0x1014] once per process; the fixture holds them as in the image.
+    // The word itself stays 0 (no menu up), so the rosters draw as in the old code.
+    bytes(0x5e5b82, {0xc7, 0x83, 0x14, 0x10, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00, 0xc7, 0x83, 0x18, 0x10, 0x00, 0x00, 0x00,
+                     0x00, 0x00, 0x00, 0xc7, 0x83, 0x1c, 0x10, 0x00, 0x00, 0x00, 0x00, 0x80, 0x3f});
+    bytes(0x665151, {0x48, 0x8d, 0x05, 0xe8, 0x14, 0xad, 0x00, 0x83, 0xb8, 0x14, 0x10, 0x00, 0x00, 0x00});
+    bytes(0x4cbc18, {0x48, 0x8d, 0x05, 0x21, 0xaa, 0xc6, 0x00, 0x83, 0xb8, 0x14, 0x10, 0x00, 0x00, 0x00});
     hx::stub(0x5b5920, (void *)&f_item_desc);
     hx::stub(0x5a2670, (void *)&f_layout);
     hx::stub(0x5b4e90, (void *)&f_slot_quad);

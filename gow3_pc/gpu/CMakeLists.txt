@@ -263,6 +263,9 @@ if (WIN32)
     # u2mp clan tag check rules test (no game needed): ninja -C out/gpu u2mp-clantag-test
     add_executable(u2mp-clantag-test EXCLUDE_FROM_ALL ../tests/test_u2mp_clantag.cpp)
     target_compile_options(u2mp-clantag-test PRIVATE -Wall -Wextra -Werror)
+    # u2mp start rules test (custom solo, matchmaking minimum; no game needed): ninja -C out/gpu u2mp-start-rules-test
+    add_executable(u2mp-start-rules-test EXCLUDE_FROM_ALL ../tests/test_u2mp_start_rules.cpp)
+    target_compile_options(u2mp-start-rules-test PRIVATE -Wall -Wextra -Werror)
     target_link_options(gow3-probe PRIVATE -Wl,--disable-high-entropy-va "SHELL:-Xlinker --stack -Xlinker 16777216,16777216")
     # gow3: runtime unit tests (ninja -C out/gpu mp3-test videodec-test services-test).
     add_executable(mp3-test EXCLUDE_FROM_ALL ../tests/test_mp3.c ../src/runtime_mp3.c ../src/compat_win.c)

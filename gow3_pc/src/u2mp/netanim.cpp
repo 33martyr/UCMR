@@ -64,11 +64,12 @@ template <typename T> T peek(const void *p) {
 template <typename T> void poke(void *p, T v) { std::memcpy(p, &v, sizeof v); }
 const uint8_t *peek_ptr(const void *p) { return peek<const uint8_t *>(p); }
 
-// Guest animation records can carry debug fill (0xaaaaaaaa...) in fields the game did not set.
-bool guest_pointer(const void *p) {
+// Guest animation records can carry debug fill (0xaaaaaaaa...) in fields the game did not set: true when the n
+// bytes at p can be read.
+bool guest_pointer(const void *p, size_t n = 1) {
     const uintptr_t v = uintptr_t(p);
     if (v < 0x10000 || v >= 0x0000800000000000ull) return false;
-    return host_readable(p);
+    return host_readable(p, n);
 }
 
 // At most 8 log lines from the two stream call-outs together; the rest is silent.
@@ -79,8 +80,7 @@ bool overflow_line_allowed() {
 }
 
 // ---- phase encoding -----------------------------------------------------------------------------
-// How many bits a clip's phase takes, and the integer that stands for phase 1.0. Short clips need
-// fewer steps; long ones get 16 bits.
+// How many bits a clip's phase takes (always 10), the integer that stands for phase 1.0, and its inverse.
 struct PhaseFormat {
     unsigned bits;
     float scale;
@@ -190,6 +190,7 @@ std::atomic<int> g_leaves{0}, g_clips{0}, g_poses{0}, g_misses{0}, g_deep{0}, g_
 
 uint32_t read_bits(uint8_t *stream, unsigned bits) { return stream_get(stream, bits); }
 
+// count is the snapshot's 5-bit index count (read at 0x66b549), so at most 31; the table keeps 32.
 U2MP_GUEST void read_indices(uint8_t *rbp, uint32_t count) {
     const int seen = g_indices_read.fetch_add(1) + 1;
     if (seen <= 4) log("netanim: %u anim indices", count);
@@ -204,37 +205,43 @@ U2MP_GUEST void read_indices(uint8_t *rbp, uint32_t count) {
         poke<uint32_t>(tmp + 8, p);
         poke<uint32_t>(tmp + 0xc, max);
         poke<uint32_t *>(tmp, stream_words(reader));
-        g_indices[i < 32 ? i : 31] = p + 11 <= max ? uint16_t(stream_get(tmp, 11)) : 0xffff;
+        if (i < 32) g_indices[i] = p + 11 <= max ? uint16_t(stream_get(tmp, 11)) : 0xffff;
     }
     poke<uint32_t>(reader + 8, p);
 }
 
+// The NUL-terminated name at p, read in 16-byte pieces (each checked readable) within `size` bytes.
 bool name_at(const uint8_t *p, char *out, size_t size) {
-    for (size_t at = 0; p && at + 16 <= size; at += 16) {
+    for (size_t at = 0; at + 16 <= size && guest_pointer(p + at, 16); at += 16) {
         std::memcpy(out + at, p + at, 16);
         if (std::memchr(out + at, 0, 16)) return true;
     }
     return false;
 }
 
+// The anim of an art group's index entry idx: art group +0x30 -> +0x10 -> {u32 count, entries of 16 bytes}, entry
+// {u32 name sid, anim or pointer to it}. Every pointer is checked readable before it is followed.
 const uint8_t *anim_for(const uint8_t *group, uint32_t idx) {
-    if (!group || !guest_pointer(group) || idx >= 0x800) return nullptr;
+    if (!guest_pointer(group, 0x38) || idx >= 0x800) return nullptr;
     for (unsigned i = 0; i < 8; ++i)
         if (g_cache[i].group == group && g_cache[i].idx == idx && g_cache[i].anim) return g_cache[i].anim;
-    const uint8_t *tab = peek_ptr(peek_ptr(group + 0x30) + 0x10);
-    if (!tab || !guest_pointer(tab) || idx >= peek<uint32_t>(tab)) return nullptr;
+    const uint8_t *anims = peek_ptr(group + 0x30);
+    if (!guest_pointer(anims, 0x18)) return nullptr;
+    const uint8_t *tab = peek_ptr(anims + 0x10);
+    if (!guest_pointer(tab, 0x10) || idx >= peek<uint32_t>(tab)) return nullptr;
     const uint8_t *entry = peek_ptr(tab + 8) + uint64_t(idx) * 16;
-    if (!guest_pointer(entry)) return nullptr;
+    if (!guest_pointer(entry, 0x10)) return nullptr;
     const uint32_t want = peek<uint32_t>(entry);
     const uint8_t *x = peek_ptr(entry + 8);
     const uint8_t *found = nullptr;
     for (int deref = 0; deref < 2 && !found && x; ++deref) {
-        const uint8_t *a = deref ? peek_ptr(x) : x;
+        const uint8_t *a = deref ? (guest_pointer(x, 8) ? peek_ptr(x) : nullptr) : x;
+        if (!guest_pointer(a, 0x30)) continue;
         char name[128];
-        const uint8_t *text = a ? peek_ptr(a) : nullptr;
-        const uint8_t *clip = a ? peek_ptr(a + 0x28) : nullptr;
-        if (a && guest_pointer(a) && text && guest_pointer(text) && name_at(text, name, sizeof name) &&
-            sid(name) == want && clip && guest_pointer(clip) && peek<uint16_t>(clip + 0x22))
+        const uint8_t *text = peek_ptr(a);
+        const uint8_t *clip = peek_ptr(a + 0x28);
+        if (name_at(text, name, sizeof name) && sid(name) == want && guest_pointer(clip, 0x24) &&
+            peek<uint16_t>(clip + 0x22))
             found = a;
     }
     if (found) {
@@ -381,7 +388,7 @@ void build_reader_stub(uint8_t *stub) {
     c.bytes({0x4c, 0x89, 0xb5, 0x78, 0xfe, 0xff, 0xff});  // mov [rbp-0x188], r14 (replaced store)
     emit_save(c);
     c.bytes({0x48, 0x8b, 0x7d, 0x00});  // mov rdi, [rbp]: the reader's own rbp
-    c.bytes({0x48, 0x89, 0xc6});        // mov rsi, rax (the art group)
+    c.bytes({0x48, 0x89, 0xc6});        // mov rsi, rax (the anim art group the reader looked up: pAnimArtGroup)
     c.bytes({0x4c, 0x89, 0xf2});        // mov rdx, r14 (the index + 1)
     emit_call(c, reinterpret_cast<void *>(&read_leaf));
     emit_restore(c);
@@ -788,9 +795,6 @@ void install_netanim(int &installed) {
         return;
     }
 
-    const int assert_sites = skip_snapshot_asserts();
-    if (assert_sites) log("netanim: snapshot parse aborts on asserts (%d sites)", assert_sites);
-
     static const unsigned char writer_site[] = {0x41, 0xff, 0xc2, 0x41, 0xff, 0xc6, 0xe9, 0x40, 0x1b, 0x00, 0x00};
     static const unsigned char writer_eq[] = {0x44, 0x3b, 0x5c, 0x24, 0x54, 0x0f, 0x84, 0xb4};
     static const unsigned char writer_jae[] = {0x73, 0x47};
@@ -817,8 +821,11 @@ void install_netanim(int &installed) {
         log("netanim: snapshot writer / reader bytes differ from 1.02, left alone (no clip phases)");
         return;
     }
+    // Only a 1.02 snapshot reader gets its assert blocks rewritten.
+    const int assert_sites = skip_snapshot_asserts();
+    if (assert_sites) log("netanim: snapshot parse aborts on asserts (%d sites)", assert_sites);
 
-    // Both requests are always made: their order and size decide where the stubs land.
+    // All five requests are always made: their order and size decide where the stubs land.
     uint8_t *writer_stub = near_stub(512);
     uint8_t *reader_stub = near_stub(512);
     uint8_t *index_stub = near_stub(512);

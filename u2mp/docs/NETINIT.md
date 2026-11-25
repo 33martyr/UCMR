@@ -66,7 +66,23 @@ Checked and not needed:
 
 netinit.cpp does nothing unless these match: `0x640fe4`, `0x641012`, `0x6410e0` (node 0x60),
 `0x64119e`, `0x6411d2`, `0x641290` (node 0x38), `0x5d90bb` (layout), `0x5ec590` (session +0xc8),
-`0x5f6750`, `0x5fd8ef` (booster list), prologues of `0xb332a0` and `0xa15300`.
+`0x5f6750`, `0x5fd8ef` (booster list), prologues of `0xb332a0` and `0xa15300`, and (since 934a6ca) the
+player-setup call `e8 43 ba 00 00` at `0x632148`.
+
+## Game fixes added in 934a6ca
+
+netinit.cpp also makes five changes that were not part of the rewrite; the exact rules are in
+`spec/progression.md` 2.4.5:
+
+- the code check at `0x632148` (NetEventPlayerSetup::Apply's call of the slot reset `0x63db90`);
+- the net bit writer fix: the 342 `mov r32,-1 ... shl r32,cl` mask sites in `0x5e0000..0x640000` become
+  `or r64,-1 ... shl r64,cl`, so a field at bit offset 0 no longer ORs into stale bits (all or nothing: any other
+  site count leaves them alone);
+- the player-setup NOP: the slot reset call at `0x632148` becomes five NOPs, so a joiner keeps the slots the
+  session layer filled;
+- NetCharacter's process heap (type node `0x14cee28`) 128 -> 512 KiB, for players on a single-player actor;
+- the foreground mesh store at `0x5f228d` writes 0 instead of 1, so players, NetCharacters, pickups and props are
+  drawn in net games.
 
 ## Not verified
 

@@ -1278,7 +1278,6 @@ struct WeaponTrigger {
     uint64_t panel_draws = 0;
     uint64_t callers[6] = {};
     uint64_t last_weapon = 0;
-    int32_t show_until = 0;
     bool warned = false;
 };
 WeaponTrigger g_weapon;
@@ -1330,12 +1329,10 @@ void weapon_tick() {
 
     uint64_t weapon = reinterpret_cast<uint64_t>(
         reinterpret_cast<void *(U2MP_GUEST *)(void *)>(get)(reinterpret_cast<void *>(player)));
-    int32_t now = frames();
     if (weapon != g_weapon.last_weapon) {
         if (weapon && g_weapon.last_weapon) g_weapon.switches += 1;
         g_weapon.last_weapon = weapon;
-        if (weapon) {
-            g_weapon.show_until = wrap_add(now, 900);   // 3 seconds
+        if (weapon) {   // the game's ShowWeaponHud keeps the panel up for its own time
             g_weapon.own_shows += 1;
             guest<ShowWeaponFn>(fShowWeaponHud)(reinterpret_cast<void *>(ctrl), -100.0f);
         }
@@ -1444,9 +1441,7 @@ void install_weapon_trigger() {
     if (global<uint64_t>(kPanelDrawSlot) == abs_of(fPanelDraw))
         store<uint64_t>(abs_of(kPanelDrawSlot), reinterpret_cast<uint64_t>(&panel_draw_probe));
     g_weapon.on = true;
-    log("hud: weapon panel: shown for %.0f s after a weapon switch (ShowWeaponHud 0x954740 from the multiplayer "
-        "draw), probes on",
-        3.0);
+    log("hud: weapon panel: ShowWeaponHud 0x954740 once per weapon switch (from the frame work), probes on");
 }
 
 }  // namespace

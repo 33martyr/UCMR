@@ -173,6 +173,13 @@ every 10 s and whenever ngm+0x1e80/0x1e84/0x1e88 change. `UNCHARTED_U2MP_TIME_LI
 sets the time limit for test runs, so a solo match reaches the time-limit game over, then
 ShowResults (10 s countdown) and Leave.
 
+Solo custom games (owner rule 2026-11-25: custom games start with 1 player in every game mode, the
+minimum of 2 is for matchmaking only): the same code also ends a match when only one team has players
+(every competitive type in matchmaking, only type 10 Elimination outside it) and ends an Elimination
+round 5 s after it starts when only one team is alive. `solocoop.cpp` skips both in a custom game begun
+by one player, so a solo Elimination runs each round to its time limit (UNCHARTED_U2MP_TIME_LIMIT is
+then the round time) and ends by its round count. Spec: `spec/parity-n-inlined.md` NI2.
+
 ### 6.2 Scans
 
 | Scan | Result |
