@@ -80,6 +80,7 @@ constexpr uint32_t kTextJoin = 0xb1600ce3, kCbJoin = 0x0ace8463;
 constexpr uint32_t kTextInviteParty = 0x4a555973, kCbInviteParty = 0x45a9c65b;
 constexpr uint32_t kTextViewProfile = 0x4040b706, kCbFriendProfile = 0x3fe6f70e;
 constexpr uint32_t kTextAddFriend = 0x910fb4f9;
+constexpr uint32_t kTextParty = 0xb6bd34c3;   // "Party": PS3 PAGE_FRIENDACTIONS member list title
 
 // Our own callback ids (registered in the game's menu callback table on demand).
 constexpr uint32_t kCbFriendAccept = sid("U2MP_PC_CB_FRIEND_ACCEPT");
@@ -99,6 +100,7 @@ std::string g_selected_friend_name;    // the friend (or friend request) picked 
 // The picked friend's row now (the list is kept sorted, so rows move); -1 when it left the list.
 int selected_friend() { return g_selected_friend_name.empty() ? -1 : online::friend_index(g_selected_friend_name); }
 std::string g_selected_met;           // players-met name picked
+std::string g_profile_text;           // the friend View Profile text last shown (a party list arriving renews it)
 std::vector<std::string> g_pick_names;   // cinema picker: the friends offered, by option
 std::string g_last_level_name;        // level package lookups log once per name
 bool g_matchmaking_answered = false;  // kept for parity; nothing reads it
@@ -448,16 +450,30 @@ U2MP_GUEST void match_player_row(void *arg, void *, void *) {
 U2MP_GUEST void friend_accept(void *, void *, void *) { online::accept_request(selected_friend()); }
 U2MP_GUEST void friend_remove(void *, void *, void *) { online::remove_friend(selected_friend()); }
 // View Profile: a friend's card lines (PS3 PAGE_FRIENDACTIONS header, menus.cpp), one per line; a request row
-// keeps its own text.
-U2MP_GUEST void friend_profile(void *, void *, void *) {
-    const int i = selected_friend();
+// keeps its own text. Under them the friend's party members (PS3 PAGE_FRIENDACTIONS member list, parity G4):
+// the title "Party" and one online id per line, nothing while the list is empty.
+std::string friend_profile_text(int i, const std::vector<std::string> &party) {
     std::string text;
     for (const std::string &line : friend_card_lines(i))
         if (!line.empty()) text += (text.empty() ? "" : "\\") + line;
     online::FriendView v;
     if (online::friend_view(i, v) && v.other_build) text += "\\Plays another version of the game.";
     if (text.empty()) text = online::profile_text(i);
-    text_set_player(text.c_str());
+    if (!party.empty()) {
+        const char *title = reinterpret_cast<const char *(U2MP_GUEST *)(void *, uint32_t)>(image_ptr(fTextFind))(
+            image_ptr(0x1066660), kTextParty);
+        text += std::string("\\") + (title ? title : "");
+        for (const std::string &name : party) text += "\\" + name;
+    }
+    return text;
+}
+
+U2MP_GUEST void friend_profile(void *, void *, void *) {
+    const int i = selected_friend();
+    std::vector<std::string> party;
+    online::friend_party(i, party);   // the cached list; asks again when it is old or another friend's
+    g_profile_text = friend_profile_text(i, party);
+    text_set_player(g_profile_text.c_str());
     message_box(kTextPlayer);
 }
 
@@ -523,7 +539,7 @@ U2MP_GUEST void met_profile(void *, void *, void *) { notice_text(progression_pl
 
 U2MP_GUEST void players_met_row(void *arg, void *, void *) {
     const int row = int32_t(arg_word(arg, 4));
-    const std::vector<std::string> names = progression_recent_players(50);
+    const std::vector<std::string> names = progression_players_met();
     if (row < 0 || size_t(row) >= names.size()) return;
     g_selected_met = names[size_t(row)];
     text_set_player(g_selected_met.c_str());
@@ -786,6 +802,16 @@ void game_message_box(uint32_t body, uint32_t second) {
 }
 
 void cinema_pick_friend() { pick_friend_for_cinema(); }
+
+// The View Profile box of that friend is still the top page with our text: it gets the party members.
+void friend_party_arrived(const std::string &npid, const std::vector<std::string> &party) {
+    if (g_profile_text.empty() || npid != g_selected_friend_name || !image.base) return;
+    const char *shown = own_text(kTextPlayer);
+    const int32_t top = load_at<int32_t>(menu_manager(), 0x1010);
+    if (!shown || g_profile_text != shown || top < 0 || top > 0x40 || page_at(top) != kPageMessageBox) return;
+    g_profile_text = friend_profile_text(selected_friend(), party);
+    text_set_player(g_profile_text.c_str());
+}
 
 void install_remaining(int &installed) {
     // 1. level record package

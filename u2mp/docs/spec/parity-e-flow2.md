@@ -519,7 +519,7 @@ skipped (meaning unknown).
 | 2.6 | partly | session.cpp slot manager (type 14, `slots_frame`, `reserve_party`, `admit_peer`, member left), online.cpp `take_led_party` / `reservation_refused`. **Not done: feeding the party ids to AssignTeams** (below). |
 | 2.7 | done | remaining.cpp `player_options` (Unmute), `match_player_row` (Mute / Unmute, Mute All, Unmute All, no host options, no title), voice.cpp `set_muted`. |
 | 2.8 | done | remaining.cpp `friend_options`. |
-| 2.9 | done | session.cpp `note_players_met` (every Playing entry), progression.cpp `progression_note_met`, progression_store.cpp `note_met`. Compatible with group G: one call with a name list; filtering friends / batching can go into `note_players_met`. |
+| 2.9 | done | session.cpp `note_players_met` (every Playing entry), progression.cpp `progression_note_met`, progression_store.cpp `note_met`. Compatible with group G: one call with a name list; filtering friends / batching can go into `note_players_met`. Group G1 (2026-11-25) changed it: friends and players already listed are skipped (no move to the top), batches of 16; see parity-g-friends.md. |
 | 2.10 | not possible | online.cpp `stats_ticker_text` now puts the local player's entry first (LAN: own entry only). **Missing call:** the PS4 function (or control field) that sets the ticker control's text, and its "visible" / "finished a full scroll" state, are not named by this spec or group D; without them nothing shows the text and the 10 s / full-scroll refresh cannot be wired. |
 | 2.11 | done | session.cpp `draw_version_text` (page handler) -> hud.cpp `hud_menu_text`: "1.09.078" from netInfo +0 (PS4 leaves it 0, so PS3's 0x0009004e stands in) at (1140, 60), scale 0.4, while `menu-temple` is ready. |
 

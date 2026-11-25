@@ -58,7 +58,7 @@ list of PAGE_MENU_LEADERBOARD no longer fetches any rows. This file:
 namespace u2mp {
 void install_progression(int &installed);
 void progression_publish();
-std::vector<std::string> progression_recent_players(size_t max);
+std::vector<std::string> progression_players_met();   // was progression_recent_players(max), see parity group G
 std::string progression_player_summary(const std::string &name);
 bool edit_clan_tag();      // defined in clantag.cpp, not here
 void clan_tag_frame();     // defined in clantag.cpp, not here
@@ -67,7 +67,7 @@ void clan_tag_frame();     // defined in clantag.cpp, not here
 
 Callers: `install.cpp` calls `install_progression(installed)` once (after `install_natives`, before
 `install_cinema`). `session.cpp` calls `progression_publish()` when Multiplayer is left; `clantag.cpp` calls it after
-the clan tag changed. `menus.cpp` (LIST_PLAYERSMET) and `remaining.cpp` call `progression_recent_players(50)`;
+the clan tag changed. `menus.cpp` (LIST_PLAYERSMET) and `remaining.cpp` call `progression_players_met()` (parity group G);
 `remaining.cpp` (Players Met: View Profile) calls `progression_player_summary(name)`.
 
 `gow3_pc/tests/test_u2mp_progression.cpp` tests only `progression_store.cpp`; it does not link progression.cpp.
@@ -801,3 +801,26 @@ Build a module image in a temp folder and point `runtime_file_translate` at it.
 31, not empty, not the local name) to `recent` with no statistics or sets a known one's `last_seen` to now, then the
 same remove-local / sort / cap as `note_match`; when anything changed the store file is written (no NetPlayerData
 publish). The Leave statistics (`note_match`) are unchanged and add up on the same entries.
+
+## Parity group G changes (2026-11-25, spec parity-g-friends.md G1)
+
+Replaces the group E paragraph above where they differ.
+
+- Store: `PlayerStats` gains `unlisted` (bool): a player known only from a match's end (joined late, or a friend
+  when the match started). File record word +68 (formerly always 0) = flags, bit 0 = unlisted; files written before
+  hold 0 there (= listed), so the format stays 1. Constants `kMetShown` 50, `kMetBatch` 16.
+- `note_match` (Leave): a name not stored yet comes in with `unlisted` = true; stored ones are updated as before
+  (statistics, `last_seen`, flag unchanged). The local leaderboards keep using every stored player.
+- `players_met(store, is_friend)`: the stored players with `unlisted` false, not the local name, not a friend
+  (`is_friend` empty = none), ordered by `last_seen` newest first (stable), at most 50.
+- `note_met(store, names, now, is_friend)`: the batch = the names (cut to 31) that are not empty, not the local
+  name, not a friend, not in `players_met` and not already in the batch, in order, at most 16. Each batch name is
+  added with no statistics, or a stored one gets `unlisted` = false; both get `last_seen` = now; then the usual
+  remove-local / sort / cap. Returns the batch. A name already listed is skipped (its `last_seen` does not move).
+- `progression_note_met(names)`: `is_friend` = online active and the name on the RPCN friend list
+  (`online::is_friend`); a non-empty batch logs `progression: adding player %s to Players Met` per name and writes
+  the store. The write is synchronous, so PS3's "a new batch is dropped while the previous one is being written"
+  cannot occur.
+- `progression_players_met()` (replaces `progression_recent_players(max)`; menus.cpp LIST_PLAYERSMET and
+  remaining.cpp Players Met rows): empty while online is active and the friend list is not ready
+  (`online::friend_list_ready`), else `players_met(store, is_friend)`.

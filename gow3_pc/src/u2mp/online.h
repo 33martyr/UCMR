@@ -102,6 +102,13 @@ bool friend_view(int i, FriendView &v);      // false: row i is no friend (a req
 int friend_index(const std::string &name);   // the row of that friend (or request) now, -1 none
 const char *request_state(int i);            // a request row's state text ("" for other rows)
 void refresh_friend_list();                  // fetch the list and presence again (the list's op 8)
+// The RPCN friend list has been read since the link came up (PS3: the friend list load is done).
+bool friend_list_ready();
+bool is_friend(const std::string &npid);     // a friend (not a request); false while the list is not ready
+// Friend row i's party members (PS3 parity G4, 0x490c28): the cached list when it belongs to that friend (true),
+// else nothing (false). Asks the room service for the members of the friend's party room (its presence) when the
+// cache is another friend's or older than 5 s and no such request runs; u2mp::friend_party_arrived follows.
+bool friend_party(int i, std::vector<std::string> &names);
 
 // ---- PAGE_MULTIPLAYER's friends stats ticker (PS3 0x446c60 / 0x43b30c / 0x43b290, spec parity-d-flow1.md 2.10) ----
 // One ticker text: a random category (0 cash .. 6 time played), then up to 5 random friends (of the first 101)
@@ -195,6 +202,9 @@ void show_notice(const char *text);
 // menus.cpp: the friend card of friends-list row i (cond 38 lines: title, status, activity / match, "Match ends
 // in"); empty when row i is no friend. View Profile shows them (remaining.cpp).
 std::vector<std::string> friend_card_lines(int i);
+// remaining.cpp: a friend's party member list arrived (online::friend_party); an open View Profile box of that
+// friend shows it.
+void friend_party_arrived(const std::string &npid, const std::vector<std::string> &party);
 }  // namespace u2mp
 
 namespace u2mp::session {

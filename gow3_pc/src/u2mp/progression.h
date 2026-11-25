@@ -16,11 +16,13 @@ void progression_publish();
 // One career publish (progression.md 1.5.4: counter +1, store written) when NetPlayerData is connected, changed or not.
 void progression_publish_career();
 
-// The players this PC met in recent matches (local store), most recently seen first, at most `max`.
-std::vector<std::string> progression_recent_players(size_t max);
+// The Players Met rows (local store, spec parity-g-friends.md G1): players added at a match start, no friend,
+// most recently seen first, at most 50. Online it is empty until the RPCN friend list is known.
+std::vector<std::string> progression_players_met();
 std::string progression_player_summary(const std::string &name);   // Players Met: View Profile
-// Match and round start (PS3 Playing::Enter 0x444660, spec parity-e-flow2.md 2.9): the remote players go into Players
-// Met at once (known ones move to the top) and the store is written; the match statistics still come at Leave.
+// Match and round start (PS3 Playing::Enter 0x444660, spec parity-e-flow2.md 2.9, parity-g-friends.md G1): the
+// remote players that are no friend and no Players Met row yet go into Players Met at once (at most 16) and the
+// store is written; the match statistics still come at Leave.
 void progression_note_met(const std::vector<std::string> &names);
 
 // clantag.cpp: BUTTON_CLANTAG's text box (NetPlayerData +0x1a8).

@@ -55,7 +55,7 @@ Host functions these files call (all exist already):
 - `online::active()`, `online::friend_count()`, `online::friend_online(int)`, `online::friend_row(int)`,
   `online::join_rows()`, `online::join_row(int)`, `online::join_title()`
 - `voice::volume()`, `voice::set_volume(float)`
-- `progression_recent_players(size_t)`
+- `progression_players_met()`
 - `dlc_net_game_available(int32_t)` (dlc.cpp). Note: it makes guest calls of its own (DC lookups),
   so every call to it is observable. Section 1.4 states exactly when it is called.
 - `package_by_id(uint32_t)` (session.cpp)
@@ -417,7 +417,8 @@ and the variation of the PS3 line are left out (their text ids / record fields a
 
 The original function is **never called** (the entry is redirected, the saved original unused).
 
-1. If op == 8, or the cached name list is empty: cached list = `progression_recent_players(50)`.
+1. If op == 8, or the cached name list is empty: cached list = `progression_players_met()` (parity group G1: no
+   friends, only players added at a match start, empty online until the friend list is known).
 2. Plain list over the cached list (count = its size), row r = the r-th name.
 
 (Op 8 thus reloads the list and also resets `cur` to 0. An empty list is reloaded on every call.)

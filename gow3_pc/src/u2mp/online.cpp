@@ -117,7 +117,8 @@ struct PresenceData {
     uint32_t key;
     uint32_t kind;
     uint64_t room;      // the room a friend joins (0 = not joinable now)
-    uint64_t pad;
+    uint64_t party_room;   // our party room (PS3 block: party room id), whose members a friend's View Profile
+                           // lists (parity G4); 0 none (also every build before it: the word was padding)
     // version 2
     uint8_t level;      // rank badge (the friends list row icon)
     uint8_t party;      // players in the party room (1 alone)
@@ -137,7 +138,11 @@ static_assert(sizeof(PresenceData) <= sizeof(U2oFriend::data), "presence data fi
 enum : uint8_t { kPresMenu = 0, kPresParty = 1, kPresCustom = 2, kPresMatchmaking = 3, kPresMatch = 4,
                  kPresCinema = 5 };
 constexpr char kPresenceTitle[] = "Uncharted 2: Among Thieves";
-constexpr double kPresencePeriod = 2.0, kInviteLife = 600.0, kMigrateTimeout = 15.0, kPromoteDelay = 0.4;
+// Presence (PS3 parity G2): checked every 5 s, sent on change; after a failed send the next check is 10 s later.
+constexpr double kPresencePeriod = 5.0, kPresenceRetry = 10.0;
+constexpr double kInviteLife = 600.0, kMigrateTimeout = 15.0, kPromoteDelay = 0.4;
+constexpr double kPartyListLife = 5.0;   // a friend's party member list is asked again after 5 s (PS3 parity G4)
+constexpr size_t kPartyListMax = 10;     // members kept of that list (PS3: 10 online ids)
 
 template <typename T> T &G(uint64_t offset) { return *image.at<T>(offset); }
 template <typename F> F guest(uint64_t offset) { return reinterpret_cast<F>(image.base + offset); }
@@ -163,6 +168,7 @@ struct Api {
     u2o_set_room_external_fn set_room_external = nullptr;
     u2o_set_room_internal_fn set_room_internal = nullptr;
     u2o_set_member_internal_fn set_member_internal = nullptr;
+    u2o_members_external_fn members_external = nullptr;
     u2o_peer_address_fn peer_address = nullptr;
     u2o_peer_connect_fn peer_connect = nullptr;
     u2o_peer_disconnect_fn peer_disconnect = nullptr;
@@ -210,6 +216,7 @@ bool load() {
     api.find_world = L::find_world; api.create_room = L::create_room; api.join_room = L::join_room;
     api.leave_room = L::leave_room; api.search_rooms = L::search_rooms; api.set_room_external = L::set_room_external;
     api.set_room_internal = L::set_room_internal; api.set_member_internal = L::set_member_internal;
+    api.members_external = L::members_external;
     api.peer_address = L::peer_address; api.peer_connect = L::peer_connect; api.peer_disconnect = L::peer_disconnect;
     api.peer_state = L::peer_state; api.send = L::send; api.recv = L::recv; api.identity = L::identity;
     api.friends = L::friends; api.set_presence = L::set_presence; api.send_message = L::send_message;
@@ -262,7 +269,7 @@ struct Room {
 
 enum class Req { World, CreateParty, CreateMatch, JoinList, JoinLeader, JoinMatchMember, Leave, Search, SetExternal,
                  SetInternal, SetMember, CreateMatchmaking, JoinMatchmaking, MmSearch, Presence, Message, OwnerRank,
-                 Rejoin, ScoreGet, ScoreRecord };
+                 Rejoin, ScoreGet, ScoreRecord, PartyMembers };
 struct Pending {
     Req kind;
     uint64_t room;
@@ -341,7 +348,18 @@ struct Invite {
 };
 std::vector<Invite> invites;
 std::string sent_presence;     // status + data last published
-double next_presence = 0;
+double next_presence = 0;      // time of the next presence check
+uint64_t presence_req = 0;     // the last presence request
+bool friends_loaded = false;   // the friend list was read since the link came up (PS3: friend load done)
+// A friend's party member list (PS3 parity G4): one cache, the friend it belongs to and when it was asked for,
+// and the one request that may run.
+struct PartyList {
+    std::string npid;
+    double at = 0;
+    std::vector<std::string> names;
+};
+PartyList party_list, party_list_asked;   // the cache; the friend and time of the request in flight
+uint64_t party_list_req = 0;
 // Party Up rows: up to kMaxFriends friends (PS3 PSN allowed 100), then up to kMaxRequests requests each way
 constexpr int kMaxFriends = 250, kMaxRequests = 32, kMaxFriendRows = kMaxFriends + 2 * kMaxRequests;
 char friend_text[kMaxFriendRows][128];
@@ -961,6 +979,7 @@ int friend_group(const U2oFriend &f) {
 void refresh_friends() {
     if (!api.friends) return;
     friends_dirty = false;
+    if (link_state == U2O_READY) friends_loaded = true;
     const int n = std::min(api.friends(nullptr, 0), kMaxFriends);
     friend_list.assign(size_t(std::max(n, 0)), U2oFriend{});
     if (n > 0) api.friends(friend_list.data(), n);
@@ -1057,6 +1076,7 @@ void presence_now(PresenceData &d, std::string &status) {
         d.party = uint8_t(std::clamp<size_t>(party_room.id ? party_room.members.size() : 1, 1, 255));
         d.difficulty = G<uint8_t>(kNgm + 0x21c4);
         d.net_game = G<int16_t>(kNgm + 0x1ca0);
+        d.party_room = party_room.id;
         if (d.state == kPresMatch) d.match_end = match_end_now();
         // The career values the friends ticker shows (NetPlayerData Data, spec progression.md).
         d.cash = G<uint32_t>(kNpd + 0xd8);
@@ -1068,8 +1088,18 @@ void presence_now(PresenceData &d, std::string &status) {
     }
 }
 
+// A presence send failed (PS3 parity G2): forget what was sent, so the next check sends again, 10 s from now.
+void presence_failed(double t) {
+    sent_presence.clear();
+    presence_req = 0;
+    next_presence = t + kPresenceRetry;
+    log("online: presence: not sent: trying again in %.0f s", kPresenceRetry);
+}
+
+// PS3 parity G2: one check every 5 s (the next time is set before the check); sent only when it changed.
 void publish_presence(double t) {
     if (link_state != U2O_READY || !api.set_presence || t < next_presence) return;
+    next_presence = t + kPresencePeriod;
     PresenceData d;
     std::string status;
     presence_now(d, status);
@@ -1078,9 +1108,27 @@ void publish_presence(double t) {
     if (key == sent_presence) return;
     const uint64_t id = api.set_presence(kPresenceTitle, status.c_str(), "", reinterpret_cast<const uint8_t *>(&d), uint32_t(sizeof d));
     log("online: presence: %s (room %llx) (request %llu)", status.c_str(), (unsigned long long)d.room, (unsigned long long)id);
+    if (!id) {
+        presence_failed(t);
+        return;
+    }
     request(id, Pending{Req::Presence, 0, 0, false, "presence"});
     sent_presence = key;
-    next_presence = t + kPresencePeriod;
+    presence_req = id;
+}
+
+// The answer to the party member request (PS3 parity G4): up to 10 online ids replace the cache, which then
+// belongs to the friend asked for, timed at the request. A failed request leaves an empty list for that friend.
+void party_list_answer(const U2oEvent &e) {
+    party_list_req = 0;
+    party_list.npid = party_list_asked.npid;
+    party_list.at = party_list_asked.at;
+    party_list.names.clear();
+    for (uint32_t k = 0; !e.error && e.member && k < e.count && party_list.names.size() < kPartyListMax; ++k)
+        party_list.names.push_back(npid_text(e.member[k].npid));
+    log("online: friends: %s's party: %zu member(s)%s", party_list.npid.c_str(), party_list.names.size(),
+        e.error ? " (the request failed)" : "");
+    u2mp::friend_party_arrived(party_list.npid, party_list.names);
 }
 
 // A cinema file (PS3 0x449ae8 event 20 -> 0x43302c -> thread 0x433360): {"U2CN", key, name[64], size} + the file.
@@ -1440,6 +1488,10 @@ void on_event(const U2oEvent &e) {
         mm_state = mm_state == Mm::Idle ? Mm::Idle : Mm::Failed;
         mm_search_req = 0;
         sent_presence.clear();
+        presence_req = 0;
+        friends_loaded = false;
+        party_list = PartyList{};
+        party_list_req = 0;
         if (migrating) {
             migrating = false;
             session::online_host_gone();
@@ -1611,6 +1663,8 @@ void on_event(const U2oEvent &e) {
                 (unsigned long long)p.room, e.error, error_hint(e.error));
         else
             log("online: %s on room %llx done", known ? p.what.c_str() : "request", (unsigned long long)p.room);
+        if (known && p.kind == Req::Presence && e.error && e.request == presence_req) presence_failed(now());
+        if (known && p.kind == Req::PartyMembers) party_list_answer(e);   // an error without a list
         break;
     case U2O_EV_MEMBER_JOINED: {
         Room *r = room_by_id(e.room_id);
@@ -1725,6 +1779,7 @@ void on_event(const U2oEvent &e) {
     }
     case U2O_EV_MEMBERS_EXT:
         log("online: %u external member(s) of room %llx", e.count, (unsigned long long)e.room_id);
+        if (known && p.kind == Req::PartyMembers) party_list_answer(e);
         break;
     case U2O_EV_PUBLIC_ADDRESS:
         log("online: the room service sees our peer socket at %s", masked(e.ip, e.port).c_str());
@@ -1900,6 +1955,7 @@ void frame() {
             session::online_match_ready(0);
         }
         link_state = st;
+        if (st != U2O_READY) friends_loaded = false;
         if (st == U2O_READY) {   // the RPCN online name is this player's name everywhere (PS3: NP online id)
             char npid[20] = {}, name[52] = {};
             if (api.identity(npid, name) && *name) {
@@ -2412,6 +2468,37 @@ bool friend_view(int i, FriendView &v) {
         v.net_game = d.net_game;
         v.match_end = d.match_end;
     }
+    return true;
+}
+
+bool friend_list_ready() { return api.on && link_state == U2O_READY && friends_loaded; }
+
+bool is_friend(const std::string &npid) {
+    if (!friend_list_ready()) return false;
+    for (const U2oFriend &f : friend_list)
+        if (npid_text(f.npid) == npid) return true;
+    return false;
+}
+
+// PS3 parity G4 (0x490c28): nothing while the list is not known or for no friend; a new request when the friend's
+// presence (this build) names a party room, the cache is another friend's or older than 5 s, and none runs.
+bool friend_party(int i, std::vector<std::string> &names) {
+    names.clear();
+    if (!friend_list_ready() || friend_kind(i) != kRowFriend) return false;
+    const U2oFriend &f = friend_list[size_t(i)];
+    const std::string npid = npid_text(f.npid);
+    const double t = now();
+    PresenceData d;
+    if (api.members_external && !party_list_req && presence_data(f, d) && d.key == room_key() && d.party_room &&
+        (party_list.npid != npid || t >= party_list.at + kPartyListLife)) {
+        party_list_req = api.members_external(d.party_room);
+        log("online: friends: asking for %s's party (room %llx, request %llu)", npid.c_str(),
+            (unsigned long long)d.party_room, (unsigned long long)party_list_req);
+        request(party_list_req, Pending{Req::PartyMembers, d.party_room, 0, false, "party members"});
+        if (party_list_req) party_list_asked = PartyList{npid, t, {}};
+    }
+    if (party_list.npid != npid) return false;
+    names = party_list.names;
     return true;
 }
 

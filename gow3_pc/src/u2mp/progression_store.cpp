@@ -11,7 +11,7 @@
 //   0x40 blob     NetPlayerData::Data, exactly as the guest holds it
 //   ...  u32      recent player count, then that many 80-byte records:
 //                 char name[32]; u32 kills, deaths, wins, losses, seconds, coop_points, money,
-//                 matches, rank; u32 0; u64 last_seen
+//                 matches, rank; u32 flags (bit 0 = unlisted; files before it hold 0 = listed); u64 last_seen
 //   end  u32      CRC-32 (IEEE) of everything before it
 #include <string>
 #include <utility>
@@ -100,7 +100,7 @@ std::vector<uint8_t> encode(const Store &store, uint64_t now) {
         const PlayerStats &p = store.recent[i];
         put_name(out, p.name);
         for (uint32_t v : {p.kills, p.deaths, p.wins, p.losses, p.seconds, p.coop_points, p.money, p.matches,
-                           p.rank, 0u})
+                           p.rank, p.unlisted ? 1u : 0u})
             put32(out, v);
         put64(out, p.last_seen);
     }
@@ -127,6 +127,7 @@ bool decode(const uint8_t *data, size_t size, Store &store) {
         uint32_t *fields[] = {&r.kills, &r.deaths, &r.wins, &r.losses, &r.seconds, &r.coop_points, &r.money,
                               &r.matches, &r.rank};
         for (size_t f = 0; f < 9; ++f) *fields[f] = get32(p + 32 + 4 * f);
+        r.unlisted = (get32(p + 68) & 1) != 0;
         r.last_seen = get64(p + 72);
         if (!r.name.empty()) s.recent.push_back(std::move(r));
     }
@@ -194,6 +195,7 @@ void note_match(Store &store, const std::vector<MatchPlayer> &players, uint64_t 
             store.recent.push_back(PlayerStats{});
             it = store.recent.end() - 1;
             it->name = name;
+            it->unlisted = true;   // not added at the match start: statistics only
         }
         it->kills += m.kills;
         it->deaths += m.deaths;
@@ -209,11 +211,31 @@ void note_match(Store &store, const std::vector<MatchPlayer> &players, uint64_t 
     trim_recent(store);
 }
 
-bool note_met(Store &store, const std::vector<std::string> &names, uint64_t now) {
-    bool changed = false;
+std::vector<std::string> players_met(const Store &store, const IsFriend &is_friend) {
+    std::vector<const PlayerStats *> order;
+    for (const PlayerStats &p : store.recent)
+        if (!p.unlisted && p.name != store.local_name && !(is_friend && is_friend(p.name))) order.push_back(&p);
+    std::stable_sort(order.begin(), order.end(),
+                     [](const PlayerStats *a, const PlayerStats *b) { return a->last_seen > b->last_seen; });
+    std::vector<std::string> names;
+    for (size_t i = 0; i < order.size() && i < kMetShown; ++i) names.push_back(order[i]->name);
+    return names;
+}
+
+std::vector<std::string> note_met(Store &store, const std::vector<std::string> &names, uint64_t now,
+                                  const IsFriend &is_friend) {
+    const std::vector<std::string> listed = players_met(store, is_friend);
+    std::vector<std::string> batch;
     for (const std::string &n : names) {
         const std::string name = n.substr(0, kNameMax);
-        if (name.empty() || name == store.local_name) continue;
+        if (batch.size() >= kMetBatch) break;
+        if (name.empty() || name == store.local_name || (is_friend && is_friend(name)) ||
+            std::find(listed.begin(), listed.end(), name) != listed.end() ||
+            std::find(batch.begin(), batch.end(), name) != batch.end())
+            continue;
+        batch.push_back(name);
+    }
+    for (const std::string &name : batch) {
         auto it = std::find_if(store.recent.begin(), store.recent.end(),
                                [&](const PlayerStats &p) { return p.name == name; });
         if (it == store.recent.end()) {
@@ -221,11 +243,11 @@ bool note_met(Store &store, const std::vector<std::string> &names, uint64_t now)
             it = store.recent.end() - 1;
             it->name = name;
         }
-        changed = changed || it->last_seen != now;
+        it->unlisted = false;
         it->last_seen = now;
     }
-    if (changed) trim_recent(store);
-    return changed;
+    if (!batch.empty()) trim_recent(store);
+    return batch;
 }
 
 std::vector<Entry> board(const Store &store, const LocalStats &local, int b) {

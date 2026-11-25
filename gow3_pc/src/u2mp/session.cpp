@@ -1243,7 +1243,8 @@ void on_party_up(uint8_t from, const uint8_t *d, size_t size) {
     else if (d[1] == 2) party_up_answer(false, 0);
 }
 
-// 2.9 Players Met (PS3 Playing::Enter 0x444660 -> 0x43bcbc): every match and round start adds the remote players.
+// 2.9 Players Met (PS3 Playing::Enter 0x444660 -> 0x43bcbc): every match and round start hands the remote players
+// to progression_note_met, which skips friends and players already listed (parity-g-friends.md G1).
 void note_players_met() {
     const uint8_t *local = ptr_at(ngm());
     std::vector<std::string> names;

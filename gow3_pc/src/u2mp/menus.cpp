@@ -400,7 +400,7 @@ std::vector<std::string> met;
 int32_t met_cur = 0;
 
 U2MP_GUEST void query_players_met(uint8_t *q) {
-    if (op_of(q) == 8 || met.empty()) met = progression_recent_players(50);
+    if (op_of(q) == 8 || met.empty()) met = progression_players_met();
     plain_list(q, int32_t(met.size()), met_cur, [](int32_t r) { return met[size_t(r)].c_str(); });
 }
 

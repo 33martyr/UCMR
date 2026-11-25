@@ -11,6 +11,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -20,6 +21,8 @@ constexpr size_t kBlobSize = 0x228;        // NetPlayerData::Data (u32 version +
 constexpr uint32_t kBlobVersion = 10;      // PS3 4c4be0 / PS4 662560 write 10
 constexpr size_t kNameMax = 31;
 constexpr size_t kMaxRecent = 64;
+constexpr size_t kMetShown = 50;           // Players Met rows (PS3 players met list, 50 history entries)
+constexpr size_t kMetBatch = 16;           // names one match start adds at most (PS3 players history batch)
 constexpr int kBoards = 4;                 // NP Score boards 300..303
 constexpr int kRowsPerPage = 11;           // PS3 GetRankingByRange(start = page * 11 + 1, 11 rows)
 
@@ -29,6 +32,9 @@ struct PlayerStats {
     uint32_t kills = 0, deaths = 0, wins = 0, losses = 0, seconds = 0, coop_points = 0, money = 0,
              matches = 0, rank = 0;
     uint64_t last_seen = 0;   // unix seconds
+    // Known only from a match's end (joined late, or a friend when the match started): its statistics count
+    // (leaderboards, View Profile) but it is no Players Met row until a match start adds it (note_met).
+    bool unlisted = false;
 };
 
 // One player's line of a finished match (from NetStatGame, PS4 0x1147bd0).
@@ -56,11 +62,21 @@ bool load(const std::string &path, Store &store);
 bool save(const std::string &path, const Store &store, uint64_t now);
 
 // Adds a finished match. The local player's line only updates `local_name`; the others are merged
-// by name into `recent` (most recent kept, at most kMaxRecent).
+// by name into `recent` (most recent kept, at most kMaxRecent). A name not stored yet comes in `unlisted`
+// (Players Met membership is decided at match start only, PS3 parity G1).
 void note_match(Store &store, const std::vector<MatchPlayer> &players, uint64_t now);
-// Players met at a match or round start: each name (not the local player) is added to `recent` with no
-// statistics, or a known one gets last_seen = now; same order and cap as note_match. False: nothing changed.
-bool note_met(Store &store, const std::vector<std::string> &names, uint64_t now);
+
+// "Is this name a friend" (online: the RPCN friend list); empty = no friends (LAN).
+using IsFriend = std::function<bool(const std::string &)>;
+// The Players Met rows (PS3 players met load): listed players that are no friend, most recently seen first, at
+// most kMetShown. A player who became a friend drops out here.
+std::vector<std::string> players_met(const Store &store, const IsFriend &is_friend);
+// Players met at a match or round start (PS3 players met add): of `names`, the ones not empty, not the local
+// player, not a friend and not already a Players Met row form the batch (at most kMetBatch, in order); each is
+// added to `recent` with no statistics, or a stored one is listed again, with last_seen = now. Returns the batch
+// (empty: nothing changed).
+std::vector<std::string> note_met(Store &store, const std::vector<std::string> &names, uint64_t now,
+                                  const IsFriend &is_friend);
 
 // The local player's career values, read from the Data block by the guest side.
 struct LocalStats {

@@ -694,24 +694,25 @@ void progression_publish_career() {
     publish();
 }
 
-std::vector<std::string> progression_recent_players(size_t max) {
+// Players Met never shows a friend (PS3 parity G1): online, the RPCN friend list decides; LAN has none.
+static bool met_friend(const std::string &name) { return online::active() && online::is_friend(name); }
+
+std::vector<std::string> progression_players_met() {
+    // While the friend list is not known yet the online list is empty (PS3: while its friend load runs).
+    if (online::active() && !online::friend_list_ready()) return {};
     load_store();
-    std::vector<const store_api::PlayerStats *> order;
-    for (const auto &p : g_store.recent) order.push_back(&p);
-    std::stable_sort(order.begin(), order.end(),
-                     [](const store_api::PlayerStats *a, const store_api::PlayerStats *b) {
-                         return a->last_seen > b->last_seen;
-                     });
-    std::vector<std::string> names;
-    for (size_t i = 0; i < order.size() && i < max; ++i) names.push_back(order[i]->name);
-    return names;
+    return store_api::players_met(g_store, met_friend);
 }
 
+// The batch is written before this returns, so a later match start never meets a write still running (PS3
+// drops a batch then; that case cannot occur here).
 void progression_note_met(const std::vector<std::string> &names) {
     if (!image.base || names.empty()) return;
     load_store();
     const uint64_t now = uint64_t(std::time(nullptr));
-    if (!store_api::note_met(g_store, names, now)) return;
+    const std::vector<std::string> batch = store_api::note_met(g_store, names, now, met_friend);
+    if (batch.empty()) return;
+    for (const std::string &n : batch) log("progression: adding player %s to Players Met", n.c_str());
     const std::string path = store_path();
     if (!store_api::save(path, g_store, now)) log("progression: could not write %s", path.c_str());
 }
