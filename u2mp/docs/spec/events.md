@@ -553,6 +553,67 @@ No guest calls.
 4. Log `net events: %d stubbed Read/Write/Apply slots ported` (count), then add the count to
    `installed`. On a good image the count is 28 (type 37: 3, type 38: 2, type 44: 1, the other
    11 types: 2 each).
+5. Then five more installers run, in this order, each adding 1 to `installed` when it installed
+   anything (squash commit 934a6ca, which has no message; the reasons are the comments in
+   `events.cpp`). The fixed game slots they touch are not in `kPorts`. A "game slot" is the u64 at
+   `B + vtable + 8*slot`; it "holds F" when it equals `B + F`. A wrapper stores the slot's old
+   value, writes the absolute address of the host function into the slot, and later calls the
+   stored function with the same arguments.
+   a. Extra fields of types 8, 9 and 11. Six entries, in this order (vtable, slot, game function,
+      name): (0x1040c60, 2, 0x62b650, `EmitGrenade +0x40 read`), (0x1040c60, 3, 0x62b250,
+      `EmitGrenade +0x40 write`), (0x1040c10, 2, 0x62a780, `GrenadeExplode +0x14/+0x18/+0x170
+      read`), (0x1040c10, 3, 0x62a020, `GrenadeExplode +0x14/+0x18/+0x170 write`), (0x1041390, 2,
+      0x63b050, `EmitRocket +0x50 read`), (0x1041390, 3, 0x63ad40, `EmitRocket +0x50 write`).
+      For each: if vtable + 8*slot + 8 > `image.size`, skip silently. If the slot does not hold the
+      game function, log `net events: %s: expected 0x%llx, left alone` (name, game function) and
+      skip. Otherwise wrap it and log `net events: %s` (name). Counts 1 when any entry was wrapped.
+      The wrapped Reads first call the game's Read, then read 32-bit fields with 4.1's read rule,
+      each stored only when the read succeeded: type 8 `ev+0x40`; type 9 `ev+0x14`, `ev+0x18`,
+      `ev+0x170`; type 11 `ev+0x50`. The wrapped Writes first call the game's Write, then write the
+      same fields as 32-bit values in the same order, each only when the stream has room
+      (`bits <= max_bits` and 32 <= `max_bits - bits`), so a cut-off write never moves the cursor
+      past `max_bits`.
+   b. EmitRocket Apply guard (type 11, vtable 0x1041390 slot 4, game Apply 0x63a7c0). If
+      0x1041390 + 0x28 > `image.size`: nothing, no log. If the slot does not hold 0x63a7c0, log
+      `net rocket: Apply expected 0x63a7c0, left alone`. Otherwise wrap it and log
+      `net rocket: Apply guarded (EmitRocket +0x50)`; counts 1. The wrapped Apply reads the u32
+      settings id at `ev+0x50`. The settings are loaded when the id is not 0, guest call
+      0xa15300(id) returns a non-NULL slot, the pointer stored in that slot is not NULL and the
+      pointer at that object's +0xb0 is not NULL. When loaded, it calls the game's Apply.
+      Otherwise it drops the event; the first time an id is dropped (for up to 8 different ids
+      per process) it logs `net rocket: settings %08x not loaded, left out` (id).
+   c. AttackProjectile log (type 13, vtable 0x1040b70): only when slot 2 holds 0x628be0, slot 3
+      holds 0x628670 and slot 4 holds 0x627da0 are all three wrapped, logging
+      `net attack: AttackProjectile Read/Write/Apply wrapped for logging`; counts 1. Otherwise
+      nothing and no log. The wrapped Read logs after the game's Read, the wrapped Write and Apply
+      log before calling the game's: `net attack %s: flags %08x attacker %u target %u damage %d`
+      (`read` / `write` / `apply`, u32 `ev+0x0c`, u32 `ev+0x10`, u32 `ev+0x14`, s32 `ev+0x1c`),
+      for the first 12 calls of the process (all three together).
+   d. Carry-object log (types 33 and 34). Two sets (vtable, Read, Write, Apply): (0x1040800,
+      0x622bb0, 0x622940, 0x622760) named `33`, (0x1040fd0, 0x62fc10, 0x62fb50, 0x62f9c0) named
+      `34`. A set is wrapped only when its slots 2, 3 and 4 hold those three functions. When at
+      least one set was wrapped, log `net carry: %d carry-object event sets wrapped for logging`
+      (number of sets) and count 1; otherwise nothing and no log. Log order and placement as in c,
+      text `net carry %s %s: %08x %08x %08x` (set name, `read` / `write` / `apply`, u32 `ev+0x0c`,
+      `ev+0x10`, `ev+0x14`), for the first 16 calls of the process (both sets together).
+   e. Message 0x2e Read guard. The game's Read (0x62de90) takes its byte buffer from the thread's
+      allocator scope and dereferences the scope entry at 0x62dfc2 before any fallback; at the net
+      pump that entry can be NULL. If 0x62dfc2..+5 is not executable: nothing. If its bytes are not
+      `48 8B 07 48 8D`: nothing, no log; it counts 1 only when the byte at 0x62dfc2 is already
+      `E9` (installed before). Otherwise a 5-byte `jmp` at 0x62dfc2 goes to a near stub that does
+      what the replaced instructions did when the scope entry (rdi) and its vtable are not NULL
+      (call the vtable's +0x48 with rdi = the entry, esi = the size from ebx, edx = 0x10,
+      rcx = r9 = `B + 0xeaca4d`, r8 = 0) and else takes the buffer from guest call
+      0xb332a0(size, pointer to the u32s {0x14, 0, 0, 0}, 0x10) (the
+      Network heap, so the event's destructor frees it with the game's own free), logging
+      `net Message: 0x62dfc2 allocator entry is null; its %u bytes from the Network heap (%s)`
+      (size, `taken` / `NONE`) for the first 4 times; both paths continue at 0x62dfdf with the
+      buffer in rsi. When the stub cannot be placed (no near memory, a displacement out of range)
+      nothing is patched and nothing counts. On success log `net Message: 0x62dfc2 read guard
+      installed`; counts 1.
+   On the fake images of section 6 (none of these slots holds its game function, 0x62dfc2 holds
+   zeros) the install logs the six `left alone` lines of a and the one of b after the line of
+   step 4 and counts nothing more.
 
 ### 5.2 `install_gameplay2(int &installed)`
 

@@ -1625,11 +1625,158 @@ void sp_bytes() {
     put_call(kSpCall, 0x644130);
     put_bytes(0x662fd5, {0x4c, 0x8b, 0x88, 0xa0, 0x09, 0x00, 0x00});
 }
+// ---- the documented spawn diagnostics, put into the old record -------------------------------------------------------
+// gameplay.md 6.4 "Diagnostics", 6.5 steps 0 and 3; PORT-SPAWN.md "Diagnostics". Squash 934a6ca (no message) added probes and logs to spawn.cpp around the rules of 6.4 that the old code has. In
+// these scenarios the probes never match their bytes, no net game is of type 12 and the probed call sites are only
+// retargeted (the fake retarget_call writes nothing), so what they change in the record is put into the old record
+// here, from the spec, right after each old call (the live state is the one the call saw). Anything the rules below
+// do not cover (a probe whose bytes match, a type 12 game) leaves the old record as it is: the difference stays
+// visible.
+const uint64_t kSpProbeSites[] = {0x13b9,   0x3b8c,   0x2e5780, 0x2e597a, 0x45b9f2, 0x4bf936, 0x61e7be, 0x62378a,
+                                  0x647c62, 0x647dc6, 0x6484e8, 0x9fc1e4, 0xa0962d, 0xa644ad, 0xa64d9a, 0xa69907};
+const uint64_t kSpUpdateSites[] = {0x27e86c, 0x280e25, 0x28375e, 0x284b72, 0x28642a, 0x28c8e2,
+                                   0x28e8ac, 0x2902ec, 0x292377, 0x294257, 0x295f7e, 0x296b44};
+bool sp_bytes_at(uint64_t off, std::initializer_list<uint8_t> b) {
+    size_t i = 0;
+    for (uint8_t v : b)
+        if (hx::mem[off + i++] != v) return false;
+    return true;
+}
+// gameplay.md 6.5 steps 0 and 3 (install): the two image probes first, the 31 call-site probes after the success line
+void sp_install_expected(size_t at) {
+    auto &r = hx::calls;
+    if (sp_bytes_at(0x4bdfad, {0x49, 0x8b, 0x04, 0x24, 0x48, 0x3b, 0x45, 0xd8}) ||
+        sp_bytes_at(0x4bf925, {0x84, 0xc0, 0x0f, 0x84, 0xc7, 0x00}))
+        return;   // a probe would patch the image: not mapped
+    r.insert(r.begin() + long(at), {"log spawn: result probe 0x4bdfad bytes differ, left alone",
+                                    "log spawn: batch probe 0x4bf925 bytes differ, left alone"});
+    const std::string ok = "log spawn: GetSpawnLocator (662fa0) looks the spawner up in every loaded package, with a fallback";
+    for (size_t i = at + 2; i < r.size(); i++) {
+        if (r[i] != ok) continue;
+        std::vector<std::string> add;
+        int more = 0;
+        auto site = [&](uint64_t off, uint64_t target, const char *name) {
+            char b[128];
+            std::snprintf(b, sizeof b, "retarget_call 0x%llx 0x%llx %s", (unsigned long long)off, (unsigned long long)target,
+                          name);
+            add.push_back(b);
+            if (hx::fails_at(off)) {
+                std::snprintf(b, sizeof b, "retarget_call 0x%llx failed (test)", (unsigned long long)off);
+                add.push_back(b);
+            } else {
+                ++more;
+            }
+        };
+        if (sp_bytes_at(0x23bb22, {0xe8, 0x19, 0x1d, 0x41, 0x00})) site(0x23bb22, 0x64d840, "NetNpc name (AI spawn probe)");
+        for (uint64_t off : kSpProbeSites) site(off, 0x4be330, "SpawnNpc (probe)");
+        for (uint64_t off : kSpUpdateSites) site(off, 0x236f40, "spawner update (probe)");
+        for (uint64_t off : {0xa08d42ull, 0xa08d59ull}) site(off, 0xce33a0, "get-spawner-locator lookup (probe)");
+        r.insert(r.begin() + long(i + 1), add.begin(), add.end());
+        i += add.size();
+        const std::string head = "install spawn -> installed ";
+        for (size_t k = i + 1; k < r.size(); k++)
+            if (r[k].rfind(head, 0) == 0) {
+                r[k] = head + std::to_string(std::atoi(r[k].c_str() + head.size()) + more);
+                break;
+            }
+    }
+}
+void sp_inst(const Side &s) {
+    const size_t at = hx::calls.size();
+    inst(s.spawn, "spawn");
+    if (g_side == 0) sp_install_expected(at);
+}
 HSp sp_install(const Side &s) {
     sp_bytes();
     hx::stub(kLookup, (void *)h_lookup);
-    inst(s.spawn, "spawn");
+    sp_inst(s);
     return (HSp)hx::retarget_host(kSpCall);
+}
+// gameplay.md 6.4 "Diagnostics" (game type): one LookupPointer(*net-games*), then the record's type
+int32_t sp_game_type() {
+    auto it = lookups.find(kNetGamesId);
+    if (it == lookups.end() || !it->second) return -1;
+    const uint64_t ng = it->second, recs = get<uint64_t>(ng + 8);
+    const int16_t game = get<int16_t>(kGame);
+    if (!recs || game < 0 || game >= get<int32_t>(ng)) return -1;
+    return get<int32_t>(recs - A(0) + 0x90 * uint64_t(game) + 0x0c);
+}
+// gameplay.md 6.4 "Diagnostics" (net-game dump, once per process): the lines the new code logs at its first level line
+bool sp_dump_done = false;
+std::vector<std::string> sp_dump() {
+    std::vector<std::string> d{"guest LookupPointer 3b9a067d"};
+    auto it = lookups.find(kNetGamesId);
+    if (it == lookups.end() || !it->second) {
+        d.push_back("log spawn: *net-games* is missing");
+        return d;
+    }
+    const uint64_t ng = it->second;
+    const int32_t count = get<int32_t>(ng);
+    const uint64_t recs = get<uint64_t>(ng + 8);
+    if (!recs || count <= 0 || count > 512) return d;
+    auto off = [](uint64_t p) { return p - A(0); };
+    for (int32_t i = 0; i < count; i++) {
+        const uint64_t rcd = off(recs) + 0x90 * uint64_t(i);
+        const uint32_t level = get<uint32_t>(rcd + 4);
+        d.push_back("guest LookupPointer 0dec97a4");   // the level name: a *levels* lookup per record
+        std::string name = "?";
+        auto lv = lookups.find(kLevelsId);
+        if (lv != lookups.end() && lv->second) {
+            const uint64_t lrecs = get<uint64_t>(lv->second + 8);
+            const int32_t lcount = get<int32_t>(lv->second);
+            if (lrecs && lcount > 0 && lcount <= 4096)
+                for (int32_t k = 0; k < lcount; k++) {
+                    const uint64_t l = off(lrecs) + 0x38 * uint64_t(k);
+                    if (get<uint32_t>(l) != level) continue;
+                    const uint64_t np = get<uint64_t>(l + 0x18);
+                    if (np) name = reinterpret_cast<const char *>(hx::mem + off(np));
+                    break;
+                }
+        }
+        const uint64_t list = get<uint64_t>(rcd + 0x48);
+        const uint64_t tasks = list ? get<uint64_t>(off(list) + 0x10) : 0, first = list ? get<uint64_t>(off(list)) : 0;
+        char b[256];
+        std::snprintf(b, sizeof b, "log spawn: net game %d type %d level %08x %s tasks %d default %08x first %08x", i,
+                      get<int32_t>(rcd + 0x0c), level, name.c_str(), list ? get<int32_t>(off(list) + 8) : 0,
+                      first ? get<uint32_t>(off(first)) : 0u, tasks ? get<uint32_t>(off(tasks)) : 0u);
+        d.push_back(b);
+    }
+    return d;
+}
+// One GetSpawnLocator call (gameplay.md 6.4 steps 1-7) as the new code records it, from the old call's records
+// r[at..]: after the level lines a game type read (+ the dump the first time), a game type read when the level
+// package is loaded, and a game type read before the result.
+void sp_call_expected(size_t at) {
+    auto &r = hx::calls;
+    if (sp_game_type() == 12) return;   // the type 12 lines are not mapped
+    const std::string g = "guest LookupPointer 3b9a067d";
+    size_t pos = at, level_line = 0;
+    bool have_level_line = false, pak = false, first_pkg = true;
+    for (size_t i = at; i < r.size(); i++) {
+        if (r[i].rfind("package_by_id ", 0) == 0) {
+            if (first_pkg) pak = pkg_by_id(uint32_t(std::strtoul(r[i].c_str() + 14, nullptr, 16))) != nullptr;
+            first_pkg = false;
+            pos = i + 1;
+        }
+        if (r[i].rfind("log spawn: level ", 0) == 0) {
+            have_level_line = true;
+            level_line = i;
+        }
+    }
+    std::vector<std::string> add;
+    if (have_level_line) {
+        pos = level_line + 1;
+        if (pos < r.size() && r[pos].find(" holds the multiplayer spawners (online-spawner-*)") != std::string::npos) pos++;
+        add.push_back(g);
+        if (!sp_dump_done) {
+            sp_dump_done = true;
+            const auto d = sp_dump();
+            add.insert(add.end(), d.begin(), d.end());
+        }
+    }
+    if (pak) add.push_back(g);
+    r.insert(r.begin() + long(pos), add.begin(), add.end());
+    r.push_back(g);
 }
 const uint8_t *last_own[2] = {nullptr, nullptr};
 
@@ -1649,7 +1796,9 @@ void spc(HSp h, uint32_t id, int32_t mode, const char *what) {
         rec("no hook");
         return;
     }
+    const size_t at = hx::calls.size();
     const uint8_t *r = h(hx::mem + kNgm, id, mode);
+    if (g_side == 0) sp_call_expected(at);
     if (!r) {
         rec("result NULL");
         return;
@@ -1686,22 +1835,22 @@ void spawn_tests() {
     scenario("spawn install lea bytes differ", [](const Side &s) {
         sp_bytes();
         hx::mem[0x662fcb] = 0x35;
-        inst(s.spawn, "spawn");
+        sp_inst(s);
     });
     scenario("spawn install lea target wrong", [](const Side &s) {
         sp_bytes();
         put<int32_t>(0x662fcc, int32_t(kNgm - kSpCall + 8));
-        inst(s.spawn, "spawn");
+        sp_inst(s);
     });
     scenario("spawn install group read bytes differ", [](const Side &s) {
         sp_bytes();
         hx::mem[0x662fd5 + 4] = 0x0a;
-        inst(s.spawn, "spawn");
+        sp_inst(s);
     });
     scenario("spawn install retarget_call fails", [](const Side &s) {
         sp_bytes();
         hx::fail_offsets.push_back(kSpCall);
-        inst(s.spawn, "spawn");
+        sp_inst(s);
     });
     scenario("spawn install success", [](const Side &s) { sp_install(s); });
 

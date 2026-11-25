@@ -8,6 +8,11 @@
 // the thunk jumps to the site, and the resume addresses (0x638000 / 0x66c250) jump to hx_capture, which records
 // the registers and flags the stub left. Generator slot 4 runs against a fake snapshot reader that calls the host
 // visitor's slots from a script; every guest call is recorded with its float arguments as bits.
+//
+// The current code differs from the clean-room version by the changes of spec Part 3 (squash 934a6ca): those are
+// mapped (old record and image -> what Part 3 says), checked by new-only scenarios where the old code has nothing to
+// compare with, and generator slot 4, which is open (spec 3.10), is compared apart: OPEN-SLOT4 = only that differs.
+#pragma clang fp contract(off)
 #include "harness.h"
 #include "u2mp_internal.h"
 
@@ -190,10 +195,24 @@ static void run_site(uint64_t site, Regs in, unsigned misalign) {
 // ---------------------------------------------------------------------------------------------------------------
 // scenarios
 static bool g_old = true;
-static int g_scen = 0, g_pass = 0, g_cases = 0;
-static std::vector<std::string> g_failed;
+static int g_scen = 0, g_pass = 0, g_cases = 0, g_open = 0;
+static std::vector<std::string> g_failed, g_open_names;
 
-// info: a scenario outside the game's contract (e.g. an invalid ABI value); a difference is reported, not counted
+// The changes made after the clean-room version (u2mp/docs/spec/netanim.md Part 3, squash 934a6ca) are mapped: the
+// old record and image are turned into what the spec says the current code does (map_old), the current code's
+// diagnostic host pointers become stub pool offsets (map_new), and the generator slot 4 part, which is open (spec
+// 3.10), is split off both sides and compared on its own (split_slot4). Defined after the install section.
+static uint8_t *g_pool0 = nullptr;   // where the first near_stub request of the current run lands
+static void map_old(std::vector<std::string> &r, std::vector<uint8_t> &img);
+static void map_new(std::vector<std::string> &r);
+struct SlotPart {
+    std::vector<std::string> lines;
+    std::vector<uint8_t> bytes;
+};
+static SlotPart split_slot4(std::vector<std::string> &r, std::vector<uint8_t> &img);
+
+// info: a scenario outside the game's contract (e.g. an invalid ABI value); a difference is reported, not counted.
+// A scenario whose only difference is the slot 4 part is reported as OPEN-SLOT4 (counted apart, never as passed).
 static void scenario(const std::string &name, const std::function<void()> &run, bool info = false) {
     std::vector<std::string> c[2];
     std::vector<uint8_t> im[2];
@@ -201,30 +220,85 @@ static void scenario(const std::string &name, const std::function<void()> &run, 
         g_old = k == 0;
         clear();
         bind_both();
+        g_pool0 = exec_alloc(0);   // no request: the address the first one gets
+        exec_calls = 0;
         run();
         c[k] = calls;
         im[k] = snapshot();
         bind_both();
     }
+    map_old(c[0], im[0]);
+    map_new(c[1]);
+    SlotPart sp[2] = {split_slot4(c[0], im[0]), split_slot4(c[1], im[1])};
     const bool ok = same(name.c_str(), c[0], c[1], &im[0], &im[1]);
+    const bool slot_ok = sp[0].lines == sp[1].lines && sp[0].bytes == sp[1].bytes;
     if (!ok) {   // context: the records before the first difference
         size_t d = 0;
         while (d < c[0].size() && d < c[1].size() && c[0][d] == c[1][d]) d++;
         for (size_t i = d > 8 ? d - 8 : 0; i < d; i++) std::printf("  before: %s\n", c[0][i].c_str());
     }
+    if (!slot_ok) {   // the slot 4 part: its first difference
+        size_t d = 0;
+        while (d < sp[0].lines.size() && d < sp[1].lines.size() && sp[0].lines[d] == sp[1].lines[d]) d++;
+        std::printf("  slot 4 part (open, spec 3.10): %zu lines old, %zu new; first difference: old \"%s\", new \"%s\"%s\n",
+                    sp[0].lines.size(), sp[1].lines.size(), d < sp[0].lines.size() ? sp[0].lines[d].c_str() : "(none)",
+                    d < sp[1].lines.size() ? sp[1].lines[d].c_str() : "(none)",
+                    sp[0].bytes == sp[1].bytes ? "" : "; slot bytes 0x5f48d0 differ");
+    }
     if (const char *show = std::getenv("HX_SHOW"); show && name.find(show) != std::string::npos)
-        for (const auto &l : c[0]) std::printf("  | %s\n", l.c_str());
+        for (int k = 0; k < 2; k++) {
+            for (const auto &l : c[k]) std::printf("  %s| %s\n", k ? "new" : "old", l.c_str());
+            for (const auto &l : sp[k].lines) std::printf("  %s slot4| %s\n", k ? "new" : "old", l.c_str());
+        }
     if (info) {
         if (!ok) hx::failures--;
-        std::printf("%s %s (%zu records)\n", ok ? "INFO-SAME" : "INFO-DIFF", name.c_str(), c[0].size());
+        std::printf("%s %s (%zu records)\n", ok && slot_ok ? "INFO-SAME" : "INFO-DIFF", name.c_str(), c[0].size());
         return;
     }
     ++g_scen;
-    if (ok) ++g_pass;
+    if (ok && slot_ok) ++g_pass;
+    else if (ok) ++g_open, g_open_names.push_back(name);
     else g_failed.push_back(name);
-    std::printf("%s %s (%zu records)\n", ok ? "PASS" : "FAIL", name.c_str(), c[0].size());
+    std::printf("%s %s (%zu records)\n", ok ? (slot_ok ? "PASS" : "OPEN-SLOT4") : "FAIL", name.c_str(), c[0].size());
     std::fflush(stdout);
 }
+
+// A scenario for the current code alone (behaviour the old code does not have; spec Part 3 section in the name).
+static int g_check_fails = 0;
+static std::string g_check_scen;
+#define CHECK(c)                                                                                  \
+    do {                                                                                          \
+        if (!(c)) {                                                                               \
+            ++g_check_fails;                                                                      \
+            std::printf("  check failed [%s]: %s (line %d)\n", g_check_scen.c_str(), #c, __LINE__); \
+        }                                                                                         \
+    } while (0)
+static void only_new(const std::string &name, const std::function<void()> &run) {
+    g_old = false;
+    clear();
+    bind_both();
+    g_pool0 = exec_alloc(0);
+    exec_calls = 0;
+    g_check_scen = name;
+    const int before = g_check_fails;
+    run();
+    const bool ok = g_check_fails == before;
+    ++g_scen;
+    if (ok) ++g_pass;
+    else {
+        g_failed.push_back(name);
+        hx::failures++;
+        for (size_t i = 0; i < calls.size() && i < 60; i++) std::printf("  new: %s\n", calls[i].c_str());
+    }
+    if (const char *show = std::getenv("HX_SHOW"); show && name.find(show) != std::string::npos)
+        for (const auto &l : calls) std::printf("  new| %s\n", l.c_str());
+    std::printf("%s %s (new only, %zu records)\n", ok ? "PASS" : "FAIL", name.c_str(), calls.size());
+    std::fflush(stdout);
+    g_old = true;
+    bind_both();
+}
+static int count_of(const std::string &line) { return int(std::count(calls.begin(), calls.end(), line)); }
+static bool starts(const std::string &s, const char *p) { return s.compare(0, std::strlen(p), p) == 0; }
 
 static void put_bytes(uint8_t *base, uint64_t off, std::initializer_list<uint8_t> b) {
     size_t i = 0;
@@ -298,6 +372,158 @@ static int install_netanim() {
     else u2mp::install_netanim(n);
     rec("netanim installed %d, near_stub requests %d", n, exec_calls);
     return n;
+}
+
+// ---- the mapping of spec Part 3 --------------------------------------------------------------------------------
+static const char *const kRestored =
+    "log netanim: snapshot clip phases restored (writer 0x6364b5, reader 0x66c035; both PCs need this build)";
+static const char *const kOutOfRange = "log netanim: stub out of jump range";
+static const char *const kGuardLine = "log netanim: anim indices, bind-pose prefill and tree depth guard installed";
+static const char *const kPadded = "log netanim: snapshot bit counts padded to whole words";
+static const char *const kPadOff = "log netanim: bit count padding off (UNCHARTED_U2MP_NETANIM_PAD=0)";
+static const char *const kStubsLine = "log netanim: stubs writer=pool+0x0 reader=pool+0x200 index=pool+0x400 "
+                                      "prefill=pool+0x600 depth=pool+0x800";
+static const uint8_t kPadPlayer[] = {0x41, 0x89, 0x84, 0x24, 0xbc, 0x00, 0x00, 0x00};
+static const uint8_t kPadOther[] = {0x89, 0x83, 0xbc, 0x00, 0x00, 0x00};
+
+// spec 3.1 step 9: padding is installed when the switch is not "0" and both sites hold the 1.02 bytes (the old code
+// never writes them, so the old image shows what the install saw)
+static bool pad_expected(const std::vector<uint8_t> &img) {
+    const char *e = std::getenv("UNCHARTED_U2MP_NETANIM_PAD");
+    return !(e && std::strcmp(e, "0") == 0) && std::memcmp(img.data() + 0x60e296, kPadPlayer, 8) == 0 &&
+           std::memcmp(img.data() + 0x60e9f3, kPadOther, 6) == 0;
+}
+
+// `e9 rel32` + `cc` filler at `site` jumping to `stub` (spec 3.1 step 6)
+static void put_jump(std::vector<uint8_t> &img, uint64_t site, unsigned len, uint64_t stub) {
+    const int32_t rel = int32_t(int64_t(stub) - int64_t(uintptr_t(mem + site + 5)));
+    img[site] = 0xe9;
+    std::memcpy(img.data() + site + 1, &rel, 4);
+    for (unsigned i = 5; i < len; i++) img[site + i] = 0xcc;
+}
+
+// spec 3.9: the natives' value logs (process-wide "last value" per native, as the current code keeps it)
+static void map_natives(std::vector<std::string> &r) {
+    static const char *const names[3] = {"net-coop-host-script-id", "net-coop-script-id", "net-coop-task"};
+    static uint32_t last[3] = {0xffffffffu, 0xffffffffu, 0xffffffffu};
+    std::vector<std::string> out;
+    for (const std::string &l : r) {
+        for (int i = 0; i < 3; i++) {
+            const std::string head = std::string(names[i]) + "(argc ";
+            const size_t eq = l.rfind(" = ");
+            if (!starts(l, head.c_str()) || eq == std::string::npos) continue;
+            const uint32_t v = uint32_t(std::strtoull(l.c_str() + eq + 3, nullptr, 16));
+            if (v != last[i]) {
+                last[i] = v;
+                char b[128];
+                std::snprintf(b, sizeof b, "log natives: %s -> %08x%s", names[i], v,
+                              i == 2 ? " (a co-op wave script is running)" : "");
+                out.push_back(b);
+            }
+        }
+        out.push_back(l);
+    }
+    r.swap(out);
+}
+
+static void map_old(std::vector<std::string> &r, std::vector<uint8_t> &img) {
+    map_natives(r);
+    const bool pad = pad_expected(img);
+    // spec 3.1 steps 4-9 in the record
+    std::vector<std::string> out;
+    bool restored = false, slot_replaced = false;
+    int old_k = 0, new_k = 0;   // near_stub requests, counted since the scenario's last reset of the counter
+    for (const std::string &l : r) {
+        if (l == kRestored) {   // steps 5, 8, 9 around the restored line
+            out.push_back(kStubsLine);
+            out.push_back(l);
+            out.push_back(kGuardLine);
+            out.push_back(pad ? kPadded : kPadOff);
+            restored = true;
+        } else if (l == kOutOfRange) {   // step 5 comes before the jumps
+            out.push_back(kStubsLine);
+            out.push_back(l);
+        } else if (starts(l, "replace_function 0x5f48d0 16 ")) {   // slot 4 (split off later)
+            out.push_back(l);
+            slot_replaced = true;
+        } else if (starts(l, "replace_function 0x5f48d0 failed")) {
+            out.push_back(l);
+            slot_replaced = false;
+        } else if (starts(l, "netanim installed ")) {   // +5 and +1 (step 8 / 9), five and two requests (4 / 9)
+            int n = 0, k = 0;
+            std::sscanf(l.c_str(), "netanim installed %d, near_stub requests %d", &n, &k);
+            if (k < old_k) old_k = new_k = 0;   // the scenario reset the counter in between
+            if (k > old_k) new_k += 5 + (restored && pad ? 2 : 0);   // this install made its requests
+            old_k = k;
+            char b[96];
+            std::snprintf(b, sizeof b, "netanim installed %d, near_stub requests %d", restored ? 5 + int(pad) : 0, new_k);
+            out.push_back(b);
+            if (slot_replaced) out.push_back("slot 4 counted +1 (old)");
+            restored = slot_replaced = false;
+        } else {
+            out.push_back(l);
+        }
+    }
+    r.swap(out);
+    // the image: the old code's writer jump shows where the stubs are (requests of 512 / 384 bytes, in order)
+    if (img[0x6364b5] == 0xe9) {
+        int32_t rel;
+        std::memcpy(&rel, img.data() + 0x6364b6, 4);
+        const uint64_t w = uint64_t(uintptr_t(mem + 0x6364ba)) + int64_t(rel);
+        put_jump(img, 0x66b637, 7, w + 0x400);
+        put_jump(img, 0x5f3d63, 7, w + 0x600);
+        put_jump(img, 0x5f3dd1, 7, w + 0x800);
+        img[0x6367cd] = 0x0a, img[0x6368a2] = 0x09, img[0x6368b9] = 0x0a;   // step 7
+        if (pad) {
+            put_jump(img, 0x60e296, 8, w + 0xa00);
+            put_jump(img, 0x60e9f3, 6, w + 0xb80);
+        }
+    }
+}
+
+// spec 3.1 step 5: the five stub addresses as offsets into the stub pool (a value outside it stays raw: a difference)
+static void map_new(std::vector<std::string> &r) {
+    for (std::string &l : r) {
+        if (!starts(l, "log netanim: stubs writer=")) continue;
+        std::string out = "log netanim: stubs";
+        size_t at = std::strlen("log netanim: stubs");
+        while (at < l.size()) {
+            const size_t eq = l.find('=', at);
+            if (eq == std::string::npos) break;
+            size_t end = l.find(' ', eq);
+            if (end == std::string::npos) end = l.size();
+            const uint64_t v = std::strtoull(l.substr(eq + 1, end - eq - 1).c_str(), nullptr, 16);
+            char b[64];
+            if (v >= uint64_t(uintptr_t(g_pool0)) && v < uint64_t(uintptr_t(g_pool0)) + 0x100000)
+                std::snprintf(b, sizeof b, "=pool+0x%llx", (unsigned long long)(v - uint64_t(uintptr_t(g_pool0))));
+            else
+                std::snprintf(b, sizeof b, "=raw:%llx", (unsigned long long)v);
+            out += l.substr(at, eq - at) + b;
+            at = end;
+        }
+        l = out;
+    }
+}
+
+// spec 3.10: the slot 4 lines (its checks' log, replace_function, the generator call log, the frames driven
+// through 0x5f48d0 and all they lead to) and the slot's 16 bytes
+static SlotPart split_slot4(std::vector<std::string> &r, std::vector<uint8_t> &img) {
+    SlotPart s;
+    std::vector<std::string> rest;
+    bool frames = false;
+    for (const std::string &l : r) {
+        if (starts(l, "slot4 count=")) frames = true;
+        if (frames || starts(l, "replace_function 0x5f48d0 ") || starts(l, "slot 4 counted ") ||
+            l == "log netanim: generator slot 4 / helpers differ from 1.02, slot left as it is" ||
+            starts(l, "log netanim: generator slot called"))
+            s.lines.push_back(l);
+        else
+            rest.push_back(l);
+    }
+    r.swap(rest);
+    s.bytes.assign(img.begin() + 0x5f48d0, img.begin() + 0x5f48e0);
+    std::memset(img.data() + 0x5f48d0, 0, 16);
+    return s;
 }
 
 // the jump written at a site, by meaning: target relative to the first stub request, and the filler
@@ -470,6 +696,58 @@ struct WCase {
     bool far_words = false;   // pos near 2^32: words pointer biased so pos/32 lands in the image
 };
 
+// The writer's phase on the three words a writer case prepares (index 0 = the word the position is in): spec 1.4.1
+// (old) or 3.2 (current), both with the word rules of 1.4.1 step 5.
+struct WModel {
+    bool room;
+    uint32_t pos;
+    uint32_t w[3];
+};
+static int32_t sat32(float v) {
+    if (v != v) return INT32_MIN;
+    if (v >= 2147483648.0f) return INT32_MAX;
+    if (v <= -2147483648.0f) return INT32_MIN;
+    return int32_t(v);
+}
+static WModel writer_model(const WCase &c, bool current) {
+    WModel m{true, c.pos, {c.w0, c.w1, 0x5a5a5a5a}};
+    const bool info = c.anim_mode == 0;
+    unsigned n;
+    uint32_t q = 0;
+    if (current) {
+        n = 10;
+        if (info && c.frames > 1 && c.frame > 0.0f) {
+            const float scaled = c.frame * 1023.0f;
+            const int32_t v = sat32(scaled / (float(c.frames) - 1.0f));
+            q = v > 1023 ? 1023u : uint32_t(v);
+        }
+    } else {
+        n = 8;
+        float k = 255.0f;
+        if (info) {
+            if (c.frames <= 8) n = 4, k = 15.0f;
+            else if (c.frames > 64) n = 16, k = 65535.0f;
+            const float scaled = c.frame * k;
+            q = uint32_t(sat32(scaled / (float(c.frames) - 1.0f)));
+        }
+    }
+    m.room = uint64_t(c.pos) + n <= uint64_t(c.limit);
+    if (!m.room) return m;
+    const unsigned off = c.pos % 32, free_bits = 32 - off;
+    const uint32_t field = q & ((1u << n) - 1);
+    if (off != 0) m.w[0] &= ~(0xffffffffu >> off);
+    if (n <= free_bits) {
+        m.w[0] |= field << (free_bits - n);
+    } else {
+        m.w[0] |= field >> (n - free_bits);
+        m.w[1] = field << (32 - (n - free_bits));
+    }
+    m.pos = c.pos + n;
+    return m;
+}
+// the current code's process-wide writer state (spec 3.2 step 1 call log, 3.2 step 3 overflow cap)
+static int g_new_writer_calls = 0, g_new_overflow_lines = 0, g_new_leaves = 0;
+
 static void writer_case(const WCase &c, std::mt19937_64 &r, unsigned misalign) {
     put<uint64_t>(CMD + 4, c.anim_mode == 1 ? 0 : addr(ANIM));
     put<float>(CMD + 0x10, c.frame);
@@ -489,9 +767,41 @@ static void writer_case(const WCase &c, std::mt19937_64 &r, unsigned misalign) {
     in.g[15] = addr(STREAM);
     in.g[10] = c.r10;
     in.g[14] = c.r14;
+    const unsigned size = get<uint16_t>(CMD + 2);
+    const uint64_t anim = get<uint64_t>(CMD + 4);
+    const size_t mark = calls.size();
     run_site(0x6364b5, in, misalign);
-    rec("writer frames=%u frame=%s pos=%u limit=%u -> pos=%u words %08x %08x %08x", c.frames, fbits(c.frame).c_str(),
-        c.pos, c.limit, get<uint32_t>(STREAM + 8), get<uint32_t>(woff), get<uint32_t>(woff + 4), get<uint32_t>(woff + 8));
+    const uint32_t pos = get<uint32_t>(STREAM + 8), w[3] = {get<uint32_t>(woff), get<uint32_t>(woff + 4), get<uint32_t>(woff + 8)};
+    if (!g_old) {
+        rec("writer frames=%u frame=%s pos=%u limit=%u -> pos=%u words %08x %08x %08x", c.frames, fbits(c.frame).c_str(),
+            c.pos, c.limit, pos, w[0], w[1], w[2]);
+        ++g_cases;
+        return;
+    }
+    // the old code still follows spec 1.4.1 (this keeps the model honest) ...
+    const WModel om = writer_model(c, false);
+    if ((om.room ? om.pos : c.pos) != pos || std::memcmp(om.w, w, sizeof w) != 0)
+        rec("old writer differs from spec 1.4.1: pos %u words %08x %08x %08x", pos, w[0], w[1], w[2]);
+    // ... and the record becomes what spec 3.2 says: the call log, the 10-bit overflow test and the 10-bit phase
+    const std::string full = "log netanim: snapshot stream full, clip phase not written";
+    calls.erase(std::remove(calls.begin() + long(mark), calls.end(), full), calls.end());
+    std::vector<std::string> lines;
+    if (g_new_writer_calls < 12) {
+        ++g_new_writer_calls;
+        char b[256];
+        std::snprintf(b, sizeof b, "log netanim: clip cmd %p size %u anim %p stream %p pos %u limit %u",
+                      static_cast<const void *>(mem + CMD), size, reinterpret_cast<const void *>(uintptr_t(anim)),
+                      static_cast<const void *>(mem + STREAM), c.pos, c.limit);
+        lines.push_back(b);
+    }
+    const WModel nm = writer_model(c, true);
+    if (!nm.room && g_new_overflow_lines < 8) ++g_new_overflow_lines, lines.push_back(full);
+    calls.insert(calls.begin() + long(mark), lines.begin(), lines.end());
+    // the image too (later cases read the stream back, and the scenario compares the image at its end)
+    put<uint32_t>(STREAM + 8, nm.room ? nm.pos : c.pos);
+    for (int i = 0; i < 3; i++) put<uint32_t>(woff + 4 * uint64_t(i), nm.w[i]);
+    rec("writer frames=%u frame=%s pos=%u limit=%u -> pos=%u words %08x %08x %08x", c.frames, fbits(c.frame).c_str(), c.pos,
+        c.limit, nm.room ? nm.pos : c.pos, nm.w[0], nm.w[1], nm.w[2]);
     ++g_cases;
 }
 
@@ -524,10 +834,24 @@ static void reader_case(const RCase &c, std::mt19937_64 &r, unsigned misalign) {
     in.g[0] = c.anim_mode == 1 ? 0 : addr(RANIM);
     in.g[5] = addr(FRAME);
     in.g[14] = c.r14;
+    const size_t mark = calls.size();
     run_site(0x66c035, in, misalign);
+    uint32_t pos = get<uint32_t>(FRAME - 0x148);
+    if (g_old) {
+        // spec 3.3: the current reader always takes 10 bits when they fit (silently nothing otherwise) and calls only a
+        // generator whose vtable is image + 0x100ac80; this visitor's is not, so the old slot 3 call and the old
+        // overflow line have no counterpart
+        const std::string end = "log netanim: snapshot stream ends before a clip phase";
+        calls.erase(std::remove_if(calls.begin() + long(mark), calls.end(),
+                                   [&](const std::string &l) { return l == end || starts(l, "visitor slot3 "); }),
+                    calls.end());
+        pos = uint64_t(c.pos) + 10 <= uint64_t(c.limit) ? c.pos + 10 : c.pos;
+        put<uint32_t>(FRAME - 0x148, pos);
+    } else {
+        ++g_new_leaves;
+    }
     rec("reader frames=%u pos=%u limit=%u w=%08x %08x -> pos=%u counter=%016llx r14slot=%016llx", c.frames, c.pos, c.limit,
-        c.w0, c.w1, get<uint32_t>(FRAME - 0x148), (unsigned long long)get<uint64_t>(FRAME - 0x180),
-        (unsigned long long)get<uint64_t>(FRAME - 0x188));
+        c.w0, c.w1, pos, (unsigned long long)get<uint64_t>(FRAME - 0x180), (unsigned long long)get<uint64_t>(FRAME - 0x188));
     ++g_cases;
 }
 
@@ -713,6 +1037,316 @@ static void stream_scenarios() {
             c.w0 = get<uint32_t>(WORDS + (w.pos / 32) * 4), c.w1 = get<uint32_t>(WORDS + (w.pos / 32) * 4 + 4);
             reader_case(c, r, 8);
         }
+    });
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// the current code alone (spec Part 3: what the old code has no counterpart of)
+constexpr uint64_t SNAP = 0x1330000, POSE_VT = 0x100ac80, GEN = 0x1340000, GEN2 = 0x1340100, OTHER_VT = 0x1340200,
+                   GROUP = 0x1341000, GP = 0x1342000, TAB = 0x1343000, ENT = 0x1344000, AN_A = 0x1345000, AN_B = 0x1346000,
+                   AN_C = 0x1346800, XP = 0x1347000, NAME_A = 0x1348000, NAME_B = 0x1348100, NAME_C = 0x1348200,
+                   CLIP = 0x1349000, CLIP0 = 0x1349100, GSTUB = 0x134a000, LIST = 0x1360000, LW = 0x1361000,
+                   LIST2 = 0x1362000, LW2 = 0x1363000;
+
+U2MP_GUEST void fake_gen_clip(const uint8_t *g, const uint8_t *anim, uint32_t slot, float phase) {
+    rec("gen clip g=%s anim=%s slot=%u phase=%s", where(g).c_str(), where(anim).c_str(), slot, fbits(phase).c_str());
+}
+U2MP_GUEST void fake_gen_pose(const uint8_t *g, uint32_t slot) { rec("gen pose g=%s slot=%u", where(g).c_str(), slot); }
+
+// bits MSB first in native u32 words (spec 1.3 bit stream)
+struct Bits {
+    uint32_t w[64] = {};
+    uint32_t n = 0;
+    void put(uint32_t v, unsigned k) {
+        for (unsigned i = k; i-- > 0; ++n)
+            if ((v >> i) & 1) w[n / 32] |= 0x80000000u >> (n % 32);
+    }
+};
+
+static void assert_site(uint64_t at, uint64_t target) {   // mov rax, [rip + d] reading `target`
+    put_bytes(mem, at, {0x48, 0x8b, 0x05});
+    put<int32_t>(at + 3, int32_t(int64_t(target) - int64_t(at + 7)));
+}
+static bool jumps_to(uint64_t site, unsigned len, uint64_t target, uint8_t fill) {
+    if (mem[site] != 0xe9 || get<int32_t>(site + 1) != int32_t(int64_t(target) - int64_t(uintptr_t(mem + site + 5)))) return false;
+    for (unsigned i = 5; i < len; i++)
+        if (mem[site + i] != fill) return false;
+    return true;
+}
+// the register line run_site left: nothing changed except `allowed` (register index -> value after)
+static bool regs_only(const std::string &line, std::initializer_list<std::pair<int, uint64_t>> allowed) {
+    if (line.find("stack-ok") == std::string::npos || line.find("xmm") != std::string::npos) return false;
+    size_t changes = 0;
+    for (size_t at = line.find("->"); at != std::string::npos; at = line.find("->", at + 2)) ++changes;
+    if (changes != allowed.size()) return false;
+    for (const auto &[i, v] : allowed)
+        if (hx_out.g[i] != v) return false;
+    return true;
+}
+
+static void current_only_scenarios() {
+    const char *differ = "log netanim: snapshot writer / reader bytes differ from 1.02, left alone (no clip phases)";
+    // 3.1 step 3: the six added stream checks
+    for (int i = 0; i < 6; i++) {
+        char name[96];
+        std::snprintf(name, sizeof name, "P1 3.1 step 3: added stream check 0x%llx broken",
+                      (unsigned long long)kNetanimNewChecks[i].off);
+        only_new(name, [&] {
+            netanim_bytes(mem);
+            mem[kNetanimNewChecks[i].off + kNetanimNewChecks[i].bytes.size() - 1] ^= 0x01;
+            install_netanim();
+            CHECK(count_of(differ) == 1);
+            CHECK(count_of("netanim installed 0, near_stub requests 0") == 1);
+            CHECK(mem[0x6364b5] == 0x41 && mem[0x66c035] == 0x4c && mem[0x66b637] == 0x4c && mem[0x5f3d63] == 0x48);
+        });
+    }
+    // 3.1 step 2: assert sites inside the snapshot reader jump to its epilogue
+    only_new("P2 3.1 step 2: assert sites end the parse (last one ends at the epilogue)", [&] {
+        netanim_bytes(mem);
+        const uint64_t sites[] = {0x66b500, 0x66b600, 0x66c300, 0x66c379};
+        for (uint64_t s : sites) assert_site(s, 0x156df78);
+        assert_site(0x66b700, 0x156df80);   // another global: left alone
+        install_netanim();
+        for (uint64_t s : sites) CHECK(jumps_to(s, 7, uint64_t(uintptr_t(mem + 0x66c380)), 0x90));
+        CHECK(mem[0x66b700] == 0x48);
+        CHECK(calls.size() > 1 && calls[0] == "log netanim: snapshot parse aborts on asserts (4 sites)" &&
+              starts(calls[1], "log netanim: stubs writer="));
+        CHECK(count_of("netanim installed 6, near_stub requests 7") == 1);
+    });
+    only_new("P2 3.1 step 2: a site ending past the epilogue is not scanned", [&] {
+        netanim_bytes(mem);
+        assert_site(0x66c37a, 0x156df78);
+        install_netanim();
+        CHECK(mem[0x66c37a] == 0x48 && count_of("log netanim: snapshot parse aborts on asserts (1 sites)") == 0);
+        CHECK(!starts(calls[0], "log netanim: snapshot parse aborts"));
+    });
+    only_new("P2 3.1 step 2: at most 32 sites", [&] {
+        netanim_bytes(mem);
+        for (int i = 0; i < 40; i++) assert_site(0x66b700 + 16 * uint64_t(i), 0x156df78);
+        install_netanim();
+        CHECK(count_of("log netanim: snapshot parse aborts on asserts (32 sites)") == 1);
+        for (int i = 0; i < 40; i++) CHECK((mem[0x66b700 + 16 * uint64_t(i)] == 0xe9) == (i < 32));
+    });
+    only_new("P2 3.1 step 2: done before the 1.02 checks (a non-1.02 image is patched too)", [&] {
+        netanim_bytes(mem);
+        mem[0x66b430] ^= 0x01;
+        assert_site(0x66b500, 0x156df78);
+        install_netanim();
+        CHECK(mem[0x66b500] == 0xe9 && count_of(differ) == 1 && count_of("log netanim: snapshot parse aborts on asserts (1 sites)") == 1);
+    });
+    // 3.1 step 9: padding switch, bytes, stub memory
+    only_new("P3 3.1 step 9: UNCHARTED_U2MP_NETANIM_PAD=0", [&] {
+        set_env("UNCHARTED_U2MP_NETANIM_PAD", "0");
+        netanim_bytes(mem);
+        install_netanim();
+        set_env("UNCHARTED_U2MP_NETANIM_PAD", nullptr);
+        CHECK(count_of(kPadOff) == 1 && count_of(kPadded) == 0);
+        CHECK(count_of("netanim installed 5, near_stub requests 5") == 1);
+        CHECK(std::memcmp(mem + 0x60e296, kPadPlayer, 8) == 0 && std::memcmp(mem + 0x60e9f3, kPadOther, 6) == 0);
+    });
+    only_new("P3 3.1 step 9: a pad site differs (same log line as the switch)", [&] {
+        netanim_bytes(mem);
+        mem[0x60e9f8] ^= 0x01;
+        install_netanim();
+        CHECK(count_of(kPadOff) == 1 && count_of("netanim installed 5, near_stub requests 5") == 1);
+        CHECK(std::memcmp(mem + 0x60e296, kPadPlayer, 8) == 0);
+    });
+    only_new("P3 3.1 step 9: no stub memory for the padding (silent)", [&] {
+        netanim_bytes(mem);
+        exec_fail_mask = 1ull << 6;   // the second pad request
+        install_netanim();
+        CHECK(count_of(kPadOff) == 0 && count_of(kPadded) == 0 && count_of(kRestored) == 1);
+        CHECK(count_of("netanim installed 5, near_stub requests 7") == 1);
+        CHECK(std::memcmp(mem + 0x60e296, kPadPlayer, 8) == 0 && std::memcmp(mem + 0x60e9f3, kPadOther, 6) == 0);
+    });
+    only_new("P3 3.1 steps 4-9: full install", [&] {
+        netanim_bytes(mem);
+        install_netanim();
+        const uint64_t p = uint64_t(uintptr_t(g_pool0));
+        CHECK(count_of(kPadded) == 1 && count_of("netanim installed 6, near_stub requests 7") == 1);
+        CHECK(jumps_to(0x66b637, 7, p + 0x400, 0xcc) && jumps_to(0x5f3d63, 7, p + 0x600, 0xcc) &&
+              jumps_to(0x5f3dd1, 7, p + 0x800, 0xcc));
+        CHECK(jumps_to(0x60e296, 8, p + 0xa00, 0xcc) && jumps_to(0x60e9f3, 6, p + 0xb80, 0xcc));
+        CHECK(mem[0x6367cd] == 0x0a && mem[0x6368a2] == 0x09 && mem[0x6368b9] == 0x0a);
+        CHECK(mem[0x5f48d0] == 0xc3);   // slot 4 not replaced (3.1 step 10)
+    });
+    // 3.7 the pad call-outs
+    only_new("P4 3.7 snapshot bit counts padded to whole words", [&] {
+        netanim_bytes(mem);
+        install_netanim();
+        capture_at(0x60e29e);
+        capture_at(0x60e9f9);
+        std::mt19937_64 r(31);
+        const uint32_t bits[] = {0, 1, 31, 32, 33, 0x52f, 0x530, 0x531, 0x54f, 0x550, 0x551, 0x560, 0x1000, 0xffffffe0, 0xffffffff};
+        for (bool player : {true, false})
+            for (uint32_t b : bits) {
+                put<uint32_t>(SNAP + 0xbc, 0xdeadbeef);
+                Regs in = random_regs(r);
+                in.g[player ? 12 : 3] = addr(SNAP);
+                in.g[0] = (in.g[0] & ~0xffffffffull) | b;
+                const size_t m = calls.size();
+                run_site(player ? 0x60e296 : 0x60e9f3, in, (b & 1) * 8);
+                uint32_t n = (b + 31u) & ~31u;
+                if (n > 0x550) n = b;
+                CHECK(get<uint32_t>(SNAP + 0xbc) == n);
+                CHECK(calls.size() == m + 1 && regs_only(calls[m], {}));
+            }
+    });
+    // 3.4 index call-out, then 3.3 reader leaves against a pose generator
+    only_new("P5 3.4 anim indices, 3.3 reader leaves (clip / pose / lookup / cache / leaf log)", [&] {
+        netanim_bytes(mem);
+        install_netanim();
+        capture_at(0x66b6a5);
+        capture_at(0x66c250);
+        stub_ptr(POSE_VT + 0x18, GSTUB, reinterpret_cast<void *>(&fake_gen_clip));
+        stub_ptr(POSE_VT + 0x28, GSTUB + 0x20, reinterpret_cast<void *>(&fake_gen_pose));
+        put<uint64_t>(GEN, addr(POSE_VT));
+        put<uint32_t>(GEN + 0xc, 2);
+        put<uint64_t>(GEN2, addr(OTHER_VT));
+        put<uint64_t>(GROUP + 0x30, addr(GP));
+        put<uint64_t>(GP + 0x10, addr(TAB));
+        put<uint32_t>(TAB, 8);
+        put<uint64_t>(TAB + 8, addr(ENT));
+        auto anim = [&](uint64_t a, uint64_t name_at, const char *name, uint64_t clip) {
+            put<uint64_t>(a, addr(name_at));
+            std::strcpy(reinterpret_cast<char *>(mem + name_at), name);
+            put<uint64_t>(a + 0x28, addr(clip));
+        };
+        put<uint16_t>(CLIP + 0x22, 30);
+        put<uint16_t>(CLIP0 + 0x22, 0);
+        anim(AN_A, NAME_A, "hx-clip-a", CLIP);
+        anim(AN_B, NAME_B, "hx-clip-b", CLIP);
+        anim(AN_C, NAME_C, "hx-clip-c", CLIP0);
+        put<uint64_t>(XP, addr(AN_B));
+        auto entry = [&](uint32_t idx, uint32_t want, uint64_t x) {
+            put<uint32_t>(ENT + idx * 16, want);
+            put<uint64_t>(ENT + idx * 16 + 8, x ? addr(x) : 0);
+        };
+        entry(5, u2mp::sid("hx-clip-a"), AN_A);   // direct
+        entry(3, u2mp::sid("hx-clip-b"), XP);     // through a pointer
+        entry(4, u2mp::sid("hx-clip-z"), AN_A);   // name differs: a miss
+        entry(6, u2mp::sid("hx-clip-c"), AN_C);   // clip without frames: a miss
+        // the stream: five 11-bit indices, then the 10-bit phases
+        Bits b;
+        for (uint32_t i : {5u, 3u, 0x7ffu, 4u, 6u}) b.put(i, 11);
+        const uint32_t ph[] = {0x3ff, 0x155, 7, 0x200, 1, 2, 3, 4, 5, 6, 0x2aa};
+        for (uint32_t p : ph) b.put(p, 10);
+        for (int i = 0; i < 64; i++) put<uint32_t>(WORDS + 4 * uint64_t(i), b.w[i]);
+        put<uint64_t>(FRAME - 0x150, addr(WORDS));
+        put<uint32_t>(FRAME - 0x148, 0);
+        put<uint32_t>(FRAME - 0x144, 2000);
+        std::mt19937_64 r(32);
+        Regs in = random_regs(r);
+        in.g[5] = addr(FRAME);
+        in.g[14] = (in.g[14] & ~0xffffffffull) | 5;
+        size_t m = calls.size();
+        run_site(0x66b637, in, 8);
+        CHECK(get<uint32_t>(FRAME - 0x148) == 55);
+        CHECK(calls.size() == m + 2 && calls[m] == "log netanim: 5 anim indices" && regs_only(calls[m + 1], {}));
+        int clips = 0, poses = 0, misses = 0;
+        uint32_t pos = 55;
+        // one leaf; `out` = the call it must make ("" for none), `reach` = it gets past steps 3 and 4
+        auto leaf = [&](uint64_t next, uint32_t slot, uint64_t gen, const std::string &out, bool reach, bool room = true) {
+            put<uint64_t>(FRAME - 0x190, gen ? addr(gen) : 0);
+            put<uint64_t>(FRAME - 0x180, slot);
+            Regs li = random_regs(r);
+            li.g[0] = addr(GROUP);
+            li.g[5] = addr(FRAME);
+            li.g[14] = next;
+            const size_t lm = calls.size();
+            run_site(0x66c035, li, 0);
+            ++g_new_leaves;
+            if (room) pos += 10;
+            CHECK(get<uint32_t>(FRAME - 0x148) == pos);
+            std::vector<std::string> want;
+            if (!out.empty()) want.push_back(out);
+            if (reach && g_new_leaves % 64 == 0) {
+                char l[160];
+                std::snprintf(l, sizeof l, "log netanim: leaves %d, clips %d, poses %d, misses %d, deep drops 0, index reads 1",
+                              g_new_leaves, clips, poses, misses);
+                want.push_back(l);
+            }
+            CHECK(calls.size() == lm + want.size() + 1);
+            for (size_t i = 0; i < want.size() && lm + i < calls.size(); i++) CHECK(calls[lm + i] == want[i]);
+            CHECK(get<uint32_t>(FRAME - 0x180) == slot + 1);
+        };
+        auto clip = [&](uint64_t a, uint32_t slot, uint32_t q) {
+            ++clips;
+            char l[160];
+            std::snprintf(l, sizeof l, "gen clip g=img+0x%llx anim=img+0x%llx slot=%u phase=%s", (unsigned long long)GEN,
+                          (unsigned long long)a, slot, fbits(float(q) * (1.0f / 1023.0f)).c_str());
+            return std::string(l);
+        };
+        auto pose = [&](uint32_t slot) {
+            ++poses;
+            return "gen pose g=img+0x" + [] { char x[32]; std::snprintf(x, 32, "%llx", (unsigned long long)GEN); return std::string(x); }() +
+                   " slot=" + std::to_string(slot);
+        };
+        leaf(1, 1, GEN, clip(AN_A, 1, ph[0]), true);
+        leaf(2, 0, GEN, clip(AN_B, 0, ph[1]), true);
+        leaf(3, 4, GEN, pose(4), true);   // index 0x7ff: past the table (no miss)
+        ++misses;
+        leaf(4, 0, GEN, pose(0), true);   // name differs
+        ++misses;
+        leaf(5, 0, GEN, pose(0), true);   // clip without frames
+        leaf(0, 0, GEN, pose(0), true);   // no index
+        leaf(6, 0, GEN, pose(0), true);   // past the stored count
+        leaf(1, 5, GEN, "", false);       // sub 2 + slot 5 >= 7
+        leaf(1, 0, GEN2, "", false);      // another vtable
+        leaf(1, 0, 0, "", false);         // no generator
+        put<uint32_t>(TAB, 0);            // the cache still knows (group, 5)
+        leaf(1, 3, GEN, clip(AN_A, 3, ph[10]), true);
+        put<uint32_t>(FRAME - 0x144, pos + 9);   // no room: phase 0, position kept
+        leaf(1, 0, GEN, clip(AN_A, 0, 0), true, false);
+        while (g_new_leaves % 64 != 63) leaf(0, 0, GEN, pose(0), true, false);
+        leaf(0, 0, GEN, pose(0), true, false);   // this one prints the leaf summary
+    });
+    // 3.5 / 3.6 bind-pose prefill and tree depth guard
+    only_new("P6 3.5 bind-pose prefill, 3.6 tree depth guard", [&] {
+        netanim_bytes(mem);
+        install_netanim();
+        capture_at(0x5f3d6a);
+        capture_at(0x5f3dd8);
+        std::mt19937_64 r(33);
+        put<uint64_t>(LIST, addr(LW));
+        put<uint32_t>(LIST + 0xc, 4);
+        put<uint32_t>(LIST + 0x10, 7);
+        for (int i = 0; i < 4; i++) put<uint32_t>(LW + 4 * uint64_t(i), 0x11 + uint32_t(i));
+        Regs in = random_regs(r);
+        in.g[3] = addr(LIST);
+        in.g[12] = (in.g[12] & ~0xffffffffull) | 10;
+        size_t m = calls.size();
+        run_site(0x5f3d63, in, 0);
+        CHECK(calls.size() == m + 1 && regs_only(calls[m], {{1, addr(POSE_VT)}}));
+        CHECK(get<uint32_t>(LW + 16) == 0x2000d && get<uint32_t>(LW + 20) == 10 && get<uint32_t>(LW + 24) == 0x2000d &&
+              get<uint32_t>(LW + 28) == 11 && get<uint32_t>(LW + 12) == 0x14);
+        CHECK(get<uint32_t>(LIST + 0xc) == 8 && get<uint32_t>(LIST + 0x10) == 11);
+        // the guard: list, count / top as the tree left them, base slot
+        auto guard = [&](uint64_t list, uint32_t count, uint32_t top, uint32_t base, uint32_t want_count, uint32_t want_top,
+                         bool line) {
+            put<uint32_t>(list + 0xc, count);
+            put<uint32_t>(list + 0x10, top);
+            Regs g = random_regs(r);
+            g.g[15] = addr(list);
+            g.g[3] = (g.g[3] & ~0xffffffffull) | base;
+            const size_t gm = calls.size();
+            run_site(0x5f3dd1, g, 8);
+            CHECK(get<uint32_t>(list + 0xc) == want_count && get<uint32_t>(list + 0x10) == want_top);
+            CHECK(calls.size() == gm + 1 + (line ? 1 : 0));
+            if (line && calls.size() > gm) {
+                char l[96];
+                std::snprintf(l, sizeof l, "log netanim: deep tree dropped (%u slots, limit 5)", top - base);
+                CHECK(calls[gm] == l);
+            }
+            if (calls.size() > gm) CHECK(regs_only(calls.back(), {{0, want_count}, {1, get<uint64_t>(list)}}));
+        };
+        guard(LIST, 8, 11, 7, 8, 11, false);     // depth 4
+        guard(LIST, 14, 15, 10, 14, 15, false);  // depth 5: kept
+        guard(LIST, 14, 17, 10, 8, 11, true);    // depth 7: back to the mark
+        put<uint64_t>(LIST2, addr(LW2));
+        guard(LIST2, 14, 30, 10, 14, 30, false);  // another list than the mark's
+        guard(LIST, 14, 3, 10, 14, 3, false);     // top below base: depth 0
+        for (int i = 0; i < 9; i++) guard(LIST, 20, 16, 10, 8, 11, i < 7);   // 8 lines in all, then silent
     });
 }
 
@@ -1769,13 +2403,17 @@ int main(int argc, char **argv) {
     set_env("UNCHARTED_U2MP_NETANIM", nullptr);
     install_scenarios();
     stream_scenarios();
+    current_only_scenarios();
     slot_scenarios();
     slot_fuzz(60 * scale, 40);
     natives_install_scenarios();
     natives_scenarios();
     natives_fuzz(20 * scale, 150);
-    std::printf("\nnetanim: %d scenarios, %d passed, %d failed; %d driven cases (calls / frames / natives)\n", g_scen, g_pass,
-                g_scen - g_pass, g_cases);
+    std::printf("\nnetanim: %d scenarios, %d passed, %d differ only in the generator slot 4 part (open, spec 3.10), %d "
+                "failed; %d driven cases (calls / frames / natives)\n",
+                g_scen, g_pass, g_open, g_scen - g_pass - g_open, g_cases);
     for (const auto &n : g_failed) std::printf("  failed: %s\n", n.c_str());
+    if (std::getenv("HX_LIST_OPEN"))
+        for (const auto &n : g_open_names) std::printf("  open (slot 4): %s\n", n.c_str());
     return g_scen == g_pass ? 0 : 1;
 }

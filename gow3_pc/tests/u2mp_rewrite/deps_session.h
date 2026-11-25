@@ -62,6 +62,9 @@ struct State {
     uint32_t team_colour = 0xff123456;
     bool event_null = false;
     uint8_t event_refs = 1;                    // reference count a created event starts with
+    // new build only (stand-ins of what session.cpp calls since the rewrite)
+    std::vector<int32_t> playlist_types;       // playlist_game_types: the chosen playlist's types (empty: none)
+    std::map<int, int32_t> net_game_pack;      // dlc_net_game_pack: net game index -> map pack (absent: 0)
 };
 extern State st;
 
@@ -91,6 +94,12 @@ struct Api {
     uint32_t (*net_id_of)(const std::string &) = nullptr;
     void (*online_rehost)(const Addr *owner, uint32_t) = nullptr;   // with the fake link
     const uint8_t *(*package_by_id)(uint32_t) = nullptr;
+    // new build only (NULL in the old one): the parity entry points test_session.cpp checks in new-only scenarios
+    void (*network_error)(const char *) = nullptr;   // parity H8
+    int (*custom_room_slots)() = nullptr;            // parity H1
+    int (*playlist_room_slots)() = nullptr;          // parity H1
+    uint32_t (*mm_pack_mask)() = nullptr;            // parity H5
+    void (*peer_timeout)(uint8_t) = nullptr;         // parity E 2.2 / I6: the transport's on_timeout callback
 };
 
 inline std::string hex(const uint8_t *d, size_t n) {

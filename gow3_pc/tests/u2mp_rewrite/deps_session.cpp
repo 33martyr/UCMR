@@ -60,25 +60,30 @@ bool Address::parse(const std::string &text, uint16_t default_port, Address &out
     return true;
 }
 Transport::~Transport() {}
+Transport *g_transport = nullptr;   // the module's transport (the one it last hosted or joined with)
 bool Transport::host(uint16_t port) {
+    g_transport = this;
     hx::rec("transport.host %u", port);
     hosting_ = true;
     local_slot_ = 0;
     return st.host_ok;
 }
 bool Transport::join(const Address &host_address, uint16_t local_port) {
+    g_transport = this;
     hx::rec("transport.join %s local %u", at(host_address).c_str(), local_port);
     hosting_ = false;
     local_slot_ = st.local_slot;
     return st.join_ok;
 }
 bool Transport::host_link(Link *link) {
+    g_transport = this;
     hx::rec("transport.host_link %s", lk(link));
     hosting_ = true;
     local_slot_ = 0;
     return st.host_link_ok;
 }
 bool Transport::join_link(Link *link, const Address &host_address, uint8_t want_slot) {
+    g_transport = this;
     hx::rec("transport.join_link %s %s want %u", lk(link), at(host_address).c_str(), want_slot);
     hosting_ = false;
     local_slot_ = st.local_slot;
@@ -353,12 +358,17 @@ void reservation_refused() { hx::rec("online::reservation_refused"); }
 }  // namespace online
 namespace voice {
 void reset_volume() { hx::rec("voice::reset_volume"); }   // parity J6
+// parity N5 / N6 (commit 50a6b69): talking indicator table and mouth patch, installed by session::install
+void install(int &) { hx::rec("voice::install"); }
 }  // namespace voice
+// parity N2 (commit 50a6b69): Mute Players list callbacks, once per session frame
+void mute_players_frame() { hx::rec("mute_players_frame"); }
 // parity group E: matchmaking playlist game types (menus.cpp), menu version text (hud.cpp), stats ticker
 // (ticker.cpp), Players Met at match start (progression.cpp)
 bool playlist_game_types(std::vector<int32_t> &types) {
     hx::rec("playlist_game_types");
-    return false;
+    types = st.playlist_types;
+    return !types.empty();
 }
 void hud_menu_text(float x, float y, float scale, const char *text) {
     hx::rec("hud_menu_text %.1f %.1f %.2f [%s]", x, y, scale, text ? text : "(NULL)");
@@ -378,7 +388,8 @@ uint32_t dlc_packs() {
 int32_t dlc_net_game_pack(int32_t index, bool &local_ok) {
     hx::rec("dlc_net_game_pack %d", index);
     local_ok = st.dlc_off.count(index) == 0;
-    return 0;
+    const auto it = st.net_game_pack.find(index);
+    return it == st.net_game_pack.end() ? 0 : it->second;
 }
 int32_t playlist_max_party(uint32_t id) {
     hx::rec("playlist_max_party 0x%x", id);
@@ -435,6 +446,16 @@ void hx_session_api(hx::ss::Api &a) {
         session::online_rehost(&fake_link, o ? &owner : nullptr, id);
     };
     a.package_by_id = package_by_id;
+#ifndef u2mp   // new build only: the parity entry points (online.h's u2mp::session part) and the timeout callback
+    a.network_error = session::online_network_error;
+    a.custom_room_slots = session::custom_room_slots;
+    a.playlist_room_slots = session::playlist_room_slots;
+    a.mm_pack_mask = session::mm_pack_mask;
+    a.peer_timeout = [](uint8_t slot) {
+        if (net::g_transport && net::g_transport->on_timeout) net::g_transport->on_timeout(slot);
+        else hx::rec("(no transport timeout callback)");
+    };
+#endif
 }
 
 }  // namespace u2mp

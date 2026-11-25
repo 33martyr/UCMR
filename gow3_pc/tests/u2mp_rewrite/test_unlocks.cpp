@@ -324,6 +324,16 @@ int translate(const char *guest, char *out, size_t size) {
                   name.c_str());
     return 0;
 }
+// session::member_skins for the new build (deps_unlocks.cpp): the party members a new-only world sets up
+std::map<uint32_t, std::pair<std::string, std::string>> members;
+bool member_skins(uint32_t net_id, std::string &hero, std::string &villain) {
+    auto it = members.find(net_id);
+    hx::rec("session::member_skins %u -> %d", net_id, it != members.end() ? 1 : 0);
+    if (it == members.end()) return false;
+    hero = it->second.first;
+    villain = it->second.second;
+    return true;
+}
 }  // namespace ul
 
 namespace {
@@ -514,12 +524,14 @@ std::vector<uint8_t> make_np9(const Cfg &c) {
     std::vector<SkinDef> sk = c.skin_recs.empty() ? default_skins() : c.skin_recs;
     if (c.skins != 3) {
         std::vector<uint64_t> names;
-        for (auto &s : sk) names.push_back(f.str(c.skins == 2 && &s == &sk[2] ? "xx-bad" : s.pkg));
+        // a NULL pkg (new-only worlds) leaves the record's package ptr 0
+        for (auto &s : sk) names.push_back(s.pkg ? f.str(c.skins == 2 && &s == &sk[2] ? "xx-bad" : s.pkg) : 0);
         const uint64_t stride = c.skins == 1 ? 0x28 : 0x30;
         const uint64_t recs = f.zero(stride * sk.size());
         for (size_t i = 0; i < sk.size(); ++i) {
             const uint64_t r = recs + stride * i;
-            f.w32(r, sk[i].idx), f.w32(r + 4, sk[i].side), f.p(r + 8, names[i]), f.w32(r + 0x10, sk[i].id);
+            f.w32(r, sk[i].idx), f.w32(r + 4, sk[i].side), f.w32(r + 0x10, sk[i].id);
+            if (names[i]) f.p(r + 8, names[i]);
             const uint64_t base = c.skins == 1 ? 0x14 : 0x18;
             const uint32_t v[5] = {sk[i].name, sk[i].photo, sk[i].icon, sk[i].v24, sk[i].v28};
             for (int k = 0; k < 5; ++k) f.w32(r + base + 4 * k, v[k]);
@@ -1299,6 +1311,281 @@ void define_worlds() {
         });
 }
 
+// ---- new-only worlds ---------------------------------------------------------------------------------------------
+// What the code got after the rewrite (the squash 934a6ca and commit 6b34909, issue #34; u2mp/docs/spec/unlocks.md
+// section 12) changes the merged skin table itself: its order, its records and its net heap layout, and so every
+// later step that reads it (store copy, labels, fingerprint, skin choice and random pick logs). Those changes cannot
+// be written as an edit of the old record without building the new table again in the test, so the old-vs-new
+// worlds above still show them. These worlds run the new build alone and check the spec's rules (5.6, 5.8, 5.9,
+// 6.3, 9.1b, 9.1c) directly. A check named "B1".."B3" is a suspected bug (spec 12): it checks the rule the spec
+// keeps and fails while the code differs.
+std::map<std::string, World> new_only;
+int g_checks = 0, g_bad = 0;
+void reset_side(const std::string &world, int s);
+void expect(bool ok, const std::string &what) {
+    ++g_checks;
+    if (ok) return;
+    ++g_bad;
+    std::printf("FAIL (new only) %s\n", what.c_str());
+}
+bool has_line(const std::vector<std::string> &r, const std::string &l) {
+    for (const std::string &x : r)
+        if (x == l) return true;
+    return false;
+}
+int count_prefix(const std::vector<std::string> &r, const std::string &p) {
+    int n = 0;
+    for (const std::string &x : r) n += x.rfind(p, 0) == 0;
+    return n;
+}
+const uint8_t *bound_skins() { return reinterpret_cast<const uint8_t *>(uintptr_t(dc_value(SKIN))); }
+std::string rec_pkg(const uint8_t *rec) {
+    uint64_t p;
+    std::memcpy(&p, rec + 8, 8);
+    return p ? std::string(reinterpret_cast<const char *>(uintptr_t(p))) : std::string("(null)");
+}
+template <typename T> T at(const uint8_t *p, size_t off) {
+    T v;
+    std::memcpy(&v, p + off, sizeof v);
+    return v;
+}
+// the 4-byte groups of `s` reversed, as a converted file may hold a name (spec 6.3 step 5)
+std::string swap4(const std::string &s) {
+    std::string o = s;
+    for (size_t i = 0; i < s.size(); i += 4) {
+        const size_t n = s.size() - i < 4 ? s.size() - i : 4;
+        for (size_t j = 0; j < n; ++j) o[i + j] = s[i + n - 1 - j];
+    }
+    return o;
+}
+void new_setup(const Cfg &c) {
+    world_setup(c);
+    do_install();
+    write_stubs();
+    put<uint64_t>(BUCKETS, 1);
+    put<int32_t>(NETSM, 2);
+}
+
+struct Want {   // one expected merged record (spec 6.3)
+    uint32_t side;
+    const char *pkg;
+    uint32_t id, name, photo, icon;
+};
+
+using LookFn = void *(U2MP_GUEST *)(uint32_t);
+
+void define_new_only() {
+    // N1: the merged table from a converted net-patch9 (6.3 steps 2..17, 9.1b, 9.1c)
+    new_only["new_skin_table"] = [] {
+        static const std::string swapped = swap4("mp-hero-swap"), longname(70, 'm');
+        Cfg c;
+        c.skins = 1;
+        c.skin_recs = {
+            {0, 0, "mp-hero", sid("mp-hero"), 0x1001, 0x2001, 0x3001, 7, 8},   // the stub's id: skipped
+            {1, 0, "mp-hero-killzone-sev", sid("mp-hero-killzone-sev"), 0x1002, 0x2002, 0x3002, 1, 1},
+            {2, 0, "mp-hero-zero", 0, 0x1003, 0, 0, 0, 0},                       // id 0: skipped
+            {3, 1, "mp-hero-lazarevic", 0x345329d1, 0x1004, 0x2004, 0x3004, 0, 0},   // 9.1b rewrites it
+            {4, 0, swapped.c_str(), sid("mp-hero-swap"), 0x1005, 0, 0, 0, 0},  // copied un-swapped
+            {5, 1, "plainname", sid("plainname"), 0x1006, 0, 0, 0, 0},         // no prefix either way: kept
+            {6, 0, nullptr, 0x6666, 0x1007, 0, 0, 0, 0},                        // package ptr NULL: skipped
+            {7, 0, longname.c_str(), 0x7777, 0x1008, 0, 0, 0, 0},              // no NUL in 63: skipped
+            {8, 1, "mp-hero-dup", sid("mp-hero-killzone-sev"), 0x1009, 0, 0, 0, 0},   // id already there
+        };
+        new_setup(c);
+        refresh("refresh 1 (build)");
+        const std::vector<std::string> r = R[1].back().calls;
+        const uint8_t *t = bound_skins();
+        expect(t != nullptr, "N1 the merged table is bound");
+        if (!t) return;
+        const Want want[] = {
+            {0, "mp-hero", sid("mp-hero"), 0x1101, 0x2101, 0x3101},                 // stub first (6.3 step 6.1)
+            {1, "mp-hero-eddie", sid("mp-hero-eddie"), 0x1102, 0x2101, 0x3101},
+            {0, "mp-hero-killzone-sev", sid("mp-hero-killzone-sev"), 0x1002, 0x2002, 0x3002},
+            {1, "mp-hero-lazarevic-fat", 0x345329d1, 0xa5e10001, 0x2699dcf8, 0xff290e47},   // 9.1b #3
+            {0, "mp-hero-swap", sid("mp-hero-swap"), 0x1005, 0, 0},
+            {1, "plainname", sid("plainname"), 0x1006, 0, 0},
+            {0, "mp-hero-red", sid("mp-hero-red"), 0x9a88ecdc, 0xdafcd51b, 0xc283da48},   // 6.3 step 7
+            {1, "mp-hero-pirate-nd", 0x5a2e4839, 0xa5e10003, 0xe226ff59, 0xf7309a91},     // 9.1 #2, 9.1b #2, 9.1c #1
+            {1, "costume-hero-lazarevic-healed", 0x1c14ad7b, 0x899e21dd, 0xeabed4cf, 0xffa8b107},
+            {0, "hero-dirty-beatup", 0x1b3af509, 0x1d8dbe6a, 0x05a8ba5f, 0x14c66775},
+            {0, "costume-hero-skeleton-sir-francis", 0x7a66b9bb, 0xba9eb65d, 0x200eed64, 0x3160304e},
+            {0, "mp-hero-nd", 0x258034ff, 0x9b7568c5, 0xaa7dcc3a, 0x2534f068},
+            {0, "mp-hero-frosty", 0xf0d8079a, 0xaacd3194, 0x01bf230e, 0xb58cceaa},
+            {1, "mp-hero-flynn-frosty", 0x6628af6b, 0xa5e10002, 0xc5a421aa, 0x7197cc0e},   // 9.1b #4 appended
+            {1, "costume-hero-sol-med-b-1a", 0xd8f8cbb4, 0x7039261f, 0x59555d94, 0x14e4258f},   // 9.1c #2
+        };
+        const int32_t kWant = int32_t(sizeof want / sizeof want[0]);
+        const int32_t n = at<int32_t>(t, 0);
+        expect(n == kWant, "N1 count " + std::to_string(n) + " (want 15)");
+        const uint8_t *recs = reinterpret_cast<const uint8_t *>(uintptr_t(at<uint64_t>(t, 8)));
+        expect(recs == t + 0x10, "N1 records follow the header");
+        uint32_t fp = 0;
+        for (int32_t i = 0; i < kWant; ++i) {
+            char text[16];
+            std::snprintf(text, sizeof text, "%08x", want[i].id);
+            fp = sid(text, fp);
+        }
+        for (int32_t i = 0; i < n && i < kWant; ++i) {
+            const uint8_t *x = recs + 0x30 * i;
+            const Want &w = want[i];
+            const std::string tag = "N1 record " + std::to_string(i) + " (" + w.pkg + ")";
+            expect(at<uint32_t>(x, 0) == uint32_t(i), tag + ": +0 is its position");
+            expect(at<uint32_t>(x, 4) == w.side, tag + ": side");
+            expect(rec_pkg(x) == w.pkg, tag + ": package '" + rec_pkg(x) + "'");
+            expect(at<uint64_t>(x, 0x10) == w.id, tag + ": id");
+            expect(at<uint32_t>(x, 0x18) == w.name && at<uint32_t>(x, 0x1c) == w.photo && at<uint32_t>(x, 0x20) == w.icon,
+                   tag + ": name / photo / icon");
+            // 6.3 step 11: positions 0..9 name a slot art buffer (module memory), the others a net heap copy
+            const void *p = reinterpret_cast<const void *>(uintptr_t(at<uint64_t>(x, 8)));
+            expect(i < 10 ? !in_range(p, heap, kHeap) && !in_range(p, hx::mem, hx::kImageSize) : in_range(p, heap, kHeap),
+                   tag + (i < 10 ? ": package in a slot art buffer" : ": package copied to the net heap"));
+        }
+        // the stub records keep their own +0x24 / +0x28 / +0x2c
+        expect(at<uint32_t>(recs, 0x24) == 0x11 && at<uint32_t>(recs, 0x28) == 0x22 && at<uint32_t>(recs, 0x2c) == 0x33,
+               "N1 stub record 0 keeps +0x24 / +0x28 / +0x2c");
+        // B2 (spec 6.3 step 6.2): a converted record's fourth and fifth value go to +0x24 / +0x28
+        expect(at<uint32_t>(recs + 0x30 * 2, 0x24) == 1 && at<uint32_t>(recs + 0x30 * 2, 0x28) == 1,
+               "B2 converted record killzone-sev keeps its +0x24 / +0x28 values (1, 1)");
+        char line[200];
+        std::snprintf(line, sizeof line,
+                      "log unlocks: skin table order fingerprint %08x (15 records; every PC of a match must log the same)", fp);
+        expect(has_line(r, line), std::string("N1 fingerprint line: ") + line);
+        expect(has_line(r, "log unlocks: skin table: 9 net-patch9 records (converted layout) + PS4/extras = 15"),
+               "N1 summary line (6.3 step 17)");
+        // labels (6.3 step 14): the first record of a name id wins; 9.1b / 9.1c names replaced the earlier ones
+        expect(side().text(0x1002) && std::string(side().text(0x1002)) == "Killzone Sev", "N1 label 0x1002");
+        expect(side().text(0xa5e10001) && std::string(side().text(0xa5e10001)) == "Lazarevic Fat", "N1 label 0xa5e10001");
+        expect(side().text(0x1004) == nullptr, "N1 no label 0x1004 (9.1b rewrote that record)");
+        expect(side().fingerprint() == fp, "N1 fingerprint value");
+    };
+
+    // B1 (spec 6.3 step 2): a net-patch9 skin table in the PS4 layout (0x30 records) is read as such
+    new_only["new_skin_table_ps4_layout"] = [] {
+        Cfg c;   // the default fixture: PS4 layout
+        new_setup(c);
+        refresh("refresh 1 (build)");
+        const uint8_t *t = bound_skins();
+        bool found = false;
+        if (t) {
+            const uint8_t *recs = reinterpret_cast<const uint8_t *>(uintptr_t(at<uint64_t>(t, 8)));
+            for (int32_t i = 0; i < at<int32_t>(t, 0); ++i) {
+                const uint8_t *x = recs + 0x30 * i;
+                if (at<uint32_t>(x, 0x10) == sid("mp-hero-killzone-sev"))
+                    found = rec_pkg(x) == "mp-hero-killzone-sev" && at<uint32_t>(x, 0x18) == 0x1002 &&
+                            at<uint32_t>(x, 0x1c) == 0x2002 && at<uint32_t>(x, 0x20) == 0x3002;
+            }
+        }
+        expect(found, "B1 PS4-layout record killzone-sev (id, package, name, photo, icon) is in the merged table");
+        expect(count_prefix(R[1].back().calls, "log unlocks: skin table: 12 net-patch9 records (PS4 layout)") == 1,
+               "B1 summary line names the PS4 layout");
+    };
+
+    // N2..N5: skin choice tracking (5.6), spawn B fallback (5.6), slot skins (5.8), table lookups (5.9)
+    new_only["new_skin_choice_slots"] = [] {
+        Cfg c;
+        c.skins = 1;   // the importer's layout
+        new_setup(c);
+        hx::stub(0xa15e70, (void *)&fake_dcfind);   // LookupPointer: answers like DcFind (5.9)
+        expect(u2mp::unlocks_local_skin() == nullptr && u2mp::unlocks_local_villain() == nullptr,
+               "N2 no local skins before a choice");
+        refresh("refresh 1 (build)");
+        refresh("refresh 2 (choice at bind)");
+        // hero killzone-sev is in the table: kept; villain 0xffffffff is not: Drake (5.6 step 3)
+        expect(u2mp::unlocks_local_skin() && std::string(u2mp::unlocks_local_skin()) == "mp-hero-killzone-sev",
+               "N2 local hero package after the choice at bind");
+        expect(u2mp::unlocks_local_villain() && std::string(u2mp::unlocks_local_villain()) == "mp-hero",
+               "N2 local villain package (Drake written)");
+        playerdata("player data");
+        // 5.6: presence check, then per side the index before, the index now (tracking) and the log's lookup
+        expect(count_prefix(R[1].back().calls, "DcFind 5a4731d2") == 7, "N2 DcFind count in the player data choice (1 + 2 x 3)");
+
+        // spawn B fallback (5.6): the remote model is not loaded
+        art_result = 0;
+        spawn("spawn B remote model missing", 0x663782, "mp-hero-remote");
+        {
+            const std::vector<std::string> r = R[1].back().calls;
+            std::vector<std::string> arts;
+            for (const std::string &l : r)
+                if (l.rfind("ArtLookup", 0) == 0) arts.push_back(l);
+            const std::string tb = "ArtLookup img+0x1650500 '";
+            expect(arts.size() == 3 && arts[0] == tb + "mp-hero-remote'" && arts[1] == tb + "mp-hero-killzone-sev'" &&
+                       arts[2] == tb + "mp-hero'",
+                   "N3 lookups: the remote name, the local hero, then mp-hero (the first loaded skin is the local one)");
+            expect(has_line(r, "log skins: remote model 'mp-hero-remote' not loaded; using 'mp-hero-killzone-sev'"),
+                   "N3 the one-time fallback line");
+        }
+        spawn("spawn B remote model missing again", 0x663782, "mp-hero-remote2");
+        expect(count_prefix(R[1].back().calls, "log skins: remote model") == 0, "N3 the fallback line is printed once");
+        art_result = addr(0x1650200);
+        spawn("spawn A found", 0x663339, "mp-hero-eddie");
+        expect(u2mp::unlocks_local_skin() && std::string(u2mp::unlocks_local_skin()) == "mp-hero-eddie",
+               "N3 a found spawn A model becomes the local hero package");
+
+        // slot skins (5.8)
+        constexpr uint64_t NGM = 0x113b760, SLOTS = NGM + 0x10;
+        auto slot = [](int k) { return SLOTS + 0x2c0 * uint64_t(k); };
+        put<uint64_t>(NGM, addr(slot(0)));   // slot 0 is this PC
+        put<int32_t>(slot(0) + 0x120, 2), put<int32_t>(slot(0) + 0x134, 0);
+        put<int32_t>(slot(1) + 0x120, 1), put<int32_t>(slot(1) + 0x134, 1);    // the host, villain team
+        put<int32_t>(slot(2) + 0x120, 11), put<int32_t>(slot(2) + 0x138, 77);  // id out of range: left alone
+        put<int32_t>(slot(4) + 0x120, 5), put<int32_t>(slot(4) + 0x134, 1);    // unknown member: local names
+        ul::members[1] = {"mp-hero-remote-h", "mp-hero-remote-v"};
+        step("apply slot skins", [] { u2mp::unlocks_apply_slot_skins(); });
+        const std::vector<std::string> ra = R[1].back().calls;
+        const uint8_t *recs = reinterpret_cast<const uint8_t *>(uintptr_t(at<uint64_t>(bound_skins(), 8)));
+        expect(rec_pkg(recs + 0x30 * 1) == "mp-hero-eddie" && get<uint32_t>(slot(0) + 0x138) == 1,
+               "N4 local slot (id 2): record 1 names the local hero, index 1");
+        expect(rec_pkg(recs) == "mp-hero-remote-v" && get<uint32_t>(slot(1) + 0x138) == 0,
+               "N4 host slot (id 1, team 1): record 0 names its villain, index 0");
+        expect(rec_pkg(recs + 0x30 * 4) == "mp-hero" && get<uint32_t>(slot(4) + 0x138) == 4,
+               "N4 unknown member (id 5, team 1): record 4 names the local villain, index 4");
+        expect(get<uint32_t>(slot(2) + 0x138) == 77, "N4 id 11: slot left alone");
+        expect(has_line(ra, "session::member_skins 1 -> 1") && has_line(ra, "session::member_skins 5 -> 0") &&
+                   count_prefix(ra, "session::member_skins") == 2,
+               "N4 member skins asked for the remote slots only");
+        // B3 (unlocks.h: "the local player's chosen hero and villain actor packages"): the local Drake must stay
+        // Drake after the host's villain took record 0 (Drake's position) in 5.8
+        put<uint32_t>(NPD + 0x10c, sid("mp-hero"));
+        playerdata("player data, local Drake after the slot skins");
+        expect(u2mp::unlocks_local_skin() && std::string(u2mp::unlocks_local_skin()) == "mp-hero",
+               std::string("B3 local hero stays the local choice 'mp-hero' (got '") +
+                   (u2mp::unlocks_local_skin() ? u2mp::unlocks_local_skin() : "(null)") + "')");
+
+        // table lookups at the store / Profile sites (5.9): our table rebound before the game's lookup
+        const uint64_t ours = dc_value(SKIN);
+        dc_set_img(SKIN, 0x1650600);
+        step("store lookup, skin table replaced", [] {
+            auto f = reinterpret_cast<LookFn>(hx::retarget_host(0x5aea9d));
+            void *r = f ? f(SKIN) : nullptr;
+            hx::rec("lookup -> %s", M(r).c_str());
+        });
+        const std::vector<std::string> rs = R[1].back().calls;
+        expect(rs.size() >= 3 && rs[0] == "DcFind 5a4731d2" && rs[1].rfind("BindSymbol 5a4731d2 heap+", 0) == 0 &&
+                   rs[2] == "DcFind 5a4731d2" && dc_value(SKIN) == ours,
+               "N5 the store site rebinds the merged table, then the game's lookup");
+        step("profile lookup, other symbol", [] {
+            auto f = reinterpret_cast<LookFn>(hx::retarget_host(0x6597e5));
+            void *r = f ? f(0x12345678) : nullptr;
+            hx::rec("lookup -> %s", M(r).c_str());
+        });
+        const std::vector<std::string> rp = R[1].back().calls;
+        expect(rp.size() == 2 && rp[0] == "DcFind 12345678", "N5 another symbol: only the game's lookup");
+    };
+}
+
+int run_new_only(const std::string &name) {
+    reset_side(name, 1);
+    ul::members.clear();
+    new_only[name]();
+    std::printf("NEW-ONLY %s: %d checks, %d failed\n", name.c_str(), g_checks, g_bad);
+    if (std::getenv("UNL_DUMP"))
+        for (const Rec &x : R[1]) {
+            std::printf("== %s\n", x.name.c_str());
+            for (auto &l : x.calls) std::printf("   %s\n", l.c_str());
+        }
+    return g_bad ? 1 : 0;
+}
+
 // ---- running ------------------------------------------------------------------------------------------------------
 std::string exe_dir() {
     char b[1024];
@@ -1356,7 +1643,35 @@ bool diff(const Rec &a, const Rec &b) {
     return ok;
 }
 
+// The squash 934a6ca (spec unlocks.md 5.6 step 3, section 12 C2) made the skin choice remember the local hero /
+// villain package: after each side's decision one more skin index lookup, DcFind(0x5a4731d2), always made. The old
+// record of a player data step gets that lookup at its place: the choice runs first in such a step (presence lookup,
+// the forced name's lookup and its log when a name is forced, the "choice applied" line, then per side the lookup of
+// the equipped id and, when a skins line is free, one more lookup and the side's line), up to the PlayerData call.
+void choice_934a6ca(Rec &r) {
+    if (r.name.rfind("player data", 0) != 0) return;
+    std::vector<std::string> &c = r.calls;
+    const std::string D = "DcFind 5a4731d2";
+    auto is = [&](size_t i, const std::string &prefix) { return i < c.size() && c[i].rfind(prefix, 0) == 0; };
+    if (!is(0, D) || is(1, "PlayerData")) return;   // no skin hooks / buckets 0, or no skin table: no choice
+    size_t p = 1;
+    const char *forced = std::getenv("UNCHARTED_U2MP_SKIN");
+    if (forced && *forced) {
+        if (!is(p, D)) return;
+        ++p;
+        if (is(p, "log skins: UNCHARTED_U2MP_SKIN=")) ++p;
+    }
+    if (is(p, "log skins: choice applied")) ++p;
+    for (const char *sd : {"hero", "villain"}) {
+        if (!is(p, D)) return;
+        c.insert(c.begin() + std::ptrdiff_t(p + 1), D);
+        p += 2;
+        if (is(p, D) && is(p + 1, std::string("log skins: ") + sd + " id ")) p += 2;
+    }
+}
+
 int run_world(const std::string &name) {
+    if (new_only.count(name)) return run_new_only(name);
     auto it = worlds.find(name);
     if (it == worlds.end()) {
         std::printf("no world %s\n", name.c_str());
@@ -1373,6 +1688,7 @@ int run_world(const std::string &name) {
     }
     int pass = 0;
     for (size_t i = 0; i < R[0].size(); ++i) {
+        choice_934a6ca(R[0][i]);
         const bool ok = diff(R[0][i], R[1][i]);
         pass += ok;
         std::printf("%s [%s] %s (%zu calls)\n", ok ? "PASS" : "FAIL", name.c_str(), R[0][i].name.c_str(), R[0][i].calls.size());
@@ -1402,20 +1718,25 @@ int main(int argc, char **argv) {
     std::memset(heap, 0, kHeap);
     std::memset(host, 0, kHost);
     define_worlds();
+    define_new_only();
     if (argc >= 2) return run_world(argv[1]);
     char self[1024];
     GetModuleFileNameA(nullptr, self, sizeof self);
     const std::string quoted = std::string("\"") + self + "\"";
-    int bad = 0;
-    std::vector<std::string> failed;
-    for (auto &[name, w] : worlds) {
-        const intptr_t rc = _spawnl(_P_WAIT, self, quoted.c_str(), name.c_str(), nullptr);
-        if (rc != 0) {
-            ++bad;
-            failed.push_back(name + (rc == 1 ? "" : " (exit " + std::to_string(rc) + ")"));
+    auto run_all = [&](const std::vector<std::string> &names, std::vector<std::string> &failed) {
+        for (const std::string &name : names) {
+            const intptr_t rc = _spawnl(_P_WAIT, self, quoted.c_str(), name.c_str(), nullptr);
+            if (rc != 0) failed.push_back(name + (rc == 1 ? "" : " (exit " + std::to_string(rc) + ")"));
         }
-    }
-    std::printf("\nunlocks: %zu worlds, %d failed\n", worlds.size(), bad);
+    };
+    std::vector<std::string> names, new_names, failed, new_failed;
+    for (auto &[name, w] : worlds) names.push_back(name);
+    for (auto &[name, w] : new_only) new_names.push_back(name);
+    run_all(names, failed);
+    run_all(new_names, new_failed);
+    std::printf("\nunlocks: %zu worlds, %zu failed\n", worlds.size(), failed.size());
     for (auto &f : failed) std::printf("  failed world: %s\n", f.c_str());
-    return bad ? 1 : 0;
+    std::printf("unlocks: %zu new-only worlds, %zu failed\n", new_only.size(), new_failed.size());
+    for (auto &f : new_failed) std::printf("  failed new-only world: %s\n", f.c_str());
+    return failed.empty() && new_failed.empty() ? 0 : 1;
 }

@@ -166,6 +166,14 @@ implementation keeps per list (initially 0, process lifetime). For a given op:
 - op 9: `cur` = s32 `q+4`.
 - any other op (including 1 and 3): nothing is written.
 
+**Since 934a6ca** (squash, no message or comment; differential test `test_menus.cpp` `model_ask` /
+`cursor_expected`): op 8 keeps the cursor and clamps it instead of resetting it: count <= 0 -> `cur` = -1;
+else `cur` < 0 -> 0; else `cur` >= count -> count - 1; else unchanged. So a refresh no longer moves the
+cursor to the top row (as the PS3 friends list keeps its cursor on a refresh, parity-b-menus.md section 3 item 2), and a
+list that is empty at its op 8 keeps `cur` = -1, which op 4 answers as it is (rule above) until the next
+op 8 with rows or op 9. This applies to every plain list: LAN LIST_FRIENDS, LIST_PLAYERSMET and the join
+list.
+
 Each list has its own `cur`: one for LIST_FRIENDS (shared between its online and LAN forms), one
 for LIST_PLAYERSMET, one for the join list (shared between its online and LAN forms).
 
@@ -421,11 +429,15 @@ The original function is **never called** (the entry is redirected, the saved or
    friends, only players added at a match start, empty online until the friend list is known).
 2. Plain list over the cached list (count = its size), row r = the r-th name.
 
-(Op 8 thus reloads the list and also resets `cur` to 0. An empty list is reloaded on every call.)
+(Op 8 thus reloads the list and also resets `cur` to 0 (since 934a6ca: clamps `cur` to the reloaded list,
+section 1.4). An empty list is reloaded on every call.)
 
 ## 1.11 cond 3: join game list (replaces the `ret` stub 0x659590)
 
 1. rows = `online::join_rows()` (called first).
+   2a. (Since 934a6ca, a diagnostic trace like the online LIST_FRIENDS one in 1.9 step 1.) When rows >= 0 and
+   fewer than 96 such lines were logged in the process: log `"join query: op %u row %d cur %d rows %d"` with the
+   op, s32 `q+4`, the join list's `cur` before this call and rows. Every op counts, op 1 included.
 2. rows >= 0: op 1: `q+0x40` = `online::join_title()` (pointer as is). Other ops: plain list with
    count = rows, row r = `online::join_row(r)` (pointer as is).
 3. rows < 0: op 1: `q+0x40` = empty string. Other ops: plain list with count 0 (so op 2 gives an
