@@ -106,6 +106,8 @@ public:
     bool peer_address(uint8_t slot, Address &out) const;
     Deliver on_message;
     PeerEvent on_peer;
+    // Host: asked before a new peer gets a slot; false turns the Hello away as if the party were full.
+    std::function<bool(const Address &from)> admit;
     uint16_t bound_port() const { return port_; }
 
 private:

@@ -48,6 +48,7 @@
 #include "frontend3.h"
 #include "online.h"
 #include "online_link.h"
+#include "progression.h"
 #include "session_api.h"
 #include "u2_online_abi.h"
 #include "u2mp_internal.h"
@@ -60,6 +61,7 @@ constexpr uint64_t kNetState = 0x14ce97c;     // NET_SM (PS3 0xf11764)
 constexpr uint64_t kMatch = 0x1065b08;        // g_matchSession (PS3 0xf20c48)
 constexpr uint64_t kNetInfo = 0x104f1c8;      // PS3 0xf1fa48
 constexpr uint64_t kNpd = 0x11474f8;          // NetPlayerData
+constexpr uint64_t kNgm = 0x113b760;          // NetGameManager
 constexpr uint64_t M_SEARCH_DONE = 0xa8, M_SEARCH_RESULT = 0xac;   // read by PAGE_MULTIPLAYER_JOIN 0x609640
 constexpr uint64_t NI_VERSION = 0x00, NI_ERROR = 0x1c, NI_MODE = 0x2c4;
 constexpr uint64_t NPD_TEAM = 0x114;          // custom game team preference 1 / 2 (PS3 NetPlayerData+211)
@@ -97,7 +99,12 @@ constexpr double kJoinTimeout = 20.0, kCreateTimeout = 15.0, kSwitchDelay = 0.3,
 enum : uint8_t { kOpFollowRoom = 1,     // leader -> party: {u64 room id}: I joined that room, come along
                  kOpPromote = 2 };      // leader -> party: {u64 room id, npid}: that player leads now (PS3 GrantRoomOwner)
 // Presence data (RPCN presence of this game, what friends' lists read): "U2MP", what we do, which room.
+// Version 1 is the first 32 bytes; version 2 (48 bytes) adds what the PS3 friends list and friend card show
+// (spec parity-b-menus.md 5). A version 1 reader takes the head and rejects the version; this reader takes both
+// (a version 1 friend reads as "in this game's multiplayer, no details").
 constexpr uint32_t kPresenceMagic = 0x504d3255u;
+constexpr uint8_t kPresenceVersion = 2;
+constexpr uint32_t kPresenceV1Size = 32;
 struct PresenceData {
     uint32_t magic;
     uint8_t version, state, members, max;
@@ -105,9 +112,20 @@ struct PresenceData {
     uint32_t kind;
     uint64_t room;      // the room a friend joins (0 = not joinable now)
     uint64_t pad;
+    // version 2
+    uint8_t level;      // rank badge (the friends list row icon)
+    uint8_t party;      // players in the party room (1 alone)
+    uint8_t difficulty; // co-op difficulty 0..4 (NetGameManager +0x21c4)
+    uint8_t pad2;
+    int16_t net_game;   // *net-games* index of the game being played or set up, -1 none
+    uint16_t pad3;
+    uint64_t match_end; // the running match's end, Unix UTC seconds; 0 none
 };
-static_assert(sizeof(PresenceData) == 32, "presence data");
-enum : uint8_t { kPresMenu = 0, kPresParty = 1, kPresCustom = 2, kPresMatchmaking = 3, kPresMatch = 4 };
+static_assert(sizeof(PresenceData) == 48, "presence data");
+// State: kPresMenu = this game but not in Multiplayer (version 2 readers: single player); kPresCinema = cinema
+// mode (version 2).
+enum : uint8_t { kPresMenu = 0, kPresParty = 1, kPresCustom = 2, kPresMatchmaking = 3, kPresMatch = 4,
+                 kPresCinema = 5 };
 constexpr char kPresenceTitle[] = "Uncharted 2: Among Thieves";
 constexpr double kPresencePeriod = 2.0, kInviteLife = 600.0, kMigrateTimeout = 15.0, kPromoteDelay = 0.4;
 
@@ -196,7 +214,13 @@ bool load() {
 struct Member {
     uint16_t id = 0;
     std::string npid, name;
+    uint64_t party = 0;   // the party room id its member data 0x59 names (+0), 0 none
 };
+uint64_t blob_party(const U2oMember &m) {
+    uint64_t party = 0;
+    if (m.bin_len >= 8) std::memcpy(&party, m.bin, 8);
+    return party;
+}
 struct Room {
     uint64_t id = 0;
     uint32_t kind = 0;
@@ -294,9 +318,12 @@ struct BoardView {
     int mode = 0;
     uint64_t req = 0;
     bool loading = false, failed = false;
+    double deadline = 0;       // no answer by then: failed
     uint32_t total = 0;
     std::vector<U2oScore> rows;
 } board_view;
+constexpr double kBoardTimeout = 10;   // PS3's limit on its stats storage requests
+constexpr int kMaxScorePosts = 4;      // PS3's score post slots
 
 // stranger matchmaking (PORT-MATCHMAKING.md 3.3)
 enum class Mm { Idle, Searching, Joining, Creating, Hosting, Joined, Failed };
@@ -445,7 +472,8 @@ void take_room(Room &r, const U2oRoom &src, uint32_t kind) {
     r.blob_sent = false;
     r.members.clear();
     for (uint32_t i = 0; i < src.member_count && i < U2O_MAX_MEMBERS; ++i)
-        r.members.push_back(Member{src.members[i].id, npid_text(src.members[i].npid), src.members[i].name});
+        r.members.push_back(Member{src.members[i].id, npid_text(src.members[i].npid), src.members[i].name,
+                                    blob_party(src.members[i])});
 }
 bool in_room(const Room &r, const std::string &npid) {
     for (const Member &m : r.members)
@@ -469,6 +497,20 @@ void log_room(const char *what, const Room &r) {
 uint64_t request(uint64_t id, Pending p) {
     if (id) pending[id] = std::move(p);
     return id;
+}
+
+// A leaderboard fetch always ends (PS3 parity A 2.4): when the link is down (or `link_lost`) or no answer came within
+// 10 s, it ends as failed; an answer arriving later is not taken.
+void board_expire(bool link_lost = false) {
+    if (!board_view.loading) return;
+    if (!link_lost && link_state == U2O_READY && now() < board_view.deadline) return;
+    log("rankings: board %u: no answer, failed", board_view.board);
+    pending.erase(board_view.req);
+    board_view.req = 0;
+    board_view.loading = false;
+    board_view.failed = true;
+    board_view.total = 0;
+    board_view.rows.clear();
 }
 
 void leave_room(Room &r, const char *why) {
@@ -661,7 +703,7 @@ void join_succeeded(const Pending &p, const U2oRoom &src) {
 
 // ---- pages and notices ---------------------------------------------------------------------------
 constexpr uint32_t kPageMultiplayer = sid("PAGE_MULTIPLAYER"), kPageLobby = sid("PAGE_LOBBY"),
-                   kPageFriends = sid("PAGE_MULTIPLAYER_FRIENDS_LIST"), kPageMatchmaking = sid("PAGE_MULTIPLAYER_MATCHMAKING");
+                   kPageFriends = sid("PAGE_MULTIPLAYER_FRIENDS_LIST");
 
 bool match_running(int32_t s) { return s == kUpdate || s == kReset || s == kReplay || s == kResults || s == kRoundResults; }
 
@@ -698,12 +740,38 @@ void back_to_multiplayer_page() {
 }
 
 // ---- friends, presence, invites (ABI 2; PS3 NP Basic, PORT-MATCHMAKING.md 1.10 / 3.6) -------------
+// A friend's presence data of this game (version 1 or 2; the version 2 fields stay 0 for a version 1 friend).
+bool presence_data(const U2oFriend &f, PresenceData &d) {
+    d = PresenceData{};
+    if (!f.online || !f.same_game || f.data_len < kPresenceV1Size) return false;
+    std::memcpy(&d, f.data, std::min<size_t>(f.data_len, sizeof d));
+    if (d.magic != kPresenceMagic || d.version < 1 || (d.version >= 2 && f.data_len < sizeof d)) return false;
+    if (d.version == 1) {
+        std::memset(reinterpret_cast<uint8_t *>(&d) + kPresenceV1Size, 0, sizeof d - kPresenceV1Size);
+        d.net_game = -1;
+    }
+    return true;
+}
+bool presence_of(const U2oFriend &f, PresenceData &d) { return presence_data(f, d); }
+
+// The friends list order (PS3 0x4c1fe0): friends in this game first, then the others online, then offline;
+// within a group by online id (byte order, ascending).
+int friend_group(const U2oFriend &f) {
+    if (!f.online) return 2;
+    return f.same_game || std::strncmp(f.title, kPresenceTitle, sizeof f.title) == 0 ? 0 : 1;
+}
+
 void refresh_friends() {
     if (!api.friends) return;
     friends_dirty = false;
     const int n = std::min(api.friends(nullptr, 0), kMaxFriends);
     friend_list.assign(size_t(std::max(n, 0)), U2oFriend{});
     if (n > 0) api.friends(friend_list.data(), n);
+    std::stable_sort(friend_list.begin(), friend_list.end(), [](const U2oFriend &a, const U2oFriend &b) {
+        const int ga = friend_group(a), gb = friend_group(b);
+        if (ga != gb) return ga < gb;
+        return npid_text(a.npid) < npid_text(b.npid);   // std::string compares bytes unsigned
+    });
     for (int in = 1; in >= 0; --in) {
         std::vector<std::string> &v = in ? requests_in : requests_out;
         v.clear();
@@ -713,27 +781,52 @@ void refresh_friends() {
     }
 }
 
-bool presence_of(const U2oFriend &f, PresenceData &d) {
-    if (!f.online || !f.same_game || f.data_len < sizeof d) return false;
-    std::memcpy(&d, f.data, sizeof d);
-    return d.magic == kPresenceMagic && d.version == 1;
+// A friend's room we may join: same build, in a party / lobby / matchmaking (or cinema mode), a free slot.
+bool joinable(const PresenceData &d) {
+    return d.room && d.key == room_key() &&
+           ((d.state >= kPresParty && d.state <= kPresMatchmaking) || d.state == kPresCinema) && d.members < d.max;
 }
 
-// A friend's room we may join: same build, in a party / lobby / matchmaking, a free slot.
-bool joinable(const PresenceData &d) {
-    return d.room && d.key == room_key() && d.state >= kPresParty && d.state <= kPresMatchmaking && d.members < d.max;
+// The running match's end in Unix UTC seconds (the PS3 presence clock), 0 without a time limit. Kept while
+// it moves by 2 s or less, so the presence is not sent again for the clock's rounding.
+uint64_t match_end_now() {
+    static uint64_t kept = 0;
+    const float limit = G<float>(kNgm + 0x21b8);
+    if (!(limit > 0.0f)) return kept = 0;
+    const int16_t game = G<int16_t>(kNgm + 0x1ca0);
+    const uint8_t *games = guest<const uint8_t *(U2MP_GUEST *)(uint32_t)>(0xa15e70)(0x3b9a067du);   // *net-games*
+    int32_t type = -1;
+    if (games && game >= 0 && game < *reinterpret_cast<const int32_t *>(games)) {
+        const uint8_t *records = *reinterpret_cast<uint8_t *const *>(games + 8);
+        if (records) type = *reinterpret_cast<const int32_t *>(records + 0x90 * size_t(game) + 0xc);
+    }
+    // The clock the HUD counts down: from the round start, from the match start in game type 10.
+    const int32_t start = G<int32_t>(kNgm + (type == 10 ? 0x1d60 : 0x1d5c));
+    const int32_t elapsed = int32_t(uint32_t(G<int32_t>(0x1116384)) - uint32_t(start));
+    const double left = std::max(0.0, double(limit) - double(elapsed) / 300.0);
+    const uint64_t utc = uint64_t(std::chrono::duration_cast<std::chrono::seconds>(
+                                      std::chrono::system_clock::now().time_since_epoch()).count());
+    const uint64_t end = utc + uint64_t(left);
+    if (!kept || end > kept + 2 || end + 2 < kept) kept = end;
+    return kept;
 }
 
 // What we do now, for our friends (PS3 NetFriends presence 0x48f16c / 0x490338: sceNpBasicSetPresenceDetails).
 void presence_now(PresenceData &d, std::string &status) {
     d = PresenceData{};
     d.magic = kPresenceMagic;
-    d.version = 1;
+    d.version = kPresenceVersion;
     d.key = room_key();
     d.max = uint8_t(kMaxSlot);
+    d.net_game = -1;
     const Room *r = nullptr;
+    const bool cinema = G<int32_t>(kNetInfo + NI_MODE) == 3;
     if (!started) {
         status = "Multiplayer menu";
+    } else if (cinema) {
+        d.state = kPresCinema;
+        r = match_room_.id ? &match_room_ : party_room.id ? &party_room : nullptr;
+        status = "Watching a cinema";
     } else if (in_match) {
         d.state = kPresMatch;
         status = "Playing a match";
@@ -750,6 +843,7 @@ void presence_now(PresenceData &d, std::string &status) {
         r = &party_room;
         status = "In a party";
     } else {
+        d.state = kPresParty;   // in Multiplayer, the party room not made yet: nothing to join
         status = "Multiplayer menu";
     }
     if (r) {
@@ -760,6 +854,13 @@ void presence_now(PresenceData &d, std::string &status) {
         char b[32];
         std::snprintf(b, sizeof b, " (%u/%u)", unsigned(d.members), unsigned(d.max));
         status += b;
+    }
+    if (started) {
+        d.level = uint8_t(std::clamp(session::rank(), 0, 255));
+        d.party = uint8_t(std::clamp<size_t>(party_room.id ? party_room.members.size() : 1, 1, 255));
+        d.difficulty = G<uint8_t>(kNgm + 0x21c4);
+        d.net_game = G<int16_t>(kNgm + 0x1ca0);
+        if (d.state == kPresMatch) d.match_end = match_end_now();
     }
 }
 
@@ -776,12 +877,6 @@ void publish_presence(double t) {
     request(id, Pending{Req::Presence, 0, 0, false, "presence"});
     sent_presence = key;
     next_presence = t + kPresencePeriod;
-}
-
-const U2oFriend *friend_by_npid(const std::string &npid) {
-    for (const U2oFriend &f : friend_list)
-        if (npid == npid_text(f.npid)) return &f;
-    return nullptr;
 }
 
 // A cinema file (PS3 0x449ae8 event 20 -> 0x43302c -> thread 0x433360): {"U2CN", key, name[64], size} + the file.
@@ -829,11 +924,11 @@ void on_invite(const U2oEvent &e) {
         return;
     }
     PresenceData d{};
-    if (m.main_type != U2O_MSG_INVITE || m.data_len < sizeof d) {
+    if (m.main_type != U2O_MSG_INVITE || m.data_len < kPresenceV1Size) {   // version 1 invites: 32 bytes
         log("online: message from %s (type %u) ignored", from.c_str(), unsigned(m.main_type));
         return;
     }
-    std::memcpy(&d, m.data, sizeof d);
+    std::memcpy(&d, m.data, std::min<size_t>(m.data_len, sizeof d));
     if (d.magic != kPresenceMagic || !d.room) {
         log("online: invite from %s without a room: ignored", from.c_str());
         return;
@@ -1034,6 +1129,7 @@ void on_event(const U2oEvent &e) {
     switch (e.kind) {
     case U2O_EV_LINK_LOST:
         log("online: link lost (%s): every room is gone", e.text ? e.text : "no reason given");
+        board_expire(true);
         party_room = Room{};
         match_room_ = Room{};
         pending.clear();
@@ -1209,7 +1305,7 @@ void on_event(const U2oEvent &e) {
         log("online: %s (%s) joined %s room %llx as member %u", e.member->name, npid_text(e.member->npid).c_str(),
             r ? kind_name(r->kind) : "an unknown", (unsigned long long)e.room_id, unsigned(e.member->id));
         if (!r) break;
-        r->members.push_back(Member{e.member->id, npid_text(e.member->npid), e.member->name});
+        r->members.push_back(Member{e.member->id, npid_text(e.member->npid), e.member->name, blob_party(*e.member)});
         connect_member(*e.member, r->my_id, r->id);
         if (r == &party_room) publish_blob(party_room, false);   // +0 party room id once the party has 2
         if (r == &match_room_ && r->owned() && r->lobby_started) {
@@ -1268,6 +1364,9 @@ void on_event(const U2oEvent &e) {
                 (unsigned long long)e.room_id, (unsigned long long)party, unsigned(e.member->bin[8]),
                 unsigned(e.member->bin[9]));
         }
+        if (Room *r = e.member ? room_by_id(e.room_id) : nullptr)
+            for (Member &m : r->members)
+                if (m.id == e.member->id) m.party = blob_party(*e.member);   // the matchmaking rows' party colours
         break;
     case U2O_EV_PEER_ADDRESS: {
         const std::string npid = npid_text(e.npid);
@@ -1340,7 +1439,7 @@ void on_event(const U2oEvent &e) {
                 e.error ? "not kept" : "recorded", e.state);
             break;
         }
-        if (e.request != board_view.req) break;   // an older view
+        if (!board_view.req || e.request != board_view.req) break;   // an older view, or one that timed out
         board_view.loading = false;
         board_view.failed = e.error != 0;
         board_view.total = e.total;
@@ -1445,6 +1544,7 @@ net::Link *start() {
 bool active() { return started; }
 
 void frame() {
+    clan_tag_check_frame();   // runs online and on LAN alike (NET_SM > 1), with or without the online program
     if (!api.on || !link_opened) return;
     const double t = now();
     char text[128] = {};
@@ -1479,6 +1579,7 @@ void frame() {
         if (api.poll(&e) <= 0) break;
         on_event(e);
     }
+    board_expire();
     if (friends_dirty) refresh_friends();
     publish_presence(t);
     expire_invites(t);
@@ -1857,6 +1958,12 @@ bool remove_friend(int i) {
     return id != 0;
 }
 
+std::vector<std::string> friend_npids(size_t max) {
+    std::vector<std::string> out;
+    for (size_t i = 0; i < friend_list.size() && i < max; ++i) out.push_back(npid_text(friend_list[i].npid));
+    return out;
+}
+
 std::string profile_text(int i) {
     const int kind = friend_kind(i);
     const std::string n = friend_name(i);
@@ -1874,6 +1981,47 @@ std::string profile_text(int i) {
 }
 
 bool friend_online(int i) { return i >= 0 && size_t(i) < friend_list.size() && friend_list[size_t(i)].online; }
+
+bool friend_view(int i, FriendView &v) {
+    if (i < 0 || size_t(i) >= friend_list.size() || friend_kind(i) != kRowFriend) return false;
+    const U2oFriend &f = friend_list[size_t(i)];
+    v = FriendView{};
+    v.npid = npid_text(f.npid);
+    v.online = f.online != 0;
+    v.this_game = v.online && friend_group(f) == 0;
+    v.party_member = party_room.id && in_room(party_room, v.npid);
+    PresenceData d;
+    const bool data = presence_data(f, d);
+    v.other_build = data && d.key != room_key();
+    // PS3 takes the data only when its signature is our build's (0x4a9cd4): another build reads as "this game".
+    if (data && d.key == room_key() && (d.version == 1 || d.state != kPresMenu)) {
+        v.multiplayer = true;
+        v.details = d.version >= 2;
+        v.activity = d.state == kPresMatch ? 3 : d.state == kPresCinema ? 2 : d.version >= 2 ? 1 : 0;
+        v.level = d.level;
+        v.party = d.party;
+        v.difficulty = d.difficulty;
+        v.net_game = d.net_game;
+        v.match_end = d.match_end;
+    }
+    return true;
+}
+
+int friend_index(const std::string &name) {
+    const int n = friend_count();
+    for (int i = 0; i < n; ++i)
+        if (friend_name(i) == name) return i;
+    return -1;
+}
+
+const char *request_state(int i) {
+    const int kind = friend_kind(i);
+    return kind == kRowRequestIn ? "Friend request" : kind == kRowRequestOut ? "Request sent" : "";
+}
+
+void refresh_friend_list() {
+    if (api.on && link_state == U2O_READY) friends_dirty = true;
+}
 
 bool friend_joinable(int i) {
     PresenceData d;
@@ -1980,6 +2128,33 @@ void mm_leave() {
 }
 
 int mm_players() { return match_room_.kind == kKindMatchmaking ? int(match_room_.members.size()) : 0; }
+
+// The matchmaking rows (session.cpp, PS3 slot list 0x4b0008).
+bool in_own_party(const std::string &npid) {
+    return !npid.empty() && (npid == my_npid || (party_room.id && in_room(party_room, npid)));
+}
+
+uint64_t own_party_id() { return party_room.id && party_room.members.size() >= 2 ? party_room.id : 0; }
+
+uint64_t member_party_id(const std::string &npid) {
+    for (const Member &m : match_room_.members)
+        if (m.npid == npid) return m.party;
+    return 0;
+}
+
+bool peer_rtt(const std::string &npid, uint32_t &rtt_ms, bool &up) {
+    const int i = npid.empty() ? -1 : peer_index(npid, false);
+    if (i < 0) return false;
+    rtt_ms = peers[size_t(i)].rtt_us / 1000;
+    up = peers[size_t(i)].state == U2O_PEER_ACTIVE;
+    return true;
+}
+
+int mm_slots() {
+    if (!mm_online()) return 0;
+    if (match_room_.id && match_room_.kind == kKindMatchmaking && match_room_.max_slot) return match_room_.max_slot;
+    return int(kMaxSlot);   // the size this port makes its matchmaking rooms with
+}
 std::string my_npid_text() { return my_npid; }
 
 std::string room_member_name(uint32_t net_id) {
@@ -2003,18 +2178,28 @@ bool board_request(uint32_t board, int mode, uint32_t start, uint32_t count) {
     board_view.req = api.get_scores(board, mode, start, count);
     board_view.loading = board_view.req != 0;
     board_view.failed = !board_view.req;
+    board_view.deadline = now() + kBoardTimeout;
     request(board_view.req, Pending{Req::ScoreGet, board, 0, false, "scores"});
     log("online: rankings: board %u mode %d from %u (request %llu)", board, mode, start, (unsigned long long)board_view.req);
     return board_view.req != 0;
 }
 
-int board_state() { return board_view.loading ? 1 : board_view.failed ? -1 : 0; }
+int board_state() {
+    board_expire();
+    return board_view.loading ? 1 : board_view.failed ? -1 : 0;
+}
 int board_rows() { return int(board_view.rows.size()); }
 uint32_t board_total() { return board_view.total; }
 const U2oScore *board_row(int i) { return i >= 0 && size_t(i) < board_view.rows.size() ? &board_view.rows[size_t(i)] : nullptr; }
 
 bool record_score(uint32_t board, int64_t score, const char *comment, const uint8_t *info, uint32_t info_len) {
     if (!api.record_score || link_state != U2O_READY) return false;
+    const auto posts = std::count_if(pending.begin(), pending.end(),
+                                     [](const auto &kv) { return kv.second.kind == Req::ScoreRecord; });
+    if (posts >= kMaxScorePosts) {
+        log("rankings: 4 scores pending, score %lld for board %u dropped", (long long)score, board);
+        return false;
+    }
     const uint64_t id = api.record_score(board, score, comment, info, info_len);
     log("online: rankings: recording %lld on board %u (request %llu)", (long long)score, board, (unsigned long long)id);
     request(id, Pending{Req::ScoreRecord, board, 0, false, "record score"});

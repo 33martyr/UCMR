@@ -24,7 +24,7 @@ Shared helpers from other files (use them, do not reimplement them):
   `text_find_original`, constants `kTextPlayer`, `kTextSlot[8]`, `kTextSlots` (8) and the
   `kText*` ids listed below.
 - Session (`session_api.h`): `session::member_at`, `member_name`, `local_id`, `is_host`, `kick`,
-  `local_name`.
+  `kick_griefer`, `local_name`.
 - Online (`online.h`): `online::active`, `linked`, `promote`, `open_join_list`, `friend_count`,
   `friend_row`, `friend_name`, `friend_kind`, `friend_online`, `friend_joinable`, `join_friend`,
   `invite_friend`, `invite_count`, `friend_add`, `accept_request`, `remove_friend`,
@@ -286,7 +286,7 @@ success. f is the host address of the entry point the guest calls.
 **F-pop.** Call PopPage (menu manager).
 
 Persistent state of the file (process lifetime, initial values): selected member net id 0;
-selected friend row -1; selected players-met name empty; cinema picker name list empty; last
+selected friend name empty; selected players-met name empty; cinema picker name list empty; last
 "level package" name logged: empty; matchmaking answer flag false; invites count text buffer.
 
 #### B1. 0x644130 level record package (rdi ignored; returns a package pointer or NULL)
@@ -387,34 +387,38 @@ is entirely `texts.cpp`'s.
 
 #### B7. NetEventKickGriefer::Apply 0x61b900 (rdi = event)
 
-If the match session is not host: return. Otherwise call `session::kick` with the event's +0x0c
-word. If it returns false, log `"NetEventKickGriefer: can't kick net id %u"` (the net id).
+If the match session is not host: return. Otherwise call `session::kick_griefer` with the event's
++0x0c word. If it returns false, log `"NetEventKickGriefer: can't kick net id %u"` (the net id).
+`kick_griefer` is the PS3 room kickout with the block flag set (`session.md` "Griefer kick"): the
+player is kicked and its online id refused on later joins while this PC hosts; the host's own net id
+makes the host leave the session.
 
 #### B8. Party / match player rows (0x5ec490, 0x5ec460) and F-player-options(row)
 
-- 0x5ec490: row = (arg +8) mod 10 (unsigned).
-- 0x5ec460: row = arg +8, as a signed int.
+- 0x5ec490: row = (arg +8) mod 10 (unsigned); the member: `session::member_at(row, id, name)`.
+- 0x5ec460: row = arg +8, as a signed int; the member: `session::mm_member_at(row, id, name)` (the
+  matchmaking slot list; open and "Found Player" slots have none).
 
-F-player-options(row):
+F-player-options(found, row, id, name):
 
-1. `session::member_at(row, id, name)`. If false: log `"player options: no player in row %d"` (row)
-   and stop.
-2. Selected member net id := id.
-3. If id equals `session::local_id()`: player text := name + one space + `own_text(kTextYou)`;
-   F-box(`kTextPlayer`); stop.
-4. Player text := name. F-popup with: (0xffbbac12 Mute, 0x6547d63c); then, if `session::is_host()`
-   and `online::active()`, (0x9fdf8887, 0x2d32c8b0); then, if `session::is_host()`, (0x1e2955af,
-   0x7cc46b94). Show.
+1. If not found: log `"player options: no player in row %d"` (row) and stop.
+2. If id equals `session::local_id()`: stop (nothing shown). PS3 parity: the own row's query answers op 7
+   with 0, so the game drops the press before the callback; the PC "You" box is gone.
+3. Selected member net id := id. Player text := name. F-popup with: (0xffbbac12 Mute, 0x6547d63c); then, if
+   `session::is_host()` and `online::active()`, (0x9fdf8887, 0x2d32c8b0); then, if `session::is_host()`,
+   (0x1e2955af, 0x7cc46b94). Show.
 
 #### B9. LIST_FRIENDS row 0x5ebde0
 
-row = arg +4 as signed int. If `online::active()` is false: F-player-options(row). Else if row is 0:
-`online::open_join_list()` (result ignored). Else F-friend-options(row - 1).
+row = arg +4 as signed int. If `online::active()` is false: F-player-options of party row `row`
+(`member_at`). Else if row is 0: `online::open_join_list()` (result ignored). Else F-friend-options(row - 1).
 
 F-friend-options(r):
 
 1. If r < 0 or r >= `online::friend_count()`: nothing.
-2. Selected friend row := r. Player text := `online::friend_row(r)`.
+2. Selected friend := `online::friend_name(r)` (kept by name: online.cpp keeps its rows sorted, so a row
+   moves when presence changes; "selected friend row" below = `online::friend_index(selected friend)`, -1
+   when it left the list or none was picked). Player text := `online::friend_row(r)`.
 3. F-register U2MP_PC_CB_FRIEND_ACCEPT (B10 accept), then U2MP_PC_CB_FRIEND_REMOVE (B10 remove),
    then 0x3fe6f70e (B10 profile). Stop registering at the first failure. "cbs" = all three
    succeeded.
@@ -431,7 +435,11 @@ F-friend-options(r):
 
 - Accept: `online::accept_request(selected friend row)`.
 - Remove: `online::remove_friend(selected friend row)`.
-- Profile (0x3fe6f70e): player text := `online::profile_text(selected friend row)`;
+- Profile (0x3fe6f70e): text := the non-empty lines of `friend_card_lines(selected friend row)` (menus.cpp,
+  the PS3 friend card: name, status, activity / match line) joined with the line break `\`, plus
+  `\Plays another version of the game.` when `online::friend_view` says the friend's presence is of another
+  build; when that gives nothing (a request row), `online::profile_text(selected friend row)`. Player text :=
+  text;
   F-box(`kTextPlayer`).
 
 #### B11. LIST_PLAYERSMET row 0x5ebdf0
@@ -454,6 +462,8 @@ F-friend-options(r):
 
 If the selected member net id is 0, or `session::kick(id)` returns false: log
 `"Kick From Party: net id %u not kicked"` (the selected id). (`kick` is not called when the id is 0.)
+Kick From Party does not block: the player may join again at once (only the griefer kick, B7,
+blocks; whether PS3's party kick sets the block flag is not checked, `parity-c-match.md` 4).
 
 #### B14. Mute 0x5ec4b0 and 0x5ec480 (same behaviour)
 
@@ -637,9 +647,9 @@ not host (match +0x10 non-zero and +0xb00 != +0xb04); lethal and host via +0x10 
 ids; attack index 0, 44, 45, 0xffffffff; time 1.5 (450), -0.0, 1e10, NaN; check the 7 call
 arguments, the time value, and the +0x262a byte (other bits kept).
 
-B7: not host; host and kick true; host and kick false (log).
+B7: not host; host and kick_griefer true; host and kick_griefer false (log).
 
-B8/B9/B10: row not found (log); own row (name + " " + You text); other member as client, as host
+B8/B9/B10: row not found (log); own row (nothing shown); other member as client, as host
 offline, as host online (3 options); `% 10` on 13 for 0x5ec490; LIST_FRIENDS offline (row from +4),
 online row 0 (join list), online rows for kinds 0 (joinable/online combinations), 1, 2, -1; row out
 of range; callback table full (128 entries, none ours) so cbs false: kind 1 and 2 show the message

@@ -146,6 +146,9 @@ enum FetchStage { kIdle = 0, kFindMyPage = 1, kRange = 2, kFriends = 3 };
 int g_fetch_stage = kIdle;
 uint32_t g_fetch_board = 0;
 int32_t g_fetch_page = 0;
+constexpr uint32_t kMaxBoardFriends = 100;   // PS3 friends board: at most 100 friends (plus the player)
+
+std::string npid_of(const U2oScore *r) { return std::string(r->npid, strnlen(r->npid, sizeof r->npid)); }
 
 // ---------------------------------------------------------------------------------------------
 // The store file.
@@ -423,12 +426,13 @@ void local_fetch(uint32_t board, int32_t request) {
     point_lb_at_rows(pg.total, uint32_t(n), pg.page);
 }
 
-void online_fill(uint32_t total, int32_t page, int first, int count) {
+// 1.5.12: one page of online rows into the LB buffers. `rows` is what LB rows-on-page says; the rows come from `src`
+// (at most 11, and never more than `rows`).
+void online_fill(uint32_t total, int32_t page, uint32_t rows, const std::vector<const U2oScore *> &src) {
     clear_row_buffers();
-    size_t k = 0;
-    for (int i = first; i < first + count && k < kPageRows; ++i) {
-        const U2oScore *r = online::board_row(i);
-        if (!r) break;
+    const size_t n = std::min({src.size(), kPageRows, size_t(rows)});
+    for (size_t k = 0; k < n; ++k) {
+        const U2oScore *r = src[k];
         set_rank_row(k, r->npid, strnlen(r->npid, sizeof r->npid), r->rank, r->score);
         store_at<uint64_t>(g_rank_rows + k * kRankRecord + 0x78, r->record_date);
         // The game info was recorded big-endian; the game reads host-order words.
@@ -440,11 +444,37 @@ void online_fill(uint32_t total, int32_t page, int first, int count) {
             store_at<uint32_t>(info + 4 * w,
                                uint32_t(b[0]) << 24 | uint32_t(b[1]) << 16 | uint32_t(b[2]) << 8 | b[3]);
         }
-        ++k;
     }
-    point_lb_at_rows(total, uint32_t(k), page);
+    point_lb_at_rows(total, rows, page);
     store_at<uint64_t>(lb() + kLbBusy, 0);
     g_fetch_stage = kIdle;
+}
+
+// A failed online fetch shows an empty list (PS3; never the local board while linked).
+void online_failed(int32_t page) {
+    log("rankings: online board %u failed: empty list", g_fetch_board);
+    online_fill(0, page < 0 ? 0 : page, 0, {});
+}
+
+// The rows of the answer, in order.
+std::vector<const U2oScore *> answer_rows() {
+    std::vector<const U2oScore *> rows;
+    const int n = online::board_rows();
+    for (int i = 0; i < n; ++i)
+        if (const U2oScore *r = online::board_row(i)) rows.push_back(r);
+    return rows;
+}
+
+// The global range from rank page * 11 + 1. False: the request could not start.
+bool request_range(int32_t page) {
+    g_fetch_stage = kRange;
+    g_fetch_page = page;
+    return online::board_request(g_fetch_board, 0, uint32_t(page) * 11u + 1u, 11);
+}
+
+// Rows on a page: total - page * 11, clamped to 0..11.
+uint32_t page_rows(int64_t total, int32_t page) {
+    return uint32_t(std::clamp<int64_t>(total - int64_t(page) * 11, 0, int64_t(kPageRows)));
 }
 
 void fetch_start(uint32_t board, int32_t request) {
@@ -457,22 +487,55 @@ void fetch_start(uint32_t board, int32_t request) {
         bool started;
         if (friends) {
             g_fetch_stage = kFriends;
-            started = online::board_request(id, 1, 0, 100);
+            started = online::board_request(id, 1, 0, kMaxBoardFriends);
         } else if (request < 0) {
             g_fetch_stage = kFindMyPage;
             started = online::board_request(id, 2, 0, 1);
+            if (!started) started = request_range(0);   // the lookup failed: page 0 of the global range
         } else {
-            g_fetch_stage = kRange;
-            started = online::board_request(id, 0, uint32_t(request) * 11u + 1u, 11);
+            started = request_range(request);
         }
         if (started) {
             store_at<uint64_t>(lb() + kLbBusy, 1);
             store_at<uint32_t>(lb() + kLbRowCount, 0);
             return;
         }
-        g_fetch_stage = kIdle;
+        online_failed(request);
+        return;
     }
     local_fetch(board, request);
+}
+
+// 2.2: every friend (the first 100 of the friend list) and the player with their records on the board; unscored ones
+// dropped, ordered by rank; total reported twice the kept count, as PS3 did.
+void friends_fill() {
+    const std::string me = online::my_npid_text();
+    const std::vector<std::string> friends = online::friend_npids(kMaxBoardFriends);
+    std::vector<const U2oScore *> kept;
+    bool me_taken = false;
+    for (const U2oScore *r : answer_rows()) {
+        const std::string id = npid_of(r);
+        const bool is_me = !me.empty() && id == me;
+        if (is_me ? me_taken : std::find(friends.begin(), friends.end(), id) == friends.end()) continue;
+        me_taken = me_taken || is_me;
+        if (r->rank == 0) continue;   // no score on this board
+        kept.push_back(r);
+    }
+    std::stable_sort(kept.begin(), kept.end(), [](const U2oScore *a, const U2oScore *b) { return a->rank < b->rank; });
+    const int32_t count = int32_t(kept.size());
+    int32_t page = g_fetch_page;
+    if (page < 0) {   // the player's page; not on the board: page 0
+        page = 0;
+        for (int32_t k = 0; k < count; ++k)
+            if (npid_of(kept[size_t(k)]) == me)
+                page = k / 11;
+    } else if (count > 0) {
+        page = std::min(page, (count - 1) / 11);
+    }
+    const uint32_t rows = page_rows(count, page);
+    std::vector<const U2oScore *> shown;
+    for (uint32_t k = 0; k < rows; ++k) shown.push_back(kept[size_t(page) * 11u + k]);
+    online_fill(2u * uint32_t(count), page, rows, shown);
 }
 
 // Moves the online fetch along. False: the list update has to wait for the score service.
@@ -480,40 +543,24 @@ bool fetch_progress() {
     if (g_fetch_stage == kIdle) return true;
     const int state = online::board_state();
     if (state == 1) return false;
-    if (state < 0) {
-        log("rankings: online board %u failed: local board shown", g_fetch_board);
-        g_fetch_stage = kIdle;
-        store_at<uint64_t>(lb() + kLbBusy, 0);
-        local_fetch(load_at<uint32_t>(lb() + kLbBoard), g_fetch_page);
+    if (g_fetch_stage == kFindMyPage) {
+        // Where the player stands; no score or a failed lookup: page 0 of the global range.
+        const U2oScore *me = state == 0 ? online::board_row(0) : nullptr;
+        const int32_t page = (me && me->rank != 0) ? int32_t((me->rank - 1u) / 11u) : 0;
+        if (request_range(page)) return false;
+        online_failed(page);
         return true;
     }
-    if (g_fetch_stage == kFindMyPage) {
-        // We know where the player stands; now fetch the page around that rank.
-        const U2oScore *me = online::board_row(0);
-        const uint32_t page = (me && me->rank != 0) ? (me->rank - 1u) / 11u : 0u;
-        g_fetch_page = int32_t(page);
-        g_fetch_stage = kRange;
-        if (!online::board_request(g_fetch_board, 0, page * 11u + 1u, 11)) online_fill(0, 0, 0, 0);
-        return false;
+    if (state < 0) {
+        online_failed(g_fetch_page);
+        return true;
     }
     if (g_fetch_stage == kRange) {
         const uint32_t total = online::board_total();
-        const int rows = online::board_rows();
-        online_fill(total, g_fetch_page, 0, rows);
+        online_fill(total, g_fetch_page, page_rows(total, g_fetch_page), answer_rows());
         return true;
     }
-    // Friends: the service sends the whole list; show the page holding this player unless one was asked.
-    const int n = online::board_rows();
-    int32_t page = g_fetch_page;
-    if (page < 0) {
-        page = 0;
-        const std::string me = online::my_npid_text();
-        for (int i = 0; i < n; ++i) {
-            const U2oScore *r = online::board_row(i);
-            if (r && me == r->npid) page = i / 11;
-        }
-    }
-    online_fill(uint32_t(n), page, page * 11, 11);
+    friends_fill();
     return true;
 }
 
@@ -640,6 +687,11 @@ void install_progression(int &installed) {
 void progression_publish() {
     if (!image.base) return;
     publish_if_changed();
+}
+
+void progression_publish_career() {
+    if (!image.base) return;
+    publish();
 }
 
 std::vector<std::string> progression_recent_players(size_t max) {

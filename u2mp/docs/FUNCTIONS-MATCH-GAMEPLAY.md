@@ -73,10 +73,10 @@ game/round-over checks).
 
 ## 3. Top porting blockers
 
-1. **Net event serializers stubbed on PS4.** Write (slot 2) and Read (slot 3) are `ret` for
+1. **Net event serializers stubbed on PS4.** Read (slot 2) and Write (slot 3) are `ret` for
    NetEventTerritoryOwn, TerritorySpawn, TerritorySetTimer (Turf War / King of the Hill),
    SpawnHiddenTreasure, EarnMedal, PlayVox, SimpleSnapshot, TurretSnapshot, StartNpcFight,
-   NpcKill, NpcSpawn (Apply is a stub too), NpcDealDamage (Write) and NetEventEvent (the
+   NpcKill, NpcSpawn (Apply is a stub too), NpcDealDamage (Read) and NetEventEvent (the
    carrier of `net-send-event`, so script events do not cross the wire). Their Apply bodies
    mostly survive. Port the PS3 bit layouts (`0x46fc10/0x46f4e8`, `0x469e9c/0x469b80`,
    `0x46af48/0x46a4b8`, `0x46cb60/0x46c650`, `0x469ef8/0x469bd4`, `0x46ae78/0x46a408`,
@@ -317,11 +317,12 @@ is log-only on PS3 and unresolved; the pickup events (types 19..25, 75) are inta
 
 ## 7. Net event types (factory id, PS3 -> PS4 per slot)
 
-Write = slot 2, Read = slot 3, Apply = slot 4; "STUB" = `ret` on PS4. The last column is the
+Read = slot 2 (consumes bits into the event), Write = slot 3 (produces bits from it), Apply = slot 4
+(`spec/events.md` 1.1, `spec/parity-c-match.md` 1.1); "STUB" = `ret` on PS4. The last column is the
 PS3 function(s) that build and send the event (store its vtable outside the factory).
 Type 62 (`kNpEventCoopTeamFail`) has no case of its own on PS3.
 
-| Id | Event | Write PS3 -> PS4 | Read PS3 -> PS4 | Apply PS3 -> PS4 | PS3 sender |
+| Id | Event | Read PS3 -> PS4 | Write PS3 -> PS4 | Apply PS3 -> PS4 | PS3 sender |
 |---|---|---|---|---|---|
 | 0 | NetEventStartConnection | 468c18 -> 63c100 STUB | 468c1c -> 63c0f0 STUB | 474e50 -> 63c0e0 STUB | 489c50 |
 | 1 | NetEventConnectionDone | 4697d4 -> 63bf70 alive | 469768 -> 63bdb0 alive | 474d90 -> 63bda0 STUB | 489ec8 |

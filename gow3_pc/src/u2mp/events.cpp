@@ -257,13 +257,7 @@ U2MP_GUEST void read_kill_entity(void *ev, BitStream *bs) {
     finish_read(in, ev, 76, 0x10);
 }
 
-void apply_npc_damage(void *ev);
-
-U2MP_GUEST void apply_npc_deal_damage(void *ev, void * /*connection*/) {
-    apply_npc_damage(ev);
-}
-
-// 44 NetEventNpcDealDamage.
+// 44 NetEventNpcDealDamage (its Apply is remaining.cpp B6).
 U2MP_GUEST void read_npc_deal_damage(void *ev, BitStream *bs) {
     Reader in{*bs};
     in.u32(ev, 0x0c, 12); in.u32(ev, 0x10); in.u32(ev, 0x14); in.time(ev, 0x18); in.u32(ev, 0x1c, 6);
@@ -528,8 +522,6 @@ U2MP_GUEST void write_turret_snapshot(void *ev, BitStream *bs) {
 constexpr uint64_t kMatchSession = 0x1065b08;
 constexpr uint64_t kNpcSendSpawn = 0x6133d0;
 constexpr uint64_t kNpcSendDespawn = 0x6135a0;
-constexpr uint64_t kNpcKill = 0x60eb90;
-constexpr uint64_t kWeaponTable = 0xdef290;
 constexpr size_t kMaxNpcs = 256;
 
 struct LocalNpc {
@@ -637,72 +629,6 @@ U2MP_GUEST void local_npc_despawn(uint32_t name) {
         if (n.state && n.npc && load<uint32_t>(reinterpret_cast<const void *>(n.npc), 0x68) == name) n.state = 0;
 }
 
-uint64_t npc_tracker(uint32_t name) {
-    const uint64_t ngm = uint64_t(uintptr_t(image.base)) + kNetGameManager;
-    const uint64_t buckets = load<uint64_t>(reinterpret_cast<const void *>(ngm), 0x1ba0);
-    const int32_t count = load<int32_t>(reinterpret_cast<const void *>(ngm), 0x1bdc);
-    if (!buckets || count <= 0) return 0;
-    uint32_t h = 0x811c9dc5u;
-    for (int i = 0; i < 4; ++i) h = (h ^ ((name >> (8 * i)) & 0xffu)) * 0x1000193u;
-    uint64_t node = load<uint64_t>(reinterpret_cast<const void *>(buckets + 8 * (h % uint32_t(count))), 0);
-    const uint64_t end = load<uint64_t>(reinterpret_cast<const void *>(buckets + 8 * uint64_t(count)), 0);
-    for (int guard = 0; node && node != end && guard < 4096; ++guard) {
-        if (load<uint32_t>(reinterpret_cast<const void *>(node), 0x10) == name) return node + 0x18;
-        node = load<uint64_t>(reinterpret_cast<const void *>(node), 0);
-    }
-    return 0;
-}
-
-uint64_t player_process(int32_t id) {
-    const uint64_t ngm = uint64_t(uintptr_t(image.base)) + kNetGameManager;
-    for (int k = 0; k < 10; ++k) {
-        const uint64_t slot = ngm + 0x10 + uint64_t(k) * 0x2c0;
-        if (!load<uint8_t>(reinterpret_cast<const void *>(slot), 0x20) ||
-            load<int32_t>(reinterpret_cast<const void *>(slot), 0x120) != id)
-            continue;
-        const uint64_t handle = load<uint64_t>(reinterpret_cast<const void *>(slot), 0x10);
-        const uint32_t pid = load<uint32_t>(reinterpret_cast<const void *>(slot), 0x18);
-        if (!handle || !pid) return 0;
-        const uint64_t process = load<uint64_t>(reinterpret_cast<const void *>(handle), 0);
-        if (!process || load<uint32_t>(reinterpret_cast<const void *>(process), 0x44) != pid) return 0;
-        return process;
-    }
-    return 0;
-}
-
-void apply_npc_damage(void *ev) {
-    const int32_t id = load<int32_t>(ev, 0x0c);
-    const uint32_t name = load<uint32_t>(ev, 0x10);
-    const int32_t damage = load<int32_t>(ev, 0x14);
-    const float at = load<float>(ev, 0x18);
-    const uint32_t index = load<uint32_t>(ev, 0x1c);
-    const uint64_t player = player_process(id);
-    if (!player) return;
-    const uint64_t tracker = npc_tracker(name);
-    if (!tracker) return;
-    const uint64_t handle = load<uint64_t>(reinterpret_cast<const void *>(tracker), 0);
-    const uint32_t pid = load<uint32_t>(reinterpret_cast<const void *>(tracker), 8);
-    const uint64_t npc = handle ? load<uint64_t>(reinterpret_cast<const void *>(handle), 0) : 0;
-    if (!npc || !pid || load<uint32_t>(reinterpret_cast<const void *>(npc), 0x44) != pid) return;
-    const uint64_t vt = load<uint64_t>(reinterpret_cast<const void *>(npc), 0);
-    const uint64_t is_dead = vt ? load<uint64_t>(reinterpret_cast<const void *>(vt), 0x250) : 0;
-    const uint64_t take = vt ? load<uint64_t>(reinterpret_cast<const void *>(vt), 0x370) : 0;
-    if (!is_dead || !take) return;
-    using IsDeadFn = uint8_t(U2MP_GUEST *)(uint64_t);
-    using DamageFn = void(U2MP_GUEST *)(uint64_t, int32_t);
-    if (reinterpret_cast<IsDeadFn>(is_dead)(npc)) return;
-    reinterpret_cast<DamageFn>(take)(npc, damage);
-    if (!reinterpret_cast<IsDeadFn>(is_dead)(npc) || !npc_host()) return;
-    uint32_t weapon = 0;
-    if (index < 46)
-        weapon = load<uint32_t>(reinterpret_cast<const void *>(uintptr_t(image.base) + kWeaponTable + 4 * uint64_t(index)), 0);
-    using KillFn = void(U2MP_GUEST *)(uint32_t, uint64_t, uint64_t, uint32_t *, uint32_t, uint32_t, uint32_t);
-    uint32_t time = at == at && at > 0.0f && at < 1.0e7f ? uint32_t(int32_t(at * 300.0f)) : 0;
-    guest<KillFn>(kNpcKill)(weapon, player, npc, &time, 0, 0, 0);
-    uint8_t flags = load<uint8_t>(reinterpret_cast<const void *>(npc), 0x262a);
-    store<uint8_t>(reinterpret_cast<void *>(npc), 0x262a, uint8_t(flags | 2));
-}
-
 // ---------------------------------------------------------------------------------------------
 // 37 NetEventNpcSpawn Apply: spawn the npc the sender described and register it for the net.
 
@@ -716,7 +642,9 @@ U2MP_GUEST void apply_npc_spawn(void *ev, void * /*connection*/) {
     const auto lookup_spawner = guest<uint8_t *(U2MP_GUEST *)(void *, uint32_t)>(kLookupSpawner);
 
     if (game.lookup_process && game.lookup_process(npc_id)) {
-        log("NetEventNpcSpawn: npc %u already exists", npc_id);
+        // Deliberate difference: PS3 logs and spawns a second NPC with the same id; we keep one.
+        log("NetEventNpcSpawn: npc %u already exists; not spawning a second one (deliberate difference from PS3)",
+            npc_id);
         return;
     }
     uint8_t *const spawner = lookup_spawner(manager, spawner_id);
@@ -766,7 +694,7 @@ U2MP_GUEST void apply_npc_spawn(void *ev, void * /*connection*/) {
 const Port kPorts[] = {
     {37, "NetEventNpcSpawn", 0x1040f30, 0x20, 0x62f240, 0x62f230, 0x62f220, read_npc_spawn, write_npc_spawn, apply_npc_spawn},
     {38, "NetEventNpcKill", 0x1040760, 0x10, 0x622080, 0x622070, 0, read_npc_kill, write_one_u32, nullptr},
-    {44, "NetEventNpcDealDamage", 0x10405d0, 0x20, 0x61fe00, 0, 0, read_npc_deal_damage, write_npc_deal_damage, apply_npc_deal_damage},
+    {44, "NetEventNpcDealDamage", 0x10405d0, 0x20, 0x61fe00, 0, 0, read_npc_deal_damage, write_npc_deal_damage, nullptr},
     {47, "NetEventEvent", 0x1040580, 0x100, 0x61fa60, 0x61fa50, 0, read_event, write_event, nullptr},
     {49, "NetEventTerritoryOwn", 0x1040440, 0x50, 0x61f030, 0x61f020, 0, read_territory_own, write_territory_own, nullptr},
     {51, "NetEventTerritorySpawn", 0x10403a0, 0x18, 0x61e890, 0x61e880, 0, read_territory_spawn, write_territory_spawn, nullptr},

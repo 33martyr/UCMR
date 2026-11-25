@@ -258,6 +258,58 @@ uint32_t unlocks_skin_fingerprint() {
 }
 void progression_publish() { hx::rec("progression_publish"); }
 
+#ifndef u2mp   // new build only: what session.cpp calls since the rewrite (skins, HUD, grenades, parity group B)
+namespace grenades {
+void frame(double) { hx::rec("grenades::frame"); }
+}
+void hud_weapon_tick() { hx::rec("hud_weapon_tick"); }
+void loading_hide(const char *why) { hx::rec("loading_hide [%s]", why ? why : "(NULL)"); }
+void show_round_results() { hx::rec("show_round_results"); }
+bool tier2_patch_weapon_damage() {
+    hx::rec("tier2_patch_weapon_damage");
+    return true;
+}
+void unlocks_apply_slot_skins() { hx::rec("unlocks_apply_slot_skins"); }
+const char *unlocks_local_skin() {
+    hx::rec("unlocks_local_skin");
+    return "";
+}
+const char *unlocks_local_villain() {
+    hx::rec("unlocks_local_villain");
+    return "";
+}
+int32_t playlist_index(uint32_t id) {
+    hx::rec("playlist_index 0x%x", id);
+    return -1;
+}
+namespace online {
+std::string room_member_name(uint32_t id) {
+    hx::rec("online::room_member_name %u", id);
+    return {};
+}
+bool in_own_party(const std::string &npid) {
+    hx::rec("online::in_own_party [%s]", npid.c_str());
+    return true;
+}
+uint64_t own_party_id() {
+    hx::rec("online::own_party_id");
+    return 0;
+}
+uint64_t member_party_id(const std::string &npid) {
+    hx::rec("online::member_party_id [%s]", npid.c_str());
+    return 0;
+}
+bool peer_rtt(const std::string &npid, uint32_t &, bool &) {
+    hx::rec("online::peer_rtt [%s]", npid.c_str());
+    return false;
+}
+int mm_slots() {
+    hx::rec("online::mm_slots");
+    return 0;
+}
+}  // namespace online
+#endif
+
 // ---- the entry table for test_session.cpp ---------------------------------------------------------------
 void hx_session_api(hx::ss::Api &a) {
     a.install = session::install;

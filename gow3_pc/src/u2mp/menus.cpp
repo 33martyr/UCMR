@@ -11,8 +11,10 @@
 // still call the game's function) or through a jump written over a stripped `ret` stub.
 //
 // Reimplemented from the behaviour description u2mp/docs/spec/menus.md.
+#include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -422,35 +424,205 @@ U2MP_GUEST void query_volume(uint8_t *q) {
     }
 }
 
-// ---- friends (cond 36) and join list (cond 3): stripped queries ------------------------------------------
+// ---- friends (cond 36), friend card (cond 38) and join list (cond 3): stripped queries ----------------------
 
 char title_text[96];
 char member_text[16][96];
 int32_t friends_cur = 0;
+std::string friends_sel;   // the friend (or request) of the cursor row: the cursor follows it (PS3 by friend id)
 int32_t join_cur = 0;
+
+// Texts of the PS3 friends list and friend card (spec parity-b-menus.md 0, 3, 4, 11.1, 11.5).
+constexpr uint32_t kTextTitle = 0xfd2de693;   // the game's title: "this friend plays this game"
+constexpr uint32_t kTextSinglePlayer = 0x77f62775, kTextAnotherGame = 0x953825d0, kTextInLobby = 0x84041d79,
+                   kTextCinema = 0xea3bb70e, kTextPlayingMatch = 0xcf292b57, kTextMatchEnds = 0x93ac6446,
+                   kTextLessThanMinute = 0x20ae4825, kTextHour = 0x669b8ea8, kTextHours = 0x5879aefb,
+                   kTextMinute = 0x9d59ec8a, kTextMinutes = 0x38e8ba93;
+constexpr uint32_t kDcLevels = 0x0dec97a4;
+constexpr uint32_t kElementStatusDot = 0xf5a294f3, kElementCardMap = 0x0a071025, kElementCardType = 0x57135906;
+constexpr char kBreak[] = "\\";   // the game's line break
+
+std::string replaced(std::string text, const char *token, const std::string &value) {
+    const size_t at = text.find(token);
+    if (at != std::string::npos) text.replace(at, std::strlen(token), value);
+    return text;
+}
+std::string headline() { return std::string("|@H|") + game_text(kTextTitle) + "|@N|"; }
+
+// Column 3 of a friend row (PS3 0x4c1fe0).
+std::string friend_status(const online::FriendView &v) {
+    if (!v.multiplayer) {
+        if (v.this_game) return headline() + kBreak + game_text(kTextSinglePlayer);
+        return v.online ? game_text(kTextAnotherGame) : "";
+    }
+    std::string t = headline();
+    if (!v.details) return t;   // a version 1 presence: in this game's multiplayer, nothing more known
+    t += kBreak;
+    if (v.party >= 2) t += replaced(game_text(kTextPartyCount), "[A]", std::to_string(v.party)) + kBreak;
+    if (v.activity == 1) t += game_text(kTextInLobby);
+    else if (v.activity == 2) t += game_text(kTextCinema);
+    else if (v.activity == 3) t += std::string(game_text(kTextPlayingMatch)) + kBreak;
+    return t;
+}
+
+// The friend's net game record (*net-games*), NULL when unknown.
+const uint8_t *net_game_record(int index) {
+    void *sym = dc_lookup(kDcNetGames);
+    if (!sym || index < 0) return nullptr;
+    const DcTable games = read_table(sym);
+    return games.records && index < games.count ? games.records + 0x90 * index : nullptr;
+}
+const uint8_t *game_type_record(int32_t type) {
+    void *sym = dc_lookup(kDcGameTypes);
+    if (!sym || type < 0) return nullptr;
+    const DcTable types = read_table(sym);
+    return types.records && type < types.count ? types.records + 0x44 * type : nullptr;
+}
+std::string map_name(uint32_t level_id) {
+    void *sym = dc_lookup(kDcLevels);
+    if (!sym) return {};
+    const DcTable levels = read_table(sym);
+    for (int i = 0; levels.records && i < levels.count; ++i)
+        if (get<uint32_t>(levels.records + 0x38 * i) == level_id) return game_text(get<uint32_t>(levels.records + 0x38 * i + 4));
+    return {};
+}
+
+// [TIME] (PS3 0x929df8 = PS4 0xcddfe0): whole hours modulo 24 and minutes modulo 60, no seconds.
+std::string time_text(uint64_t seconds) {
+    const unsigned h = unsigned(seconds / 3600 % 24), m = unsigned(seconds / 60 % 60);
+    char b[192];
+    if (!h && !m) return game_text(kTextLessThanMinute);
+    if (!m) std::snprintf(b, sizeof b, "%d %s", int(h), game_text(h == 1 ? kTextHour : kTextHours));
+    else if (!h) std::snprintf(b, sizeof b, "%d %s", int(m), game_text(m == 1 ? kTextMinute : kTextMinutes));
+    else
+        std::snprintf(b, sizeof b, "%d %s %d %s", int(h), game_text(h == 1 ? kTextHour : kTextHours), int(m),
+                      game_text(m == 1 ? kTextMinute : kTextMinutes));
+    return b;
+}
+
+// Card row 1 in a match (PS3 0x4c1a08): "- <map> / <type>", co-op type 4 adds the difficulty, the competitive
+// types the variation and "- Match ends in [TIME]". The difficulty and variation texts are not known to this
+// port (no spec of their ids / record fields): those parts are left out.
+std::string match_line(const online::FriendView &v) {
+    const uint8_t *game = net_game_record(v.net_game);
+    if (!game) return game_text(kTextPlayingMatch);
+    const int32_t type = get<int32_t>(game + 0x0c);
+    const uint8_t *type_rec = game_type_record(type);
+    std::string t = "- " + map_name(get<uint32_t>(game + 4)) + " / " + (type_rec ? game_text(get<uint32_t>(type_rec)) : "");
+    if (type == 4 || type == 8 || type == 9 || type == 12 || !v.match_end) return t;
+    const uint64_t now = uint64_t(std::chrono::duration_cast<std::chrono::seconds>(
+                                      std::chrono::system_clock::now().time_since_epoch()).count());
+    const uint64_t left = std::min<uint64_t>(v.match_end > now ? v.match_end - now : 0, 216000);
+    return t + kBreak + "- " + replaced(game_text(kTextMatchEnds), "[TIME]", time_text(left));
+}
+
+std::vector<std::string> card_lines(const online::FriendView &v) {
+    std::vector<std::string> lines{v.npid};
+    if (v.multiplayer || v.this_game) lines.push_back(headline());
+    else lines.push_back(v.online ? game_text(kTextAnotherGame) : "");
+    std::string second;
+    if (v.multiplayer && v.details && v.activity == 1) second = game_text(kTextInLobby);
+    else if (v.multiplayer && v.details && v.activity == 2) second = game_text(kTextCinema);
+    else if (v.multiplayer && v.details && v.activity == 3) second = match_line(v);
+    lines.push_back(second);
+    return lines;
+}
+
+constexpr int kFriendRows = 1 + 250 + 64;   // row 0 + the friend rows online.cpp keeps
+char friend_cells[kFriendRows][2][256];     // column 0 and column 3 per row
+char card_cells[3][256];
+
+const char *keep(char (&cell)[256], const std::string &text) {
+    const size_t n = std::min<size_t>(text.size(), sizeof cell - 1);
+    std::memcpy(cell, text.data(), n);
+    cell[n] = 0;
+    return cell;
+}
+
+// The row of the stored friend now (rows move as the list is sorted), else the stored row.
+int32_t friends_row(int32_t count) {
+    if (!friends_sel.empty()) {
+        const int i = online::friend_index(friends_sel);
+        if (i >= 0) friends_cur = 1 + i;
+    }
+    if (count <= 0) return -1;
+    return friends_cur < 0 ? 0 : friends_cur >= count ? count - 1 : friends_cur;
+}
+void store_friend_row(int32_t row, int n) {
+    friends_cur = row;
+    friends_sel = row >= 1 && row - 1 < n ? online::friend_name(row - 1) : std::string();
+}
+
+// Online: row 0 "Browse Online Games" and the friend rows in the PS3 layout (name in column 0, the status block
+// in column 3, status dot and row icon), then the friend requests; PC additions kept: the title with the online
+// count, the browse row, the request rows.
+void query_friends_online(uint8_t *q) {
+    const int n = online::friend_count();
+    const int32_t count = n == 0 ? 2 : 1 + n;
+    const int32_t row = get<int32_t>(q + 4);
+    switch (op_of(q)) {
+    case 1: {
+        int on = 0;
+        for (int i = 0; i < n; ++i)
+            if (online::friend_online(i)) ++on;
+        std::snprintf(title_text, sizeof title_text, "Friends (%d of %d online)", on, n);
+        set_text(q, title_text);
+        break;
+    }
+    case 2: {
+        const uint32_t column = get<uint32_t>(q + 0x54);
+        if (row < 0 || row >= count || row >= kFriendRows || (column != 0 && column != 3)) {
+            set_text(q, kNothing);
+            break;
+        }
+        const int c = column == 0 ? 0 : 1;
+        online::FriendView v;
+        if (row == 0) set_text(q, column == 0 ? "Browse Online Games" : kNothing);
+        else if (n == 0) set_text(q, column == 0 ? "No RPCN friends yet. Add friends in the launcher." : kNothing);
+        else if (online::friend_view(row - 1, v)) set_text(q, keep(friend_cells[row][c], column == 0 ? v.npid : friend_status(v)));
+        else set_text(q, keep(friend_cells[row][c], column == 0 ? online::friend_name(row - 1) : online::request_state(row - 1)));
+        break;
+    }
+    case 3: {
+        online::FriendView v;
+        if (row < 1 || !online::friend_view(row - 1, v)) break;
+        const uint32_t element = get<uint32_t>(q + 0x50);
+        auto image = [q](uint32_t type, uint32_t value) {
+            put<uint32_t>(q + 8, type);
+            put<uint64_t>(q + 0x10, 0);
+            put<uint32_t>(q + 0x18, value);
+            put<uint64_t>(q + 0x1c, 0);
+            put<int32_t>(q + 0x24, -1);
+            put<uint32_t>(q + 0x28, 0);
+            put<int32_t>(q + 0x2c, -1);
+            put<float>(q + 0x30, 1.0f);
+        };
+        if (element == kElementStatusDot) image(0x20, v.party_member ? 2 : v.online ? 1 : 0);
+        else if (element == 0 && v.multiplayer) image(0x21, uint32_t(std::max(v.level, 1)));
+        else if (element == 0 && v.this_game) image(0x21, 0);
+        break;   // the avatar (0x2138a9b2): RPCN has none
+    }
+    case 4: put<int32_t>(q + 4, friends_row(count)); break;
+    case 5: put<int32_t>(q + 4, count - 1); break;
+    case 7: put<int32_t>(q + 4, 1); break;
+    case 8:
+        online::refresh_friend_list();
+        store_friend_row(friends_row(count), n);
+        break;
+    case 9: store_friend_row(row, n); break;
+    default: break;
+    }
+}
 
 U2MP_GUEST void query_friends(uint8_t *q) {
     if (online::active()) {
-        const int n = online::friend_count();
-        if (op_of(q) == 1) {
-            int on = 0;
-            for (int i = 0; i < n; ++i)
-                if (online::friend_online(i)) ++on;
-            std::snprintf(title_text, sizeof title_text, "Friends (%d of %d online)", on, n);
-            set_text(q, title_text);
-            return;
-        }
         static int traced = 0;
-        if (traced < 96) {
+        if (traced < 96 && op_of(q) != 1) {
             log("friends query: op %u row %d cur %d rows %d", op_of(q), get<int32_t>(q + 4), friends_cur,
-                n == 0 ? 2 : 1 + n);
+                online::friend_count() == 0 ? 2 : 1 + online::friend_count());
             ++traced;
         }
-        plain_list(q, n == 0 ? 2 : 1 + n, friends_cur, [n](int32_t r) -> const char * {
-            if (r == 0) return "Browse Online Games";
-            if (n == 0) return "No RPCN friends yet. Add friends in the launcher.";
-            return online::friend_row(r - 1);
-        });
+        query_friends_online(q);
         return;
     }
     // LAN: the list shows the party.
@@ -469,6 +641,51 @@ U2MP_GUEST void query_friends(uint8_t *q) {
         fill96(member_text[r], name);
         return member_text[r];
     });
+}
+
+// cond 38: the PAGE_FRIENDACTIONS header, for the friend the list stored (PS3 0x4c1a08). No PC page opens it;
+// View Profile shows the same lines (friend_card_lines).
+U2MP_GUEST void query_friend_card(uint8_t *q) {
+    const int i = friends_sel.empty() ? -1 : online::friend_index(friends_sel);
+    online::FriendView v;
+    if (!online::active() || i < 0 || !online::friend_view(i, v)) return;
+    const std::vector<std::string> lines = card_lines(v);
+    switch (op_of(q)) {
+    case 1: set_text(q, keep(card_cells[0], lines[0])); break;
+    case 2: {
+        const int32_t row = get<int32_t>(q + 4);
+        if (row == 0 || row == 1) set_text(q, keep(card_cells[1 + row], lines[size_t(1 + row)]));
+        break;
+    }
+    case 3: {
+        const uint8_t *game = v.multiplayer && v.details ? net_game_record(v.net_game) : nullptr;
+        if (!game) break;
+        const uint32_t element = get<uint32_t>(q + 0x50);
+        uint32_t type = 0, value = 0, icon = 0;
+        if (element == kElementCardMap) {
+            type = 0x22;
+            value = get<uint32_t>(game + 4);   // the level id: menuimages.cpp 0x22 finds the map's picture
+        } else if (element == kElementCardType) {
+            const uint8_t *type_rec = game_type_record(get<int32_t>(game + 0x0c));
+            if (!type_rec || !get<uint32_t>(type_rec + 8)) break;
+            type = 3;
+            icon = get<uint32_t>(type_rec + 8);
+        } else {
+            break;   // the avatar (0xb81e2263): RPCN has none
+        }
+        put<uint32_t>(q + 8, type);
+        put<uint64_t>(q + 0x10, 0);
+        put<uint32_t>(q + 0x18, value);
+        put<uint32_t>(q + 0x1c, icon);
+        put<uint32_t>(q + 0x20, icon ? 1u : 0u);
+        put<int32_t>(q + 0x24, -1);
+        put<uint32_t>(q + 0x28, 0);
+        put<int32_t>(q + 0x2c, -1);
+        put<float>(q + 0x30, 1.0f);
+        break;
+    }
+    default: break;
+    }
 }
 
 U2MP_GUEST void query_join_list(uint8_t *q) {
@@ -526,6 +743,12 @@ uint8_t *find_entry(uint32_t cond) {
 }
 
 }  // namespace
+
+std::vector<std::string> friend_card_lines(int i) {
+    online::FriendView v;
+    if (!online::friend_view(i, v)) return {};
+    return card_lines(v);
+}
 
 int32_t playlist_pick_type() {
     const uint32_t id = get<uint32_t>(abs_at(kNpd + 0x104));
@@ -617,6 +840,7 @@ void install_menus(int &installed) {
     const Stripped stripped[] = {
         {36, 0x65bbb0, "LIST_FRIENDS query", query_friends},
         {3, 0x659590, "join game list query", query_join_list},
+        {38, 0x65bbc0, "friend card query", query_friend_card},
     };
     for (const Stripped &s : stripped) {
         uint8_t *e = find_entry(s.cond);

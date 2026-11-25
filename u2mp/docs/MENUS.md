@@ -46,16 +46,16 @@ State: **stub** = `ret`; **wrap** / **port** = changed by menus.cpp; otherwise i
 |---|---|---|---|---|
 | 3 | PAGE_MULTIPLAYER_JOIN: BUTTON_MULTIPLAYER_SELECT_JOIN_GAME list | `659590` | `4b8ebc` | **stub -> port** (empty list; PC joins by address) |
 | 5 | (no MP control) | `659560` | `4b7d10` | intact |
-| 6..15 | PLAYER0..9 on MATCHMAKING, POSTGAME | `659bc0` | `4bfac8` | stub -> session.cpp roster |
-| 16..35 | PARTY_PLAYER0..9 on PAGE_MULTIPLAYER / PAGE_LOBBY | `659bb0` | `4bc728` | stub -> session.cpp roster |
-| 36 | PAGE_MULTIPLAYER_FRIENDS_LIST: LIST_FRIENDS | `65bbb0` | `4c1fe0` | **stub -> port** (party list) |
+| 6..15 | PLAYER0..9 on MATCHMAKING, POSTGAME | `659bc0` | `4bfac8` | stub -> session.cpp `mm_roster_query` (the matchmaking slot list: own party, other players, open slots) |
+| 16..35 | PARTY_PLAYER0..9 on PAGE_MULTIPLAYER / PAGE_LOBBY | `659bb0` | `4bc728` | stub -> session.cpp `roster_query` (host first, host's team, clan tags, op 7 / op 10) |
+| 36 | PAGE_MULTIPLAYER_FRIENDS_LIST: LIST_FRIENDS | `65bbb0` | `4c1fe0` | **stub -> port** (online: RPCN friends in the PS3 order and layout plus the PC rows; LAN: the party) |
 | 37 | PAGE_FRIENDACTIONS list | `65bbd0` | `4b8760` | intact (page unreachable on PC) |
-| 38 | PAGE_FRIENDACTIONS header (k17) | `65bbc0` | `4c1a08` | stub, left (PSN friend card; page unreachable on PC) |
+| 38 | PAGE_FRIENDACTIONS header (k17) | `65bbc0` | `4c1a08` | **stub -> port** (friend card of the selected friend; the page is unreachable on PC, View Profile shows the lines) |
 | 39 | LIST_PLAYERSMET | `65bcd0` | `4b8638` | **wrap** (rows from the progression store) |
 | 40, 41 | PLAYER_OPTIONS: LIST_PREFERED_GOOD_GUY / BAD_GUY (character skins) | `6595a0` | `4c0ea8` | intact; NetPlayerData + DC skin tables |
 | 44, 87, 88 | PAGE_MULTIPLAYER_SCOREBOARD header, k15 widget | `65b830`, `65cc80`, `65b490` | `4bf4a8`, `4bf218`, `4be434` | intact; NGM trackers, `*net-games*`; text 64370402 added |
 | 45, 46 | (in-game) | `65b1c0`, `65b320` | `4bc600`, `4bacb4` | intact |
-| 48 | BUTTON_MULTIPLAYER_INVITES | `659b50` | `4b8e08` | intact (callback: remaining.cpp) |
+| 48 | BUTTON_MULTIPLAYER_INVITES | `659b50` | `4b8e08` | **port**: remaining.cpp `invites_query` (blank while no invite waits, column 1 = `online::invite_count()`); button callback remaining.cpp |
 | 49 | status line under the party list (PAGE_MULTIPLAYER, PAGE_LOBBY) | `659a90` | `4bae1c` | **wrap**: count = party size (text 69cbee70 from the import) |
 | 50 | BUTTON_MULTIPLAYER_STARTMATCH | `655c40` | `4b7d80` | intact (callback: session.cpp) |
 | 51..53, 131, 136 | MATCHMAKING / CUSTOM / CINEMA / LEADERBOARD / NETTROPHIES labels | `655cf0` | `4b9a88` | intact; mode table `0xdef390` (texts 47a936dc, c21027d1, f1b9728c, 067e1f80 added) |
@@ -165,8 +165,10 @@ available (remaining.cpp).
 The join list (cond 3) is answered as an empty list; PC joins by address. PAGE_MULTIPLAYER_LEAVING_GAME
 now closes (session.cpp sets match+0xc8 while it is up; PORT-FRONTEND3.md section 6).
 
-Party and player rows (cond 16..35, 6..15): name and, as PS3 `0x4bc728` / `0x4bfac8` op 3, the
-member's rank badge (type 0x27), the rank exchanged in the session messages.
+Party and player rows (cond 16..35, 6..15): as PS3 `0x4bc728` / `0x4bfac8` (spec `parity-b-menus.md` 1, 2,
+12): "[TAG] name", rank badge (type 0x27) and voice icon; party rows host first, then the host's team; the
+own row not enabled (op 7 = 0), every listed row selectable (op 10); matchmaking rows show the slot list (own
+party, "Found Player" / "Finding Player..." while gathering online, connection bars, party colours).
 
 ### 3.7 Post-game: POSTGAME, RESULTS, ROUND_RESULTS, SCOREBOARD, LASTGAMERESULTS
 

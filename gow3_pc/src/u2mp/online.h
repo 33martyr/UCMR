@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include "net.h"
 #include "u2_online_abi.h"
@@ -75,6 +76,26 @@ bool friend_add(const std::string &npid);   // send a friend request (or accept 
 bool accept_request(int i);
 bool remove_friend(int i);           // unfriend / decline / cancel
 std::string profile_text(int i);     // View Profile: name, state, presence
+std::vector<std::string> friend_npids(size_t max);   // the NpIds of the first `max` friends of the friend list
+// The rows are kept in the PS3 order: friends in this game, then the others online, then offline, each by
+// online id; the friend requests follow. Rows move when presence changes: keep a pick by name (friend_index).
+// What the friends list (cond 36) and the friend card (cond 38) show of friend row i (PS3 0x4c1fe0 / 0x4c1a08).
+struct FriendView {
+    std::string npid;
+    bool online = false;
+    bool this_game = false;      // runs this game (its presence is this game's, or the title is ours)
+    bool multiplayer = false;    // in this game's multiplayer, our build (PS3: presence data accepted)
+    bool details = false;        // presence version 2: activity and the values below are known
+    bool party_member = false;   // a member of our party room
+    bool other_build = false;    // its multiplayer presence is of another build (PC note on View Profile)
+    int activity = 0;            // 1 lobby, 2 cinema, 3 match; 0 unknown (version 1)
+    int level = 0, party = 0, difficulty = 0, net_game = -1;
+    uint64_t match_end = 0;      // Unix UTC seconds, 0 none
+};
+bool friend_view(int i, FriendView &v);      // false: row i is no friend (a request, or past the rows)
+int friend_index(const std::string &name);   // the row of that friend (or request) now, -1 none
+const char *request_state(int i);            // a request row's state text ("" for other rows)
+void refresh_friend_list();                  // fetch the list and presence again (the list's op 8)
 
 // ---- cinema files to and from friends (PS3 fe0e7de7 / 6b2970e2) ----
 bool send_cinema(const std::string &npid);   // the selected cinema of the cinema page
@@ -83,10 +104,13 @@ int cinema_received();                       // files friends sent us this sessi
 // ---- rankings (RPCN score boards; PS3 NP Score) ----
 bool linked();                       // the online link is up (also outside Multiplayer)
 bool board_request(uint32_t board, int mode, uint32_t start, uint32_t count);   // mode 0 ranks, 1 friends, 2 me
-int board_state();                   // 1 loading, 0 ready, -1 failed
+// 1 loading, 0 ready, -1 failed. A fetch never waits forever: the link going down or 10 s without an answer
+// ends it as failed (PS3 parity A 2.4).
+int board_state();
 int board_rows();
 uint32_t board_total();
 const U2oScore *board_row(int i);
+// At most 4 posts wait for an answer at once (PS3's 4 score slots); a fifth is dropped, not queued.
 bool record_score(uint32_t board, int64_t score, const char *comment, const uint8_t *info = nullptr, uint32_t info_len = 0);
 
 // ---- stranger matchmaking (frontend3.cpp; PS3 0x4b0a58 search / join / create) ----
@@ -99,12 +123,21 @@ void mm_research();                  // nobody came: leave our gather room, sear
 void mm_leave();                     // matchmaking ends for this PC
 int mm_players();                    // players in our matchmaking room
 std::string room_member_name(uint32_t net_id);   // party/match room member name by net id
+// The matchmaking rows (session.cpp cond 6..15, PS3 slot list 0x4b0008):
+bool in_own_party(const std::string &npid);          // this PC or a member of our party room
+uint64_t own_party_id();                             // our party room while it has 2+ members, else 0
+uint64_t member_party_id(const std::string &npid);   // the party id a match room member published (+0), 0 none
+bool peer_rtt(const std::string &npid, uint32_t &rtt_ms, bool &up);   // false: no connection record
+int mm_slots();                      // the size of the match matchmaking fills (room max), 0 when it is off
 
 }  // namespace u2mp::online
 
 namespace u2mp {
 // remaining.cpp: a one-button message box with this text (online notices: invites, migration).
 void show_notice(const char *text);
+// menus.cpp: the friend card of friends-list row i (cond 38 lines: title, status, activity / match, "Match ends
+// in"); empty when row i is no friend. View Profile shows them (remaining.cpp).
+std::vector<std::string> friend_card_lines(int i);
 }  // namespace u2mp
 
 namespace u2mp::session {

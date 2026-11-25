@@ -72,6 +72,10 @@ std::string my_npid_text() {
     hx::rec("online::my_npid_text -> [%s]", st.my_npid.c_str());
     return st.my_npid;
 }
+std::vector<std::string> friend_npids(size_t max) {   // only the new build calls it (parity A 2.2)
+    hx::rec("online::friend_npids %zu -> %zu", max, st.friends.size());
+    return std::vector<std::string>(st.friends.begin(), st.friends.begin() + std::min(max, st.friends.size()));
+}
 bool record_score(uint32_t board, int64_t score, const char *comment, const uint8_t *info, uint32_t info_len) {
     std::string hex;
     char b[4];

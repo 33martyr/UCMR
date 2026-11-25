@@ -117,7 +117,8 @@ and `u2mp::read_bits` / `u2mp::write_bits` / `u2mp::BitStream` from `bitstream.h
 `kPorts` must hold exactly these 14 entries, in this order (the order fixes the install log
 order). `kPortCount` is 14. Every `read` and `write` field is non-null (the type 44 Write is
 present even though it is not installed: the test round-trips through it). Only type 37 has an
-`apply`; all others have `apply = nullptr`. A stub value of 0 means "never install that slot".
+`apply`; all others have `apply = nullptr` (the type 44 Apply is `remaining.cpp` B6; there is no
+second copy here). A stub value of 0 means "never install that slot".
 
 | type | name | vtable | size | read_stub (slot 2) | write_stub (slot 3) | apply_stub (slot 4) |
 |---|---|---|---|---|---|---|
@@ -468,8 +469,14 @@ Inputs: npc id = u32@ev+0x0c, spawner id = u32@ev+0x10, second id = u32@ev+0x14,
 tag = u32@ev+0x18. `manager` = absolute address of image offset 0x1130390. The second argument
 of the Apply is ignored. Observable steps, in this order:
 
+0. Client binding (PC design, `parity-c-match.md` 2.1): on the match host stop at once; on a client,
+   when a live local NPC from the same spawner was recorded, bind the event to it (write the npc id,
+   register the tracker) and stop instead of spawning.
 1. If `game.lookup_process` is set: call it with the npc id. If it returns non-NULL, log
-   `NetEventNpcSpawn: npc %u already exists` (npc id) and stop.
+   `NetEventNpcSpawn: npc %u already exists; not spawning a second one (deliberate difference from PS3)`
+   (npc id) and stop. **Deliberate difference from PS3**: PS3 logs and carries on with step 2, so a
+   second NPC with the same unique id is spawned. We keep the single NPC (owner's decision; the case
+   only arises when a second NpcSpawn arrives for a live NPC).
 2. spawner = guest 0x56c7b0(manager, spawner id).
 3. If second id != 0: second = guest 0x56c7b0(manager, second id); else second = NULL and no call.
 4. If spawner is NULL: log `NetEventNpcSpawn: can't find spawner %08x` (spawner id) and stop.
@@ -615,7 +622,7 @@ Type-specific:
 
 NpcSpawn Apply:
 
-15. Process already exists (stop after lookup + log).
+15. Process already exists (stop after lookup + log; deliberate difference from PS3, 4.8 step 1).
 16. `game.lookup_process` NULL (no lookup call).
 17. Spawner not found, with second id 0 and with second id non-zero (the second lookup happens
     before the log).

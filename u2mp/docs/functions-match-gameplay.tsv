@@ -73,7 +73,7 @@ progression	-	0x4355d0	absent	absent	source file cinema.cpp has no trace in the 
 progression	-	0x4355e0	absent	absent	source file cinema.cpp has no trace in the PS4 image		cinema.cpp	0x10			
 progression	-	0x4355f0	absent	absent	source file cinema.cpp has no trace in the PS4 image		cinema.cpp	0x5f8		7eb4a0 330fd0 332580 3304ec 4919b0	f116c9 f116ca f1bbf8
 progression	cinema: replay state machine	0x435be8	absent	absent	source file cinema.cpp has no trace in the PS4 image		cinema.cpp	0x440		9238f8 923f14 4383cc 495790 42f89c 4638cc 463ce8 42fcf8 +12	e60bcc f116cc f116d0 f116d4 f119c0
-players	NetAnimList::AddAnim	0x45212c	absent	absent	identifying strings missing on PS4 ("NetAnimList::AddAnim - too many animatio")	only caller PS3 0x453c10 (PS4 slot 0x5f48d0 is a ret stub). Not ported: the live remote-anim path is PS3 0x4533f8 = PS4 0x5f48e0 (intact); PORT-GAMEPLAY3.md 3	net-anim-command-generator.cpp	0x10c	453c10	8417e8 841908	
+players	NetAnimList::AddAnim	0x45212c	absent	absent	identifying strings missing on PS4 ("NetAnimList::AddAnim - too many animatio")	only caller PS3 0x453c10 (PS4 slot 0x5f48d0 is a ret stub). Ported since: netanim.cpp slot 4 list (PORT-NETANIM.md, spec/netanim.md 1.4.3); the live remote-anim path is PS3 0x4533f8 = PS4 0x5f48e0 (intact)	net-anim-command-generator.cpp	0x10c	453c10	8417e8 841908	
 players	-	0x452238	-	unresolved	no static pairing (small; probably inlined)		net-anim-command-generator.cpp	0x58			
 players	-	0x452290	-	unresolved	no static pairing (small; probably inlined)		net-anim-command-generator.cpp	0x40	19a130 45a1d4	ac9730	
 players	-	0x4522d0	-	unresolved	no static pairing (small; probably inlined)		net-anim-command-generator.cpp	0x38		4daf88	
@@ -100,7 +100,7 @@ players	NetAnimCmdGenerator::CreateAnimCmds	0x45319c	-	unresolved	no static pair
 players	-	0x4533f8	0x5f48e0	inlined	inlined (features 100% inside); host alive	remote character anim update, called directly by the NetCharacter update PS4 0x605070 (PS3 0x45ed60) at 0x6050a4; same layout (snapshots +0x70 stride 0x90, time +0x960 = PS3 +2124)	net-anim-command-generator.cpp	0x600	1a6d68 45ed60	451d50 820c0 81fec	
 players	-	0x4539f8	0x246d10	inlined	inlined (features 100% inside); host alive		net-anim-command-generator.cpp	0x17c	453c10	451d50 4da608	
 players	-	0x453b74	-	unresolved	no static pairing		net-anim-command-generator.cpp	0x9c	19a130 45a1d4	ac9730	
-players	-	0x453c10	0x5f48d0	stub	no static pairing	NetAnimCmdGenerator vtable slot (PS3 0xd705bc slot 5 = PS4 0x103fad0 slot 4); ret on PS4, referenced only by the vtable. Not ported: PORT-GAMEPLAY3.md 3	net-anim-command-generator.cpp	0xc98		ac9730 4539f8 45212c 7ab88	
+players	-	0x453c10	0x5f48d0	stub	no static pairing	NetAnimCmdGenerator vtable slot (PS3 0xd705bc slot 5 = PS4 0x103fad0 slot 4); ret on PS4, referenced only by the vtable. Ported since: netanim.cpp slot 4 host (PORT-NETANIM.md, spec/netanim.md 1.4.3)	net-anim-command-generator.cpp	0xc98		ac9730 4539f8 45212c 7ab88	
 players	-	0x4548a8	-	unresolved	no static pairing		net-anim-command-generator.cpp	0x20c	33ec7c 436220 45ed60 4c9e98 4ca228	451d50 4da504 df5d8	
 players	-	0x454ab4	-	unresolved	no static pairing		net-anim-command-generator.cpp	0x1a4	1a6d68 45f7c0	451d50 4da484 df5d8	
 players	-	0x454c58	-	unresolved	no static pairing		net-anim-command-generator.cpp	0x3c8	1d6750 461ea0	abe4ec 451c4c	e60bcc
@@ -312,15 +312,15 @@ progression	prints "Failed to read '%s'"	0x463ce8	-	unresolved	no static pairing
 progression	-	0x464148	-	unresolved	no static pairing		cinema file store	0x1ec	4386d0	1686d0 168ccc 16858c ae1604	
 progression	cinema file paths (cinema%d/...)	0x464334	-	unresolved	no static pairing (log-only on PS3)		cinema file store	0x130	447a5c	910c10 ac663c 938ac 8fcd30	
 players	-	0x468c10	-	unresolved	no static pairing (small; probably inlined)		net-event.cpp	0x8			
-players	NetEventStartConnection::Write (type 0, slot 2)	0x468c18	0x63c100	stub	evtable: same type/slot in the factory vtables; PS4 stub(ret) (PS3 body is only 0x4 bytes too)		net-event.cpp	0x4			
-players	NetEventStartConnection::Read (type 0, slot 3)	0x468c1c	0x63c0f0	stub	evtable: same type/slot in the factory vtables; PS4 stub(ret) (PS3 body is only 0x4 bytes too)		net-event.cpp	0x4			
+players	NetEventStartConnection::Read (type 0, slot 2)	0x468c18	0x63c100	stub	evtable: same type/slot in the factory vtables; PS4 stub(ret) (PS3 body is only 0x4 bytes too)		net-event.cpp	0x4			
+players	NetEventStartConnection::Write (type 0, slot 3)	0x468c1c	0x63c0f0	stub	evtable: same type/slot in the factory vtables; PS4 stub(ret) (PS3 body is only 0x4 bytes too)		net-event.cpp	0x4			
 players	-	0x468c20	0x634970	inlined	inlined (features 100% inside); host alive		net-event.cpp	0x150	480698		
 players	-	0x468d70	-	unresolved	no static pairing (small; probably inlined)		net-event.cpp	0x50	470db0 866240 866998		
-progression	NetEventEarnMedalClient::Write (type 60, slot 2)	0x468dc0	0x61d270	stub	evtable: same type/slot in the factory vtables; PS4 stub(ret) (PS3 body is only 0x4 bytes too)		net-event.cpp	0x4			
-progression	NetEventEarnMedalClient::Read (type 60, slot 3)	0x468dc4	0x61d260	stub	evtable: same type/slot in the factory vtables; PS4 stub(ret) (PS3 body is only 0x4 bytes too)		net-event.cpp	0x4			
+progression	NetEventEarnMedalClient::Read (type 60, slot 2)	0x468dc0	0x61d270	stub	evtable: same type/slot in the factory vtables; PS4 stub(ret) (PS3 body is only 0x4 bytes too)		net-event.cpp	0x4			
+progression	NetEventEarnMedalClient::Write (type 60, slot 3)	0x468dc4	0x61d260	stub	evtable: same type/slot in the factory vtables; PS4 stub(ret) (PS3 body is only 0x4 bytes too)		net-event.cpp	0x4			
 progression	NetEventEarnMedalClient::Apply (type 60, slot 4)	0x468dc8	0x61d250	stub	evtable: same type/slot in the factory vtables; PS4 stub(ret) (PS3 body is only 0x4 bytes too)		net-event.cpp	0x4			
-players	NetEventCompleteTask::Write (type 65, slot 2)	0x468dcc	0x62d900	stub	evtable: same type/slot in the factory vtables; PS4 stub(ret) (PS3 body is only 0x4 bytes too)		net-event.cpp	0x4			
-players	NetEventCompleteTask::Read (type 65, slot 3)	0x468dd0	0x62d8f0	stub	evtable: same type/slot in the factory vtables; PS4 stub(ret) (PS3 body is only 0x4 bytes too)		net-event.cpp	0x4			
+players	NetEventCompleteTask::Read (type 65, slot 2)	0x468dcc	0x62d900	stub	evtable: same type/slot in the factory vtables; PS4 stub(ret) (PS3 body is only 0x4 bytes too)		net-event.cpp	0x4			
+players	NetEventCompleteTask::Write (type 65, slot 3)	0x468dd0	0x62d8f0	stub	evtable: same type/slot in the factory vtables; PS4 stub(ret) (PS3 body is only 0x4 bytes too)		net-event.cpp	0x4			
 players	-	0x468dd4	-	unresolved	no static pairing (small; probably inlined)		net-event.cpp	0x60	467600		
 players	-	0x468e34	-	unresolved	no static pairing (small; probably inlined)		net-event.cpp	0x3c		91056c	
 players	-	0x468e70	-	unresolved	no static pairing (small; probably inlined)		net-event.cpp	0x18			
@@ -332,167 +332,167 @@ weapons	build/send NetEventBreakableAttackProjectile	0x469244	-	unresolved	no st
 players	build/send NetEventAssignTeam	0x469314	0x610840	intact-alive	evsender: only function storing the NetEventAssignTeam vtable on each side		net-event.cpp	0x1cc	47e550 48e5b8	ac9730	
 players	build/send NetEventCharacterMove	0x4694e0	-	unresolved	no static pairing		net-event.cpp	0x9c	47e550 48a908 48aa30		
 weapons	build/send NetEventGrenadeExplode	0x46957c	-	unresolved	no static pairing		net-event.cpp	0x1ec	47e550		
-players	NetEventConnectionDone::Read (type 1, slot 3)	0x469768	0x63bdb0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x6c		430170 430134	
-players	NetEventConnectionDone::Write (type 1, slot 2)	0x4697d4	0x63bf70	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x74		42fe24 42fcbc	
+players	NetEventConnectionDone::Write (type 1, slot 3)	0x469768	0x63bdb0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x6c		430170 430134	
+players	NetEventConnectionDone::Read (type 1, slot 2)	0x4697d4	0x63bf70	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x74		42fe24 42fcbc	
 players	build/send NetEventEndRound	0x469848	0x617ed0	intact-alive	evsender: only function storing the NetEventEndRound vtable on each side		net-event.cpp	0x308	486f4c	4919b0	f1f634
-modes	NetEventKillEntity::Read (type 76, slot 3)	0x469b50	0x61afc0	stub	evtable: same type/slot in the factory vtables; PS4 stub(ret) (PS3 body is only 0x30 bytes too)		net-event.cpp	0x30		430140	
-modes	NetEventTerritorySpawn::Read (type 51, slot 3)	0x469b80	0x61e880	stub	evtable: same type/slot in the factory vtables; PS4 stub(ret)		net-event.cpp	0x54		430140	
-progression	NetEventEarnMedal::Read (type 61, slot 3)	0x469bd4	0x61d230	stub	evtable: same type/slot in the factory vtables; PS4 stub(ret)		net-event.cpp	0x64		430140	
-modes	NetEventRevivePlayer::Read (type 48, slot 3)	0x469c38	0x61f7d0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x54		430140	
-weapons	NetEventApprovedPickup::Read (type 20, slot 3)	0x469c8c	0x631fe0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x30		430140	
-players	NetEventStartGame::Read (type 4, slot 3)	0x469cbc	0x63b3d0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x30		430140	
-modes	NetEventDrawSniperLaser::Read (type 36, slot 3)	0x469cec	0x622240	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x84		430140 430120 430170	
-modes	NetEventCoopTeamFailed::Read (type 71, slot 3)	0x469d70	0x61b690	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x30		430168	
-players	NetEventResetGame::Read (type 5, slot 3)	0x469da0	0x62d6f0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x30		430168	
-players	NetEventLoadLevel::Read (type 2, slot 3)	0x469dd0	0x63b760	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x9c		430140 430134 430120 430170 430168	
-modes	NetEventKillEntity::Write (type 76, slot 2)	0x469e6c	0x61afd0	stub	evtable: same type/slot in the factory vtables; PS4 stub(ret) (PS3 body is only 0x30 bytes too)		net-event.cpp	0x30		42fcf8	
-modes	NetEventTerritorySpawn::Write (type 51, slot 2)	0x469e9c	0x61e890	stub	evtable: same type/slot in the factory vtables; PS4 stub(ret)		net-event.cpp	0x5c		42fcf8	
-progression	NetEventEarnMedal::Write (type 61, slot 2)	0x469ef8	0x61d240	stub	evtable: same type/slot in the factory vtables; PS4 stub(ret)		net-event.cpp	0x70		42fcf8	
-modes	NetEventRevivePlayer::Write (type 48, slot 2)	0x469f68	0x61f900	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x5c		42fcf8	
-weapons	NetEventApprovedPickup::Write (type 20, slot 2)	0x469fc4	0x632080	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x30		42fcf8	
-players	NetEventStartGame::Write (type 4, slot 2)	0x469ff4	0x63b470	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x30		42fcf8	
-modes	NetEventDrawSniperLaser::Write (type 36, slot 2)	0x46a024	0x622500	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x98		42fcf8 42fc80 42fe24	
-modes	NetEventCoopTeamFailed::Write (type 71, slot 2)	0x46a0bc	0x61b730	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x30		42fde8	
-players	NetEventResetGame::Write (type 5, slot 2)	0x46a0ec	0x62d790	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x40		42fde8	
-players	NetEventLoadLevel::Write (type 2, slot 2)	0x46a12c	0x63bad0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0xac		42fcf8 42fcbc 42fc80 42fe24 42fde8	
-players	NetEventPlayerLeft::Read (type 79, slot 3)	0x46a1d8	0x619e20	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x34		42fe78	
-players	NetEventShieldDamage::Read (type 78, slot 3)	0x46a20c	0x61a300	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0xb0		430170 42fe78 430140	
-players	NetEventEndRound::Read (type 77, slot 3)	0x46a2bc	0x61ab30	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x7c		430168 430134 42fe78 430140	
-modes	NetEventKnockedDown::Read (type 73, slot 3)	0x46a338	0x61b2e0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x34		42fe78	
-modes	NetEventKnockedDownClient::Read (type 72, slot 3)	0x46a36c	0x61b530	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x34		42fe78	
-modes	NetEventGrieferKicked::Read (type 70, slot 3)	0x46a3a0	0x61b7d0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x34		42fe78	
-modes	NetEventKickGriefer::Read (type 69, slot 3)	0x46a3d4	0x61b910	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x34		42fe78	
-players	NetEventPlayVox::Read (type 53, slot 3)	0x46a408	0x61e5f0	stub	evtable: same type/slot in the factory vtables; PS4 stub(ret)		net-event.cpp	0xb0		430170 42fe78 430140 430120	
-modes	NetEventTerritorySetTimer::Read (type 52, slot 3)	0x46a4b8	0x61e6f0	stub	evtable: same type/slot in the factory vtables; PS4 stub(ret)		net-event.cpp	0x84		430140 430120 430170 42fe78	
-modes	NetEventTerritoryScore::Read (type 50, slot 3)	0x46a53c	0x61e940	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x58		430140 42fe78	
-players	NetEventNpcArmorDestroyed::Read (type 63, slot 3)	0x46a594	0x62da00	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x58		430140 42fe78	
-modes	NetEventReviveCredit::Read (type 59, slot 3)	0x46a5ec	0x61f140	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x5c		42fe78	
-modes	NetEventReviveCreditClient::Read (type 58, slot 3)	0x46a648	0x61f4b0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x5c		42fe78	
-players	NetEventNpcChangeOwnership::Read (type 43, slot 3)	0x46a6a4	0x61ff60	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x58		42fe78 430170	
-players	NetEventNpcKill::Read (type 38, slot 3)	0x46a6fc	0x622070	stub	evtable: same type/slot in the factory vtables; PS4 stub(ret) (PS3 body is only 0x34 bytes too)		net-event.cpp	0x34		42fe78	
-players	NetEventNpcSpawn::Read (type 37, slot 3)	0x46a730	0x62f230	stub	evtable: same type/slot in the factory vtables; PS4 stub(ret)		net-event.cpp	0x78		42fe78 430140	
-modes	NetEventSetJuggernaut::Read (type 35, slot 3)	0x46a7a8	0x62f770	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x5c		42fe78	
-players	NetEventSpawnCarryObject::Read (type 31, slot 3)	0x46a804	0x623930	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x58		430140 42fe78	
-modes	NetEventCaptureFlag::Read (type 30, slot 3)	0x46a85c	0x623bb0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x34		42fe78	
-players	NetEventCheating::Read (type 28, slot 3)	0x46a890	0x62fdf0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x34		42fe78	
-players	NetEventSetCanSee::Read (type 27, slot 3)	0x46a8c4	0x62ff70	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x5c		42fe78	
-weapons	NetEventPickupPickedUp::Read (type 23, slot 3)	0x46a920	0x625d50	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x88		42fe78 430140 430120 430168	
-weapons	NetEventPickupPickedUpClient::Read (type 22, slot 3)	0x46a9a8	0x626560	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x68		42fe78 430140 430120	
-weapons	NetEventAbortPickup::Read (type 75, slot 3)	0x46aa10	0x630cd0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x58		42fe78 430140	
-weapons	NetEventRequestPickup::Read (type 19, slot 3)	0x46aa68	0x6313e0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x58		42fe78 430140	
-weapons	NetEventDeniedPickup::Read (type 21, slot 3)	0x46aac0	0x631730	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0xb4		42fe78 430140 430120	
-weapons	NetEventGrenadeStartFuse::Read (type 10, slot 3)	0x46ab74	0x629110	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x68		430140 430120 42fe78	
-players	NetEventReadyToStart::Read (type 3, slot 3)	0x46abdc	0x63b580	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x34		42fe78	
-players	NetEventPlayerLeft::Write (type 79, slot 2)	0x46ac10	0x619ec0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x34		42f8d8	
-players	NetEventShieldDamage::Write (type 78, slot 2)	0x46ac44	0x61a660	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0xd0		42fe24 42f8d8 42fcf8	
-players	NetEventEndRound::Write (type 77, slot 2)	0x46ad14	0x61ad80	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x94		42fde8 42fcbc 42f8d8 42fcf8	
-modes	NetEventKnockedDown::Write (type 73, slot 2)	0x46ada8	0x61b380	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x34		42f8d8	
-modes	NetEventKnockedDownClient::Write (type 72, slot 2)	0x46addc	0x61b5d0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x34		42f8d8	
-modes	NetEventGrieferKicked::Write (type 70, slot 2)	0x46ae10	0x61b870	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x34		42f8d8	
-modes	NetEventKickGriefer::Write (type 69, slot 2)	0x46ae44	0x61b9b0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x34		42f8d8	
-players	NetEventPlayVox::Write (type 53, slot 2)	0x46ae78	0x61e600	stub	evtable: same type/slot in the factory vtables; PS4 stub(ret)		net-event.cpp	0xd0		42fe24 42f8d8 42fcf8 42fc80	
-modes	NetEventTerritorySetTimer::Write (type 52, slot 2)	0x46af48	0x61e700	stub	evtable: same type/slot in the factory vtables; PS4 stub(ret)		net-event.cpp	0x9c		42fcf8 42fc80 42fe24 42f8d8	
-modes	NetEventTerritoryScore::Write (type 50, slot 2)	0x46afe4	0x61ea80	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x60		42fcf8 42f8d8	
-players	NetEventNpcArmorDestroyed::Write (type 63, slot 2)	0x46b044	0x62db40	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x60		42fcf8 42f8d8	
-modes	NetEventReviveCredit::Write (type 59, slot 2)	0x46b0a4	0x61f280	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x64		42f8d8	
-modes	NetEventReviveCreditClient::Write (type 58, slot 2)	0x46b108	0x61f5f0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x64		42f8d8	
-players	NetEventNpcChangeOwnership::Write (type 43, slot 2)	0x46b16c	0x620080	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x60		42f8d8 42fe24	
-players	NetEventNpcKill::Write (type 38, slot 2)	0x46b1cc	0x622080	stub	evtable: same type/slot in the factory vtables; PS4 stub(ret) (PS3 body is only 0x34 bytes too)		net-event.cpp	0x34		42f8d8	
-players	NetEventNpcSpawn::Write (type 37, slot 2)	0x46b200	0x62f240	stub	evtable: same type/slot in the factory vtables; PS4 stub(ret)		net-event.cpp	0x88		42f8d8 42fcf8	
-modes	NetEventSetJuggernaut::Write (type 35, slot 2)	0x46b288	0x62f8b0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x64		42f8d8	
-players	NetEventSpawnCarryObject::Write (type 31, slot 2)	0x46b2ec	0x623a70	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x60		42fcf8 42f8d8	
-modes	NetEventCaptureFlag::Write (type 30, slot 2)	0x46b34c	0x623c50	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x34		42f8d8	
-players	NetEventCheating::Write (type 28, slot 2)	0x46b380	0x62fe90	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x34		42f8d8	
-players	NetEventSetCanSee::Write (type 27, slot 2)	0x46b3b4	0x630090	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x64		42f8d8	
-weapons	NetEventPickupPickedUp::Write (type 23, slot 2)	0x46b418	0x626030	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x9c		42f8d8 42fcf8 42fc80 42fde8	
-weapons	NetEventPickupPickedUpClient::Write (type 22, slot 2)	0x46b4b4	0x626720	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x74		42f8d8 42fcf8 42fc80	
-weapons	NetEventAbortPickup::Write (type 75, slot 2)	0x46b528	0x630e10	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x60		42f8d8 42fcf8	
-weapons	NetEventRequestPickup::Write (type 19, slot 2)	0x46b588	0x631520	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x60		42f8d8 42fcf8	
-weapons	NetEventDeniedPickup::Write (type 21, slot 2)	0x46b5e8	0x631b10	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0xd0		42f8d8 42fcf8 42fc80	
-weapons	NetEventGrenadeStartFuse::Write (type 10, slot 2)	0x46b6b8	0x6292d0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x74		42fcf8 42fc80 42f8d8	
-players	NetEventReadyToStart::Write (type 3, slot 2)	0x46b72c	0x63b620	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x34		42f8d8	
+modes	NetEventKillEntity::Write (type 76, slot 3)	0x469b50	0x61afc0	stub	evtable: same type/slot in the factory vtables; PS4 stub(ret) (PS3 body is only 0x30 bytes too)		net-event.cpp	0x30		430140	
+modes	NetEventTerritorySpawn::Write (type 51, slot 3)	0x469b80	0x61e880	stub	evtable: same type/slot in the factory vtables; PS4 stub(ret)		net-event.cpp	0x54		430140	
+progression	NetEventEarnMedal::Write (type 61, slot 3)	0x469bd4	0x61d230	stub	evtable: same type/slot in the factory vtables; PS4 stub(ret)		net-event.cpp	0x64		430140	
+modes	NetEventRevivePlayer::Write (type 48, slot 3)	0x469c38	0x61f7d0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x54		430140	
+weapons	NetEventApprovedPickup::Write (type 20, slot 3)	0x469c8c	0x631fe0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x30		430140	
+players	NetEventStartGame::Write (type 4, slot 3)	0x469cbc	0x63b3d0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x30		430140	
+modes	NetEventDrawSniperLaser::Write (type 36, slot 3)	0x469cec	0x622240	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x84		430140 430120 430170	
+modes	NetEventCoopTeamFailed::Write (type 71, slot 3)	0x469d70	0x61b690	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x30		430168	
+players	NetEventResetGame::Write (type 5, slot 3)	0x469da0	0x62d6f0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x30		430168	
+players	NetEventLoadLevel::Write (type 2, slot 3)	0x469dd0	0x63b760	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x9c		430140 430134 430120 430170 430168	
+modes	NetEventKillEntity::Read (type 76, slot 2)	0x469e6c	0x61afd0	stub	evtable: same type/slot in the factory vtables; PS4 stub(ret) (PS3 body is only 0x30 bytes too)		net-event.cpp	0x30		42fcf8	
+modes	NetEventTerritorySpawn::Read (type 51, slot 2)	0x469e9c	0x61e890	stub	evtable: same type/slot in the factory vtables; PS4 stub(ret)		net-event.cpp	0x5c		42fcf8	
+progression	NetEventEarnMedal::Read (type 61, slot 2)	0x469ef8	0x61d240	stub	evtable: same type/slot in the factory vtables; PS4 stub(ret)		net-event.cpp	0x70		42fcf8	
+modes	NetEventRevivePlayer::Read (type 48, slot 2)	0x469f68	0x61f900	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x5c		42fcf8	
+weapons	NetEventApprovedPickup::Read (type 20, slot 2)	0x469fc4	0x632080	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x30		42fcf8	
+players	NetEventStartGame::Read (type 4, slot 2)	0x469ff4	0x63b470	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x30		42fcf8	
+modes	NetEventDrawSniperLaser::Read (type 36, slot 2)	0x46a024	0x622500	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x98		42fcf8 42fc80 42fe24	
+modes	NetEventCoopTeamFailed::Read (type 71, slot 2)	0x46a0bc	0x61b730	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x30		42fde8	
+players	NetEventResetGame::Read (type 5, slot 2)	0x46a0ec	0x62d790	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x40		42fde8	
+players	NetEventLoadLevel::Read (type 2, slot 2)	0x46a12c	0x63bad0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0xac		42fcf8 42fcbc 42fc80 42fe24 42fde8	
+players	NetEventPlayerLeft::Write (type 79, slot 3)	0x46a1d8	0x619e20	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x34		42fe78	
+players	NetEventShieldDamage::Write (type 78, slot 3)	0x46a20c	0x61a300	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0xb0		430170 42fe78 430140	
+players	NetEventEndRound::Write (type 77, slot 3)	0x46a2bc	0x61ab30	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x7c		430168 430134 42fe78 430140	
+modes	NetEventKnockedDown::Write (type 73, slot 3)	0x46a338	0x61b2e0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x34		42fe78	
+modes	NetEventKnockedDownClient::Write (type 72, slot 3)	0x46a36c	0x61b530	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x34		42fe78	
+modes	NetEventGrieferKicked::Write (type 70, slot 3)	0x46a3a0	0x61b7d0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x34		42fe78	
+modes	NetEventKickGriefer::Write (type 69, slot 3)	0x46a3d4	0x61b910	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x34		42fe78	
+players	NetEventPlayVox::Write (type 53, slot 3)	0x46a408	0x61e5f0	stub	evtable: same type/slot in the factory vtables; PS4 stub(ret)		net-event.cpp	0xb0		430170 42fe78 430140 430120	
+modes	NetEventTerritorySetTimer::Write (type 52, slot 3)	0x46a4b8	0x61e6f0	stub	evtable: same type/slot in the factory vtables; PS4 stub(ret)		net-event.cpp	0x84		430140 430120 430170 42fe78	
+modes	NetEventTerritoryScore::Write (type 50, slot 3)	0x46a53c	0x61e940	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x58		430140 42fe78	
+players	NetEventNpcArmorDestroyed::Write (type 63, slot 3)	0x46a594	0x62da00	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x58		430140 42fe78	
+modes	NetEventReviveCredit::Write (type 59, slot 3)	0x46a5ec	0x61f140	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x5c		42fe78	
+modes	NetEventReviveCreditClient::Write (type 58, slot 3)	0x46a648	0x61f4b0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x5c		42fe78	
+players	NetEventNpcChangeOwnership::Write (type 43, slot 3)	0x46a6a4	0x61ff60	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x58		42fe78 430170	
+players	NetEventNpcKill::Write (type 38, slot 3)	0x46a6fc	0x622070	stub	evtable: same type/slot in the factory vtables; PS4 stub(ret) (PS3 body is only 0x34 bytes too)		net-event.cpp	0x34		42fe78	
+players	NetEventNpcSpawn::Write (type 37, slot 3)	0x46a730	0x62f230	stub	evtable: same type/slot in the factory vtables; PS4 stub(ret)		net-event.cpp	0x78		42fe78 430140	
+modes	NetEventSetJuggernaut::Write (type 35, slot 3)	0x46a7a8	0x62f770	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x5c		42fe78	
+players	NetEventSpawnCarryObject::Write (type 31, slot 3)	0x46a804	0x623930	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x58		430140 42fe78	
+modes	NetEventCaptureFlag::Write (type 30, slot 3)	0x46a85c	0x623bb0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x34		42fe78	
+players	NetEventCheating::Write (type 28, slot 3)	0x46a890	0x62fdf0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x34		42fe78	
+players	NetEventSetCanSee::Write (type 27, slot 3)	0x46a8c4	0x62ff70	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x5c		42fe78	
+weapons	NetEventPickupPickedUp::Write (type 23, slot 3)	0x46a920	0x625d50	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x88		42fe78 430140 430120 430168	
+weapons	NetEventPickupPickedUpClient::Write (type 22, slot 3)	0x46a9a8	0x626560	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x68		42fe78 430140 430120	
+weapons	NetEventAbortPickup::Write (type 75, slot 3)	0x46aa10	0x630cd0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x58		42fe78 430140	
+weapons	NetEventRequestPickup::Write (type 19, slot 3)	0x46aa68	0x6313e0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x58		42fe78 430140	
+weapons	NetEventDeniedPickup::Write (type 21, slot 3)	0x46aac0	0x631730	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0xb4		42fe78 430140 430120	
+weapons	NetEventGrenadeStartFuse::Write (type 10, slot 3)	0x46ab74	0x629110	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x68		430140 430120 42fe78	
+players	NetEventReadyToStart::Write (type 3, slot 3)	0x46abdc	0x63b580	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x34		42fe78	
+players	NetEventPlayerLeft::Read (type 79, slot 2)	0x46ac10	0x619ec0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x34		42f8d8	
+players	NetEventShieldDamage::Read (type 78, slot 2)	0x46ac44	0x61a660	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0xd0		42fe24 42f8d8 42fcf8	
+players	NetEventEndRound::Read (type 77, slot 2)	0x46ad14	0x61ad80	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x94		42fde8 42fcbc 42f8d8 42fcf8	
+modes	NetEventKnockedDown::Read (type 73, slot 2)	0x46ada8	0x61b380	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x34		42f8d8	
+modes	NetEventKnockedDownClient::Read (type 72, slot 2)	0x46addc	0x61b5d0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x34		42f8d8	
+modes	NetEventGrieferKicked::Read (type 70, slot 2)	0x46ae10	0x61b870	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x34		42f8d8	
+modes	NetEventKickGriefer::Read (type 69, slot 2)	0x46ae44	0x61b9b0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x34		42f8d8	
+players	NetEventPlayVox::Read (type 53, slot 2)	0x46ae78	0x61e600	stub	evtable: same type/slot in the factory vtables; PS4 stub(ret)		net-event.cpp	0xd0		42fe24 42f8d8 42fcf8 42fc80	
+modes	NetEventTerritorySetTimer::Read (type 52, slot 2)	0x46af48	0x61e700	stub	evtable: same type/slot in the factory vtables; PS4 stub(ret)		net-event.cpp	0x9c		42fcf8 42fc80 42fe24 42f8d8	
+modes	NetEventTerritoryScore::Read (type 50, slot 2)	0x46afe4	0x61ea80	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x60		42fcf8 42f8d8	
+players	NetEventNpcArmorDestroyed::Read (type 63, slot 2)	0x46b044	0x62db40	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x60		42fcf8 42f8d8	
+modes	NetEventReviveCredit::Read (type 59, slot 2)	0x46b0a4	0x61f280	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x64		42f8d8	
+modes	NetEventReviveCreditClient::Read (type 58, slot 2)	0x46b108	0x61f5f0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x64		42f8d8	
+players	NetEventNpcChangeOwnership::Read (type 43, slot 2)	0x46b16c	0x620080	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x60		42f8d8 42fe24	
+players	NetEventNpcKill::Read (type 38, slot 2)	0x46b1cc	0x622080	stub	evtable: same type/slot in the factory vtables; PS4 stub(ret) (PS3 body is only 0x34 bytes too)		net-event.cpp	0x34		42f8d8	
+players	NetEventNpcSpawn::Read (type 37, slot 2)	0x46b200	0x62f240	stub	evtable: same type/slot in the factory vtables; PS4 stub(ret)		net-event.cpp	0x88		42f8d8 42fcf8	
+modes	NetEventSetJuggernaut::Read (type 35, slot 2)	0x46b288	0x62f8b0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x64		42f8d8	
+players	NetEventSpawnCarryObject::Read (type 31, slot 2)	0x46b2ec	0x623a70	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x60		42fcf8 42f8d8	
+modes	NetEventCaptureFlag::Read (type 30, slot 2)	0x46b34c	0x623c50	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x34		42f8d8	
+players	NetEventCheating::Read (type 28, slot 2)	0x46b380	0x62fe90	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x34		42f8d8	
+players	NetEventSetCanSee::Read (type 27, slot 2)	0x46b3b4	0x630090	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x64		42f8d8	
+weapons	NetEventPickupPickedUp::Read (type 23, slot 2)	0x46b418	0x626030	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x9c		42f8d8 42fcf8 42fc80 42fde8	
+weapons	NetEventPickupPickedUpClient::Read (type 22, slot 2)	0x46b4b4	0x626720	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x74		42f8d8 42fcf8 42fc80	
+weapons	NetEventAbortPickup::Read (type 75, slot 2)	0x46b528	0x630e10	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x60		42f8d8 42fcf8	
+weapons	NetEventRequestPickup::Read (type 19, slot 2)	0x46b588	0x631520	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x60		42f8d8 42fcf8	
+weapons	NetEventDeniedPickup::Read (type 21, slot 2)	0x46b5e8	0x631b10	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0xd0		42f8d8 42fcf8 42fc80	
+weapons	NetEventGrenadeStartFuse::Read (type 10, slot 2)	0x46b6b8	0x6292d0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x74		42fcf8 42fc80 42f8d8	
+players	NetEventReadyToStart::Read (type 3, slot 2)	0x46b72c	0x63b620	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x34		42f8d8	
 progression	NetEventEarnMedal::Apply (type 61, slot 4)	0x46b760	0x61d1e0	partial	evtable: same type/slot in the factory vtables; Write/Read of this event are stubs on PS4		net-event.cpp	0x68		4918e8 c2030	
 players	build/send NetEventStartNetTask	0x46b7c8	0x617040	intact-alive	evsender: only function storing the NetEventStartNetTask vtable on each side		net-event.cpp	0x1a0	487bb0	4919b0 4c7bf8	e60bcc
 modes	build/send NetEventDrawSniperLaser	0x46b968	0x613220	intact-alive	evsender: only function storing the NetEventDrawSniperLaser vtable on each side		net-event.cpp	0x88	48bf90		
-players	NetEventEndGame::Read (type 6, slot 3)	0x46b9f0	0x62d3c0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x5c		430168 430178	
-players	NetEventEndGame::Write (type 6, slot 2)	0x46ba4c	0x62d500	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x6c		42fde8 430184	
+players	NetEventEndGame::Write (type 6, slot 3)	0x46b9f0	0x62d3c0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x5c		430168 430178	
+players	NetEventEndGame::Read (type 6, slot 2)	0x46ba4c	0x62d500	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x6c		42fde8 430184	
 players	prints "Unknown"	0x46bab8	-	unresolved	no static pairing (log-only on PS3)		net-event.cpp	0x218	477100 48eb80	4918e8 4916f0 9238f8 923f14 849608	e60bcc
-players	NetEventPlayerDeath::Read (type 64, slot 3)	0x46bcd0	0x61cd60	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0xbc		4302d8 42fe78 430170	
-modes	NetEventStartNpcFight::Read (type 55, slot 3)	0x46bd8c	0x61e1a0	stub	evtable: same type/slot in the factory vtables; PS4 stub(ret)		net-event.cpp	0x130		4302d8 42fe78 430140 430120 430170	
-players	NetEventCarryObjectStopMove::Read (type 34, slot 3)	0x46bebc	0x62fb50	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x5c		430140 4302d8	
-players	NetEventStartCloseCombat::Read (type 26, slot 3)	0x46bf18	0x630490	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0xc8		42fe78 430140 430120 4302d8	
-weapons	NetEventEmitProjectileBullet::Read (type 7, slot 3)	0x46bfe0	0x62c340	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x10c		42fe78 4302d8	
-players	NetEventPlayerDeath::Write (type 64, slot 2)	0x46c0ec	0x61cfd0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0xac		4306e8 42f8d8 42fe24	
-modes	NetEventStartNpcFight::Write (type 55, slot 2)	0x46c198	0x61e1b0	stub	evtable: same type/slot in the factory vtables; PS4 stub(ret)		net-event.cpp	0x158		4306e8 42f8d8 42fcf8 42fc80 42fe24	
-players	NetEventCarryObjectStopMove::Write (type 34, slot 2)	0x46c2f0	0x62fc10	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x5c		42fcf8 4306e8	
-players	NetEventStartCloseCombat::Write (type 26, slot 2)	0x46c34c	0x630890	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0xdc		42f8d8 42fcf8 42fc80 4306e8	
-weapons	NetEventEmitProjectileBullet::Write (type 7, slot 2)	0x46c428	0x62c6e0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x130		42f8d8 4306e8 42fe24	
+players	NetEventPlayerDeath::Write (type 64, slot 3)	0x46bcd0	0x61cd60	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0xbc		4302d8 42fe78 430170	
+modes	NetEventStartNpcFight::Write (type 55, slot 3)	0x46bd8c	0x61e1a0	stub	evtable: same type/slot in the factory vtables; PS4 stub(ret)		net-event.cpp	0x130		4302d8 42fe78 430140 430120 430170	
+players	NetEventCarryObjectStopMove::Write (type 34, slot 3)	0x46bebc	0x62fb50	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x5c		430140 4302d8	
+players	NetEventStartCloseCombat::Write (type 26, slot 3)	0x46bf18	0x630490	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0xc8		42fe78 430140 430120 4302d8	
+weapons	NetEventEmitProjectileBullet::Write (type 7, slot 3)	0x46bfe0	0x62c340	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x10c		42fe78 4302d8	
+players	NetEventPlayerDeath::Read (type 64, slot 2)	0x46c0ec	0x61cfd0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0xac		4306e8 42f8d8 42fe24	
+modes	NetEventStartNpcFight::Read (type 55, slot 2)	0x46c198	0x61e1b0	stub	evtable: same type/slot in the factory vtables; PS4 stub(ret)		net-event.cpp	0x158		4306e8 42f8d8 42fcf8 42fc80 42fe24	
+players	NetEventCarryObjectStopMove::Read (type 34, slot 2)	0x46c2f0	0x62fc10	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x5c		42fcf8 4306e8	
+players	NetEventStartCloseCombat::Read (type 26, slot 2)	0x46c34c	0x630890	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0xdc		42f8d8 42fcf8 42fc80 4306e8	
+weapons	NetEventEmitProjectileBullet::Read (type 7, slot 2)	0x46c428	0x62c6e0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x130		42f8d8 4306e8 42fe24	
 players	-	0x46c558	-	unresolved	no static pairing		net-event.cpp	0xf8	478dc8 47b840 47c330 5b7fd8 804648 86e9c0 +1	29e7c	
-modes	NetEventSpawnHiddenTreasure::Read (type 57, slot 3)	0x46c650	0x61d390	stub	evtable: same type/slot in the factory vtables; PS4 stub(ret)		net-event.cpp	0x58		42ff78 430140	
-players	NetEventKillInfo::Read (type 17, slot 3)	0x46c6a8	0x632f80	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x1e0		42fe78 430178 42ff78 430168 430140	
-players	NetEventKillInfoClient::Read (type 16, slot 3)	0x46c888	0x633ef0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x1d0		42fe78 430178 42ff78 430140	
-weapons	NetEventEmitGrenade::Read (type 8, slot 3)	0x46ca58	0x62b250	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x108		42fe78 430140 430120 42ff78	
-modes	NetEventSpawnHiddenTreasure::Write (type 57, slot 2)	0x46cb60	0x61d3a0	stub	evtable: same type/slot in the factory vtables; PS4 stub(ret)		net-event.cpp	0x60		42fa70 42fcf8	
-players	NetEventKillInfo::Write (type 17, slot 2)	0x46cbc0	0x6335b0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x200		42f8d8 430184 42fa70 42fde8 42fcf8	
-players	NetEventKillInfoClient::Write (type 16, slot 2)	0x46cdc0	0x634490	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x1e8		42f8d8 430184 42fa70 42fcf8	
-weapons	NetEventEmitGrenade::Write (type 8, slot 2)	0x46cfa8	0x62b650	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x124		42f8d8 42fcf8 42fc80 42fa70	
-modes	NetEventEndWave::Read (type 74, slot 3)	0x46d0cc	0x61b040	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x58		42ff4c 430134	
-weapons	NetEventTurretSnapshot::Read (type 67, slot 3)	0x46d124	0x61bed0	stub	evtable: same type/slot in the factory vtables; PS4 stub(ret)		net-event.cpp	0x88		430120 430140 42ff4c 42fe78	
-modes	NetEventNpcFightAlign::Read (type 56, slot 3)	0x46d1ac	0x61d4c0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x6c		4302d8 42fe78 42ff4c	
-players	NetEventSimpleSnapshot::Read (type 54, slot 3)	0x46d218	0x61e290	stub	evtable: same type/slot in the factory vtables; PS4 stub(ret)		net-event.cpp	0x7c		4302d8 430140 42ff4c 42fe78	
-players	NetEventNpcDealDamage::Read (type 44, slot 3)	0x46d294	0x61fb10	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x94		42fe78 430134 42ff4c	
-players	NetEventBreakableAttackExplosion::Read (type 40, slot 3)	0x46d328	0x6209c0	intact-alive	str:(m_objectDamage & (-1 << kBreakableDamag		net-event.cpp	0x188		42fe78 430140 42ff78 430120 42ff4c 841908	
-weapons	NetEventBreakableAttackProjectile::Read (type 39, slot 3)	0x46d4b0	0x621670	intact-alive	str:(m_numDamagePoints & (-1 << 3)) == 0		net-event.cpp	0x360		42fe78 430140 4302d8 841908 42ff4c	
-players	NetEventCarryObjectStartMove::Read (type 32, slot 3)	0x46d810	0x623290	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x94		42fe78 430140 4302d8 42ff4c	
-players	NetEventCarryObjectClientStartMove::Read (type 33, slot 3)	0x46d8a4	0x622940	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x94		42fe78 430140 4302d8 42ff4c	
-players	NetEventRespawnPlayer::Read (type 29, slot 3)	0x46d938	0x623df0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x8c		42fe78 430140 430170 42ff4c	
-weapons	NetEventAddDroppedPickup::Read (type 25, slot 3)	0x46d9c4	0x6248c0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0xd8		42fe78 430140 4302d8 430170 42ff4c	
-weapons	NetEventAddDroppedPickupClient::Read (type 24, slot 3)	0x46da9c	0x6251a0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0xd8		42fe78 430140 4302d8 430170 42ff4c	
-players	NetEventAttackCloseCombat::Read (type 15, slot 3)	0x46db74	0x626a30	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0xc8		42fe78 42ff78 430140 430120 42ff4c	
-modes	NetEventEndWave::Write (type 74, slot 2)	0x46dc3c	0x61b190	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x5c		42f9c0 42fcbc	
-weapons	NetEventTurretSnapshot::Write (type 67, slot 2)	0x46dc98	0x61bee0	stub	evtable: same type/slot in the factory vtables; PS4 stub(ret)		net-event.cpp	0x9c		42fc80 42fcf8 42f9c0 42f8d8	
-modes	NetEventNpcFightAlign::Write (type 56, slot 2)	0x46dd34	0x61d620	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x74		4306e8 42f8d8 42f9c0	
-players	NetEventSimpleSnapshot::Write (type 54, slot 2)	0x46dda8	0x61e2a0	stub	evtable: same type/slot in the factory vtables; PS4 stub(ret)		net-event.cpp	0x88		4306e8 42fcf8 42f9c0 42f8d8	
-players	NetEventNpcDealDamage::Write (type 44, slot 2)	0x46de30	0x61fe00	stub	evtable: same type/slot in the factory vtables; PS4 stub(ret)		net-event.cpp	0xa4		42f8d8 42fcbc 42f9c0	
-players	NetEventBreakableAttackExplosion::Write (type 40, slot 2)	0x46ded4	0x620e50	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0xe4		42f8d8 42fcf8 42fa70 42fc80 42f9c0	
-weapons	NetEventBreakableAttackProjectile::Write (type 39, slot 2)	0x46dfb8	0x621c20	intact-alive	vtable		net-event.cpp	0x148		42f8d8 42fcf8 4306e8 42f9c0	
-players	NetEventCarryObjectStartMove::Write (type 32, slot 2)	0x46e100	0x623500	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x9c		42f8d8 42fcf8 4306e8 42f9c0	
-players	NetEventCarryObjectClientStartMove::Write (type 33, slot 2)	0x46e19c	0x622bb0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x9c		42f8d8 42fcf8 4306e8 42f9c0	
-players	NetEventRespawnPlayer::Write (type 29, slot 2)	0x46e238	0x6240e0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0xa0		42f8d8 42fcf8 42fe24 42f9c0	
-weapons	NetEventAddDroppedPickup::Write (type 25, slot 2)	0x46e2d8	0x624cc0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0xf0		42f8d8 42fcf8 4306e8 42fe24 42f9c0	
-weapons	NetEventAddDroppedPickupClient::Write (type 24, slot 2)	0x46e3c8	0x6255a0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0xf0		42f8d8 42fcf8 4306e8 42fe24 42f9c0	
-players	NetEventAttackCloseCombat::Write (type 15, slot 2)	0x46e4b8	0x626dc0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0xe0		42f8d8 42fa70 42fcf8 42fc80 42f9c0	
-players	NetEventBreakableCollapse::Read (type 42, slot 3)	0x46e598	0x6201f0	intact-alive	str:(m_attackInfo.m_damageInfo.m_numPoints &		net-event.cpp	0x238		430140 42fe78 42ff78 4301c0 841908	
-players	NetEventBreakableBreakPiece::Read (type 41, slot 3)	0x46e7d0	0x62ee50	intact-alive	str:(m_iPiece & (-1 << kBreakablePieceBits))		net-event.cpp	0xfc		430140 42fe78 430120 4301c0 841908	
-weapons	NetEventAttackProjectile::Read (type 13, slot 3)	0x46e8cc	0x628670	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x168		42fe78 430140 430120 42ff78 4301c0 42ff4c 430170	
-weapons	NetEventEmitRocket::Read (type 11, slot 3)	0x46ea34	0x63ad40	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0xfc		430170 42fe78 430140 430120 42ff78 4301c0	
-players	NetEventBreakableCollapse::Write (type 42, slot 2)	0x46eb30	0x620570	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0xf8		42fcf8 42f8d8 42fa70 4305a4	
-players	NetEventBreakableBreakPiece::Write (type 41, slot 2)	0x46ec28	0x62f070	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x9c		42fcf8 42f8d8 42fc80 4305a4	
-weapons	NetEventAttackProjectile::Write (type 13, slot 2)	0x46ecc4	0x628be0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x188		42f8d8 42fcf8 42fc80 42fa70 4305a4 42f9c0 42fe24	
-weapons	NetEventEmitRocket::Write (type 11, slot 2)	0x46ee4c	0x63b050	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x10c		42fe24 42f8d8 42fcf8 42fc80 42fa70 4305a4	
+modes	NetEventSpawnHiddenTreasure::Write (type 57, slot 3)	0x46c650	0x61d390	stub	evtable: same type/slot in the factory vtables; PS4 stub(ret)		net-event.cpp	0x58		42ff78 430140	
+players	NetEventKillInfo::Write (type 17, slot 3)	0x46c6a8	0x632f80	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x1e0		42fe78 430178 42ff78 430168 430140	
+players	NetEventKillInfoClient::Write (type 16, slot 3)	0x46c888	0x633ef0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x1d0		42fe78 430178 42ff78 430140	
+weapons	NetEventEmitGrenade::Write (type 8, slot 3)	0x46ca58	0x62b250	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x108		42fe78 430140 430120 42ff78	
+modes	NetEventSpawnHiddenTreasure::Read (type 57, slot 2)	0x46cb60	0x61d3a0	stub	evtable: same type/slot in the factory vtables; PS4 stub(ret)		net-event.cpp	0x60		42fa70 42fcf8	
+players	NetEventKillInfo::Read (type 17, slot 2)	0x46cbc0	0x6335b0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x200		42f8d8 430184 42fa70 42fde8 42fcf8	
+players	NetEventKillInfoClient::Read (type 16, slot 2)	0x46cdc0	0x634490	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x1e8		42f8d8 430184 42fa70 42fcf8	
+weapons	NetEventEmitGrenade::Read (type 8, slot 2)	0x46cfa8	0x62b650	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x124		42f8d8 42fcf8 42fc80 42fa70	
+modes	NetEventEndWave::Write (type 74, slot 3)	0x46d0cc	0x61b040	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x58		42ff4c 430134	
+weapons	NetEventTurretSnapshot::Write (type 67, slot 3)	0x46d124	0x61bed0	stub	evtable: same type/slot in the factory vtables; PS4 stub(ret)		net-event.cpp	0x88		430120 430140 42ff4c 42fe78	
+modes	NetEventNpcFightAlign::Write (type 56, slot 3)	0x46d1ac	0x61d4c0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x6c		4302d8 42fe78 42ff4c	
+players	NetEventSimpleSnapshot::Write (type 54, slot 3)	0x46d218	0x61e290	stub	evtable: same type/slot in the factory vtables; PS4 stub(ret)		net-event.cpp	0x7c		4302d8 430140 42ff4c 42fe78	
+players	NetEventNpcDealDamage::Write (type 44, slot 3)	0x46d294	0x61fb10	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x94		42fe78 430134 42ff4c	
+players	NetEventBreakableAttackExplosion::Write (type 40, slot 3)	0x46d328	0x6209c0	intact-alive	str:(m_objectDamage & (-1 << kBreakableDamag		net-event.cpp	0x188		42fe78 430140 42ff78 430120 42ff4c 841908	
+weapons	NetEventBreakableAttackProjectile::Write (type 39, slot 3)	0x46d4b0	0x621670	intact-alive	str:(m_numDamagePoints & (-1 << 3)) == 0		net-event.cpp	0x360		42fe78 430140 4302d8 841908 42ff4c	
+players	NetEventCarryObjectStartMove::Write (type 32, slot 3)	0x46d810	0x623290	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x94		42fe78 430140 4302d8 42ff4c	
+players	NetEventCarryObjectClientStartMove::Write (type 33, slot 3)	0x46d8a4	0x622940	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x94		42fe78 430140 4302d8 42ff4c	
+players	NetEventRespawnPlayer::Write (type 29, slot 3)	0x46d938	0x623df0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x8c		42fe78 430140 430170 42ff4c	
+weapons	NetEventAddDroppedPickup::Write (type 25, slot 3)	0x46d9c4	0x6248c0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0xd8		42fe78 430140 4302d8 430170 42ff4c	
+weapons	NetEventAddDroppedPickupClient::Write (type 24, slot 3)	0x46da9c	0x6251a0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0xd8		42fe78 430140 4302d8 430170 42ff4c	
+players	NetEventAttackCloseCombat::Write (type 15, slot 3)	0x46db74	0x626a30	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0xc8		42fe78 42ff78 430140 430120 42ff4c	
+modes	NetEventEndWave::Read (type 74, slot 2)	0x46dc3c	0x61b190	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x5c		42f9c0 42fcbc	
+weapons	NetEventTurretSnapshot::Read (type 67, slot 2)	0x46dc98	0x61bee0	stub	evtable: same type/slot in the factory vtables; PS4 stub(ret)		net-event.cpp	0x9c		42fc80 42fcf8 42f9c0 42f8d8	
+modes	NetEventNpcFightAlign::Read (type 56, slot 2)	0x46dd34	0x61d620	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x74		4306e8 42f8d8 42f9c0	
+players	NetEventSimpleSnapshot::Read (type 54, slot 2)	0x46dda8	0x61e2a0	stub	evtable: same type/slot in the factory vtables; PS4 stub(ret)		net-event.cpp	0x88		4306e8 42fcf8 42f9c0 42f8d8	
+players	NetEventNpcDealDamage::Read (type 44, slot 2)	0x46de30	0x61fe00	stub	evtable: same type/slot in the factory vtables; PS4 stub(ret)		net-event.cpp	0xa4		42f8d8 42fcbc 42f9c0	
+players	NetEventBreakableAttackExplosion::Read (type 40, slot 2)	0x46ded4	0x620e50	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0xe4		42f8d8 42fcf8 42fa70 42fc80 42f9c0	
+weapons	NetEventBreakableAttackProjectile::Read (type 39, slot 2)	0x46dfb8	0x621c20	intact-alive	vtable		net-event.cpp	0x148		42f8d8 42fcf8 4306e8 42f9c0	
+players	NetEventCarryObjectStartMove::Read (type 32, slot 2)	0x46e100	0x623500	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x9c		42f8d8 42fcf8 4306e8 42f9c0	
+players	NetEventCarryObjectClientStartMove::Read (type 33, slot 2)	0x46e19c	0x622bb0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x9c		42f8d8 42fcf8 4306e8 42f9c0	
+players	NetEventRespawnPlayer::Read (type 29, slot 2)	0x46e238	0x6240e0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0xa0		42f8d8 42fcf8 42fe24 42f9c0	
+weapons	NetEventAddDroppedPickup::Read (type 25, slot 2)	0x46e2d8	0x624cc0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0xf0		42f8d8 42fcf8 4306e8 42fe24 42f9c0	
+weapons	NetEventAddDroppedPickupClient::Read (type 24, slot 2)	0x46e3c8	0x6255a0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0xf0		42f8d8 42fcf8 4306e8 42fe24 42f9c0	
+players	NetEventAttackCloseCombat::Read (type 15, slot 2)	0x46e4b8	0x626dc0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0xe0		42f8d8 42fa70 42fcf8 42fc80 42f9c0	
+players	NetEventBreakableCollapse::Write (type 42, slot 3)	0x46e598	0x6201f0	intact-alive	str:(m_attackInfo.m_damageInfo.m_numPoints &		net-event.cpp	0x238		430140 42fe78 42ff78 4301c0 841908	
+players	NetEventBreakableBreakPiece::Write (type 41, slot 3)	0x46e7d0	0x62ee50	intact-alive	str:(m_iPiece & (-1 << kBreakablePieceBits))		net-event.cpp	0xfc		430140 42fe78 430120 4301c0 841908	
+weapons	NetEventAttackProjectile::Write (type 13, slot 3)	0x46e8cc	0x628670	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x168		42fe78 430140 430120 42ff78 4301c0 42ff4c 430170	
+weapons	NetEventEmitRocket::Write (type 11, slot 3)	0x46ea34	0x63ad40	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0xfc		430170 42fe78 430140 430120 42ff78 4301c0	
+players	NetEventBreakableCollapse::Read (type 42, slot 2)	0x46eb30	0x620570	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0xf8		42fcf8 42f8d8 42fa70 4305a4	
+players	NetEventBreakableBreakPiece::Read (type 41, slot 2)	0x46ec28	0x62f070	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x9c		42fcf8 42f8d8 42fc80 4305a4	
+weapons	NetEventAttackProjectile::Read (type 13, slot 2)	0x46ecc4	0x628be0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x188		42f8d8 42fcf8 42fc80 42fa70 4305a4 42f9c0 42fe24	
+weapons	NetEventEmitRocket::Read (type 11, slot 2)	0x46ee4c	0x63b050	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x10c		42fe24 42f8d8 42fcf8 42fc80 42fa70 4305a4	
 players	prints "NetEventAssignTeam - %s - team %i, model %i, spawn"	0x46ef58	-	unresolved	no static pairing (log-only on PS3)		net-event.cpp	0x3c8	48e5b8	4919b0 9238f8 923f14	e60bcc f22665
-players	NetEventMessage::Read (type 46, slot 3)	0x46f320	0x62dd40	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x78		430140 430048	
-players	NetEventPlayerHealth::Read (type 68, slot 3)	0x46f398	0x61bb00	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x6c		42fe78 430148 42ff4c	
-players	NetEventStartNetTask::Read (type 66, slot 3)	0x46f404	0x61c160	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0xe4		430148 430170 430168 42ff4c 42fe78	
-modes	NetEventTerritoryOwn::Read (type 49, slot 3)	0x46f4e8	0x61f020	stub	evtable: same type/slot in the factory vtables; PS4 stub(ret)		net-event.cpp	0x150		430140 430148 42fe78 49e4a0 430120	
-players	NetEventCharacterMove::Read (type 12, slot 3)	0x46f638	0x6387f0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x458		42ff4c 42fe78 430048 430170 4a0bcc 4301c0 4302d8 430148 +3	
-players	NetEventPlayerHealth::Write (type 68, slot 2)	0x46fa90	0x61bce0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x74		42f8d8 42fd34 42f9c0	
-players	NetEventStartNetTask::Write (type 66, slot 2)	0x46fb04	0x61c700	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x10c		42fd34 42fe24 42fde8 42f9c0 42f8d8	
-modes	NetEventTerritoryOwn::Write (type 49, slot 2)	0x46fc10	0x61f030	stub	evtable: same type/slot in the factory vtables; PS4 stub(ret)		net-event.cpp	0x170		42fcf8 42fd34 42f8d8 49e4a0 42fc80	
-players	NetEventCharacterMove::Write (type 12, slot 2)	0x46fd80	0x6398a0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x4f0		42f9c0 42f8d8 42fbb0 42fe24 4a0bcc 4305a4 4306e8 42fd34 +3	
+players	NetEventMessage::Write (type 46, slot 3)	0x46f320	0x62dd40	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x78		430140 430048	
+players	NetEventPlayerHealth::Write (type 68, slot 3)	0x46f398	0x61bb00	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x6c		42fe78 430148 42ff4c	
+players	NetEventStartNetTask::Write (type 66, slot 3)	0x46f404	0x61c160	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0xe4		430148 430170 430168 42ff4c 42fe78	
+modes	NetEventTerritoryOwn::Write (type 49, slot 3)	0x46f4e8	0x61f020	stub	evtable: same type/slot in the factory vtables; PS4 stub(ret)		net-event.cpp	0x150		430140 430148 42fe78 49e4a0 430120	
+players	NetEventCharacterMove::Write (type 12, slot 3)	0x46f638	0x6387f0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x458		42ff4c 42fe78 430048 430170 4a0bcc 4301c0 4302d8 430148 +3	
+players	NetEventPlayerHealth::Read (type 68, slot 2)	0x46fa90	0x61bce0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x74		42f8d8 42fd34 42f9c0	
+players	NetEventStartNetTask::Read (type 66, slot 2)	0x46fb04	0x61c700	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x10c		42fd34 42fe24 42fde8 42f9c0 42f8d8	
+modes	NetEventTerritoryOwn::Read (type 49, slot 2)	0x46fc10	0x61f030	stub	evtable: same type/slot in the factory vtables; PS4 stub(ret)		net-event.cpp	0x170		42fcf8 42fd34 42f8d8 49e4a0 42fc80	
+players	NetEventCharacterMove::Read (type 12, slot 2)	0x46fd80	0x6398a0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x4f0		42f9c0 42f8d8 42fbb0 42fe24 4a0bcc 4305a4 4306e8 42fd34 +3	
 weapons	build/send NetEventGrenadeStartFuse	0x470270	0x60d620	intact-alive	evsender: only function storing the NetEventGrenadeStartFuse vtable on each side		net-event.cpp	0x1d0	48af30	ebee0 4919b0 4c7bf8	
 players	-	0x470440	-	unresolved	no static pairing		net-event.cpp	0xc8	477100	ebc34 38ab18	
-players	NetEventPlayerInfo::Read (type 45, slot 3)	0x470508	0x62e260	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0xd8		42fe78 430168 43015c 430140	
-players	NetEventAssignTeam::Read (type 18, slot 3)	0x4705e0	0x632340	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x160		42fe78 430134 430140 430048 43015c 430168	
-players	NetEventPlayerInfo::Write (type 45, slot 2)	0x470740	0x62e780	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0xf0		42f8d8 42fde8 42fdac 42fcf8	
-players	NetEventAssignTeam::Write (type 18, slot 2)	0x470830	0x6328a0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x198		42f8d8 42fcbc 42fcf8 42fbb0 42fdac 42fde8	
+players	NetEventPlayerInfo::Write (type 45, slot 3)	0x470508	0x62e260	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0xd8		42fe78 430168 43015c 430140	
+players	NetEventAssignTeam::Write (type 18, slot 3)	0x4705e0	0x632340	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x160		42fe78 430134 430140 430048 43015c 430168	
+players	NetEventPlayerInfo::Read (type 45, slot 2)	0x470740	0x62e780	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0xf0		42f8d8 42fde8 42fdac 42fcf8	
+players	NetEventAssignTeam::Read (type 18, slot 2)	0x470830	0x6328a0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x198		42f8d8 42fcbc 42fcf8 42fbb0 42fdac 42fde8	
 players	NetEventCheating::Apply (type 28, slot 4)	0x4709c8	0x62fcb0	intact-alive	sid:e45fc8a8		net-event.cpp	0xdc		4918e8 4c8004 9294c4 4c84f8 89fd38 8a0468	
 modes	NetEventKillEntity::Apply (type 76, slot 4)	0x470aa4	0x61afa0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x50		70cd08 70e288	
 players	-	0x470af4	0x62f670	inlined	inlined (features 100% inside); host alive		net-event.cpp	0x118	477f40	86d660 86bc6c 455fb8 870bc8 870710 8a1d84	
 players	build/send NetEventPlayVox	0x470c0c	0x615740	intact-alive	str:NetEventPlayVox - invalid speaker type 		net-event.cpp	0x1a4	4884f4	4919d4 8417e8 841908	
 players	build/send NetEventBreakableCollapse	0x470db0	0x614010	intact-alive	evsender: only function storing the NetEventBreakableCollapse vtable on each side		net-event.cpp	0x130	48b4e0	7eda0 468d70	
 players	NetEventMessage::Apply (type 46, slot 4)	0x470ee0	0x62dc50	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x40		4c3258	
-players	NetEventMessage::Write (type 46, slot 2)	0x470f20	0x62de90	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0xa8		42fcf8 911150 42fbb0	
+players	NetEventMessage::Read (type 46, slot 2)	0x470f20	0x62de90	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0xa8		42fcf8 911150 42fbb0	
 players	NetEventEvent::Apply (type 47, slot 4)	0x470fc8	0x61fa10	partial	evtable: same type/slot in the factory vtables; Write/Read of this event are stubs on PS4		net-event.cpp	0x6c		70cd08 82278	
 players	build/send NetEventEvent	0x471034	0x614c40	intact-alive	evsender: only function storing the NetEventEvent vtable on each side		net-event.cpp	0x18c	4892fc	82400	
 players	NetEventCompleteTask::Apply (type 65, slot 4)	0x4711c0	0x62d820	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x34		49f510	
@@ -554,9 +554,9 @@ players	-	0x477d28	-	unresolved	no static pairing (small; probably inlined)		net
 modes	NetEventDrawSniperLaser::Apply (type 36, slot 4)	0x477d88	0x622090	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x1b8		4935d0	
 modes	NetEventSetJuggernaut::Apply	0x477f40	0x62f250	intact-alive	sid:dd2d35e7		net-event.cpp	0x690		4918e8 4c84f8 4c8004 9294c4 89fd38 8a0468 4919b0 9238f8 +5	e60bcc f22665
 players	NetEventPlayVox::Apply (type 53, slot 4)	0x4785d0	0x61e2b0	partial	evtable: same type/slot in the factory vtables; Write/Read of this event are stubs on PS4		net-event.cpp	0x3f8		4918e8 9238f8 923f14 4935d0 81fec 849608	e60bcc f22665
-players	NetEventEvent::Write (type 47, slot 2)	0x4789c8	0x61fa60	stub	evtable: same type/slot in the factory vtables; PS4 stub(ret)		net-event.cpp	0x400		42fcf8 70cd08 42f8d8 841908 9238f8 923f14 82400 849608	e60bcc f22665
+players	NetEventEvent::Read (type 47, slot 2)	0x4789c8	0x61fa60	stub	evtable: same type/slot in the factory vtables; PS4 stub(ret)		net-event.cpp	0x400		42fcf8 70cd08 42f8d8 841908 9238f8 923f14 82400 849608	e60bcc f22665
 weapons	NetEventEmitRocket::Apply (type 11, slot 4)	0x478dc8	0x63a7c0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x4e8		46c558 29f58 29580 29e7c 4918e8 9238f8 923f14 7069c8 +5	e60bcc f22668 f7934c
-players	NetEventEvent::Read (type 47, slot 3)	0x4792b0	0x61fa50	stub	evtable: same type/slot in the factory vtables; PS4 stub(ret)		net-event.cpp	0x2b8		430140 42fe78 81edc 841908 9238f8 923f14 849608	e60bcc f22665
+players	NetEventEvent::Write (type 47, slot 3)	0x4792b0	0x61fa50	stub	evtable: same type/slot in the factory vtables; PS4 stub(ret)		net-event.cpp	0x2b8		430140 42fe78 81edc 841908 9238f8 923f14 849608	e60bcc f22665
 players	NetEventBreakableBreakPiece::Apply (type 41, slot 4)	0x479568	0x62ebe0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x310		70d0d8 7f414 81fec 9238f8 923f14	e60bcc f22665
 players	NetEventPlayerDeath::Apply (type 64, slot 4)	0x479878	0x61cb50	intact-alive	str:m_animArtGroupIndex < NetSnapshot::kNumA		net-event.cpp	0x318		4918e8 1cb5c 820c0 9238f8 923f14 841908	e60bcc f22665
 players	NetEventShieldDamage::Apply (type 78, slot 4)	0x479b90	0x619f50	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x2a8		4918e8 9238f8 923f14 494ea8 4935d0 231288 232078 e3ca0 +2	e60bcc f22667
@@ -583,13 +583,13 @@ players	-	0x47e450	-	unresolved	no static pairing		net-event.cpp	0xf0		4691c0	f1
 players	-	0x47e540	-	unresolved	no static pairing (small; probably inlined)		net-event.cpp	0x10			
 players	CreateNetEventByType (factory, 80 types)	0x47e550	0x6180f0	intact-alive	manual: same switch over 0..79 (cmp 0x4f) storing one vtable per type; "CreateNetEventByType" assert	factory and type table identical on PS4	net-event.cpp	0x1c6c	436220 437fb0 467e88	841908 910c9c 494ea8 4919d4 46957c 4694e0 469314 469244 +1	f1f56c f1f8b4 f1f8b8 f1f8bc f1f8c0
 players	build/send NetEventKillInfoClient	0x4801bc	-	unresolved	no static pairing		net-event.cpp	0x1cc	577528	6b2ba4 910c9c 4729f0 494ea8 493ca8	
-players	NetEventAttackExplosion::Read (type 14, slot 3)	0x480388	0x6274f0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x128		42fe78 430140 42ff78 42ff4c	
-weapons	NetEventGrenadeExplode::Read (type 9, slot 3)	0x4804b0	0x62a020	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x1e8		430170 42fe78 430140 42ff78 42ff4c	
+players	NetEventAttackExplosion::Write (type 14, slot 3)	0x480388	0x6274f0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x128		42fe78 430140 42ff78 42ff4c	
+weapons	NetEventGrenadeExplode::Write (type 9, slot 3)	0x4804b0	0x62a020	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x1e8		430170 42fe78 430140 42ff78 42ff4c	
 players	FillAnimCmdBitStream (snapshot animation stream writer)	0x480698	0x634970	intact-alive	str:(animIndex & (-1<<NetSnapshot::kAnimIdBi		net-event.cpp	0x1e18	4824b0 484cc8	9168f0 ebc08 2c6c18 42f8bc 29df8 4302d8 ac9730 473ce8 +17	e60bcc ee01a0 f1d170 f2266a
 players	prints "m_pConfiguration"	0x4824b0	-	unresolved	no static pairing (log-only on PS3)		net-event.cpp	0x268	48a908	44690 42f868 42f880 480698 8531c 841908	e60bcc
 modes	NetEventStartNpcFight::Apply (type 55, slot 4)	0x482718	0x61d6d0	partial	str:pStateScript; Write/Read of this event are stubs on PS4		net-event.cpp	0x834		4918e8 4935d0 491720 4919d4 461200 29df8 ac663c 70cd08 +13	e60bcc f22665
-players	NetEventAttackExplosion::Write (type 14, slot 2)	0x482f4c	0x6279d0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x144		42f8d8 42fcf8 42fa70 42f9c0	
-weapons	NetEventGrenadeExplode::Write (type 9, slot 2)	0x483090	0x62a780	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x250		42fe24 42f8d8 42fcf8 42fa70 42f9c0	
+players	NetEventAttackExplosion::Read (type 14, slot 2)	0x482f4c	0x6279d0	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x144		42f8d8 42fcf8 42fa70 42f9c0	
+weapons	NetEventGrenadeExplode::Read (type 9, slot 2)	0x483090	0x62a780	intact-alive	evtable: same type/slot in the factory vtables		net-event.cpp	0x250		42fe24 42f8d8 42fcf8 42fa70 42f9c0	
 weapons	build/send NetEventAttackProjectile	0x4832e0	0x60f970	intact-alive	evsender: only function storing the NetEventAttackProjectile vtable on each side		net-event.cpp	0x330	48eb80	4919d4 491698 29df8 ebee0 38fb20 3cde0c 4918e8	
 players	build/send NetEventPlayerDeath	0x483610	0x616580	intact-alive	evsender: only function storing the NetEventPlayerDeath vtable on each side		net-event.cpp	0x280	4880b8	473ce8 841908	
 modes	build/send NetEventStartNpcFight	0x483890	0x615c60	intact-alive	evsender: only function storing the NetEventStartNpcFight vtable on each side		net-event.cpp	0x5d0	488278	ebc08 2c4ea0 2dabd0 2dd118 29df8 841908 491698 9238f8 +2	e60bcc f22665
