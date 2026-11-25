@@ -4,7 +4,8 @@
 // Every scenario runs in a child process of its own (the modules keep per-process state that only an install can
 // set, and UNCHARTED_U2MP_MM_MIN is read once per process). In the child the old code runs, then the image is
 // cleared and the new code runs the same steps; both records (guest calls, session / online calls, log lines,
-// return values, state dumps) and the final images must be equal.
+// return values, state dumps) and the final images must be equal. frontend3.cpp's documented changes since the rewrite
+// are mapped onto the old record first (expected_new); paths they changed run as new-only scenarios (N) with EXPECTs.
 //
 //   test_frontend.exe                 all scenarios (one child each), summary at the end
 //   test_frontend.exe <name> [-v]     one scenario in this process (-v prints both records)
@@ -268,6 +269,28 @@ void tips_table(int32_t count) {
     dc[0xb25ab071] = TIPS;
 }
 
+// What the scenario's script set up at each step it drives (frame, message, event, callback), taken in the old run:
+// the answers the stand-ins give at that step and the game state the new code's added reads see. Only the mapping of
+// the documented changes (expected_new) reads it; the records stay as they are.
+struct Step {
+    size_t at;   // index of the step's first record line
+    char kind;   // 'f' frame, 'm' message, 'o' other
+    hx::fe::State st;
+    int32_t sm, phase, err;
+    int16_t ngm;
+    bool table;               // the *net-games* table is found
+    int32_t count;            // its record count and records pointer
+    uint64_t records;
+    int32_t c0, c1;           // vote counts
+};
+std::vector<Step> steps;
+void note(char kind) {
+    const bool table = dc.count(0x3b9a067d) != 0;
+    steps.push_back({calls.size(), kind, s, get<int32_t>(NETSM), get<int32_t>(NETINFO + 0x34), get<uint8_t>(NETINFO + 0x1c),
+                     get<int16_t>(NGM + 0x1ca0), table, table ? get<int32_t>(GAMES) : 0, table ? get<uint64_t>(GAMES + 8) : 0,
+                     get<int32_t>(VOTE + 0x10), get<int32_t>(VOTE + 0x14)});
+}
+
 void dump(const char *what = "") {
     rec("state%s: sm %d phase %d deadline %u err %u byme %u top 0x%08x(%d) ngm %d vote %u/%u/%u/%u mine %d games %d,%d "
         "counts %d,%d tip %d",
@@ -278,6 +301,7 @@ void dump(const char *what = "") {
 }
 
 void page_ev(uint32_t type, uint8_t held = 0xee) {
+    if (type != 6) note('o');   // frame() notes its own
     put<uint32_t>(EV, type);
     put<uint8_t>(EV + 0x10, held);
     reinterpret_cast<void(U2MP_GUEST *)(void *)>(mem + 0x64e910)(reinterpret_cast<void *>(addr(EV)));
@@ -285,27 +309,32 @@ void page_ev(uint32_t type, uint8_t held = 0xee) {
 }
 void frame(uint32_t t) {
     s.clock = t;
+    note('f');
     rec("-- frame %u", t);
     page_ev(6);
     dump();
 }
 void vote_cb(uint32_t row, bool null_arg = false) {
+    note('o');
     put<uint32_t>(ARG + 4, row);
     reinterpret_cast<void(U2MP_GUEST *)(void *)>(mem + 0x64e8e0)(null_arg ? nullptr : reinterpret_cast<void *>(addr(ARG)));
     rec("vote row %u%s", row, null_arg ? " (NULL arg)" : "");
     dump();
 }
 void msg(const Api &a, uint8_t from, std::vector<uint8_t> d) {
+    note('m');
     rec("-- message from %u, %zu bytes, type 0x%02x", from, d.size(), d.empty() ? 0 : d[0]);
     static const uint8_t none[1] = {0xee};
     a.on_message(from, d.empty() ? none : d.data(), d.size());
     dump();
 }
 void leader_back(uint64_t at) {
+    note('o');
     reinterpret_cast<void(U2MP_GUEST *)(void *, void *, void *)>(mem + at)(nullptr, nullptr, nullptr);
     rec("leader back 0x%llx called", (unsigned long long)at);
 }
 bool call_yes() {   // the "Yes" of "Leave Matchmaking?" as the game calls it: through the callback table
+    note('o');
     const uint32_t count = get<uint32_t>(MENU + 0x18ec);
     for (uint32_t i = 0; i < count && i < 128; i++) {
         const uint64_t e = MENU + 0x18f0 + 0x18 * uint64_t(i);
@@ -320,6 +349,7 @@ bool call_yes() {   // the "Yes" of "Leave Matchmaking?" as the game calls it: t
 }
 uint64_t reg_target(uint64_t site) { return uint64_t(int64_t(site + 7) + get<int32_t>(site + 3)); }
 void call_reg(uint64_t site) {   // the game's registry calling the done callback registered at `site`
+    note('o');
     const uint64_t t = reg_target(site);
     if (t < kImageSize) {
         rec("registration 0x%llx still loads img+0x%llx, not called", (unsigned long long)site, (unsigned long long)t);
@@ -353,20 +383,181 @@ void normalize() {
     }
 }
 
+// ---- documented changes since the rewrite, mapped onto the old record ---------------------------------------------
+// frontend3.cpp changed after the clean-room rewrite (04b7322, where all 255 scenarios matched): before the public
+// squash (the gather / minimum rules of issue 104, the leave clearing the error byte) and in 9fd6134..HEAD (parity D
+// d582ac6, F 5b9c6de + f334394, J3 dc349a9; specs parity-d-flow1.md, parity-f-party-mm.md section 7,
+// parity-j-voice-medals.md J3). Where a change only adds calls or reads, the old record gets exactly those lines
+// (with the values the scripted stand-ins answer at that step) before the comparison; everything else is compared as
+// it is. Paths whose behaviour changed are checked by the new-only scenarios (N, below) against the specs.
+
+int forced_min() {   // UNCHARTED_U2MP_MM_MIN as matchmaking_min_players reads it
+    const char *v = std::getenv("UNCHARTED_U2MP_MM_MIN");
+    const int n = v ? std::atoi(v) : 0;
+    return n >= 1 && n <= 10 ? n : 0;
+}
+// The owner's minimum (issue 104, parity-f-party-mm.md section 7): 2, a co-op-only playlist 1, the test override first.
+int min_players(const hx::fe::State &st) {
+    if (const int f = forced_min()) return f;
+    if (!st.playlist || st.types.empty()) return 2;
+    bool coop = true;
+    for (const int32_t t : st.types) coop = coop && (t == 4 || t == 8 || t == 9 || t == 12);
+    return coop ? 1 : 2;
+}
+bool starts(const std::string &l, const char *p) { return l.rfind(p, 0) == 0; }
+std::string fmt(const char *f, long long v) {
+    char b[96];
+    std::snprintf(b, sizeof b, f, v);
+    return b;
+}
+
+// Maps the old record (with the old run's steps) to what the new code records for the documented changes. Returns
+// true when the old image's error byte must read 0 at the end (the last leave cleared it).
+bool expected_new(std::vector<std::string> &r, const std::vector<Step> &st_list) {
+    std::vector<std::string> out;
+    size_t k = 0;
+    const Step *step = nullptr;
+    bool update_seen = false;   // this frame's update() is_host line passed
+    bool dropout = false;       // this frame: a member's own leave (F9)
+    int err_zero = 0;           // a leave cleared the error byte (pre-squash leave()): dumps show 0
+    int last_err = -1;          // the old record's error byte in its last dump
+    for (size_t i = 0; i < r.size(); i++) {
+        while (k < st_list.size() && st_list[k].at <= i) {
+            step = &st_list[k++];
+            update_seen = false;
+            dropout = false;
+            if (last_err >= 0 && step->err != last_err) err_zero = 0;   // the script wrote the byte again
+        }
+        std::string l = r[i];
+        const hx::fe::State *st = step ? &step->st : nullptr;
+        if (starts(l, "state")) {   // a dump: remember the old error byte, show the cleared one
+            const size_t e = l.find(" err ");
+            if (e != std::string::npos) {
+                const size_t v = e + 5, end = l.find(' ', v);
+                last_err = std::atoi(l.c_str() + v);
+                if (err_zero) l = l.substr(0, v) + "0" + l.substr(end);
+            }
+        }
+        // pre-squash gather rule + F5 (5b9c6de, "the host searches first"): begin() reads the member count and
+        // whether matchmaking is online
+        if (st && starts(l, "log matchmaking: started (") && st->rec_queries) {
+            out.push_back(fmt("member_count -> %lld", st->members));
+            out.push_back(fmt("mm_online -> %lld", st->mm_online));
+        }
+        // J3 / F8 (dc349a9, 5b9c6de): open_vote unmutes the strangers before the vote's level preload
+        if (starts(l, "log matchmaking: vote between net games ")) {
+            size_t j = out.size();
+            while (j > 0 && (starts(out[j - 1], "member_count -> ") || starts(out[j - 1], "send slot -1 [12"))) j--;
+            while (j > 0 && (starts(out[j - 1], "log level preload (") || starts(out[j - 1], "LevelPreload "))) j--;
+            out.insert(out.begin() + long(j), "voice::unmute_strangers");
+        }
+        // F9 (5b9c6de): a member's own leave also leaves its party (LAN too)
+        if (dropout && l == "log matchmaking: leaving") l = "log matchmaking: leaving and leaving the party";
+        if (dropout && l == "mm_leave") l = "session::leave_party";
+        // pre-squash leave(): the error byte is cleared
+        if (starts(l, "log matchmaking: leaving")) err_zero = 1;
+        // F6 (5b9c6de): 0x18 from the host (slot 0) now tells a member it was removed to balance the teams (before:
+        // an unknown message, ignored)
+        if (step && step->kind == 'm' && !st->host && l == "is_host -> 0" && i > 0 && starts(r[i - 1], "-- message from 0, ") &&
+            r[i - 1].size() > 4 && r[i - 1].compare(r[i - 1].size() - 4, 4, "0x18") == 0) {
+            out.push_back(l);
+            out.push_back("log matchmaking: removed to balance the teams");
+            out.push_back("mm_host_gone 'removed to balance the teams' bad 1");
+            continue;
+        }
+        // F9 (5b9c6de): with the leave answered, update() asks is_host itself before leave() asks it again
+        const bool upd = step && step->kind == 'f' && !update_seen && starts(l, "is_host -> ");
+        if (upd) {
+            update_seen = true;
+            if (i + 1 < r.size() && starts(r[i + 1], "send slot ") && r[i + 1].find(" [15] ") != std::string::npos) {
+                out.push_back(l);
+                dropout = !st->host;
+            }
+        }
+        out.push_back(l);
+        // parity D (d582ac6): the leader's back-out also shows the party room again
+        if (l == "send slot -1 [16] except -1") out.push_back("hide_for_start 0");
+        if (!upd || !st->host || st->mm_online || (i + 1 < r.size() && starts(r[i + 1], "send slot "))) continue;
+        // the host's per-frame step after update()'s is_host (and after begin() when it runs in this frame)
+        size_t n = i + 1;
+        const bool begun = n < r.size() && starts(r[n], "log matchmaking: started (");   // phase 1 from here on
+        if (begun) {
+            if (st->rec_queries) {
+                out.push_back(fmt("member_count -> %lld", st->members));
+                out.push_back(fmt("mm_online -> %lld", st->mm_online));
+            }
+            out.push_back(r[n]);
+            i = n++;
+        }
+        if (step->sm == 16) {
+            // issue 104 (pre-squash): the LAN gather reads the member count and the minimum every frame (old: the
+            // count only for its ready check, which the new code answers from the same read)
+            if (n < r.size() && starts(r[n], "member_count -> ")) i = n;
+            if (st->rec_queries) out.push_back(fmt("member_count -> %lld", st->members));
+            if (!forced_min()) out.push_back(fmt("playlist_game_types -> %lld", st->playlist));
+            if (st->members < min_players(*st) && st->rec_queries) out.push_back("mm_online -> 0");
+        } else if (step->sm == 20 && step->phase == 2 && !begun) {
+            // F7 (5b9c6de, gate f334394): the vote may end early on a majority while no net game is chosen
+            out.push_back("DcLookup 0x3b9a067d");
+            const bool chosen = step->table && step->records && step->ngm >= 0 && step->ngm < step->count;
+            if (!chosen && st->rec_queries) out.push_back(fmt("member_count -> %lld", st->members));
+        }
+    }
+    r = out;
+    return err_zero != 0;
+}
+
 // ---- the scenarios ----------------------------------------------------------------------------------------------
 struct Scen {
     std::string name;
     std::function<void(const Api &)> body;
     unsigned seed;
+    bool new_only = false;
 };
 std::vector<Scen> all;
 void S(const std::string &name, std::function<void(const Api &)> body, unsigned seed = 4242) { all.push_back({name, body, seed}); }
+// A new-only scenario: the new code alone, checked with EXPECT against the spec it implements.
+void N(const std::string &name, std::function<void(const Api &)> body, unsigned seed = 4242) {
+    all.push_back({name, body, seed, true});
+}
+int expect_failures = 0;
+#define EXPECT(c)                                                             \
+    do {                                                                      \
+        if (!(c)) {                                                           \
+            std::printf("  EXPECT failed (line %d): %s\n", __LINE__, #c);     \
+            ++expect_failures;                                                \
+        }                                                                     \
+    } while (0)
+int lines(const std::string &l) {   // how often the new record holds this line
+    int n = 0;
+    for (const auto &c : calls) n += c == l;
+    return n;
+}
+int lines_from(const std::string &p) {   // how many record lines start with p
+    int n = 0;
+    for (const auto &c : calls) n += starts(c, p.c_str());
+    return n;
+}
+// the frames ("-- frame T") of the record lines that start with p, in order (-1: before the first frame)
+std::vector<int64_t> frames_of(const std::string &p) {
+    std::vector<int64_t> v;
+    int64_t f = -1;
+    for (const auto &c : calls) {
+        if (starts(c, "-- frame ")) f = std::strtoll(c.c_str() + 9, nullptr, 10);
+        else if (starts(c, p.c_str())) v.push_back(f);
+    }
+    return v;
+}
 
 void setenv_mm_min(const char *v) { _putenv_s("UNCHARTED_U2MP_MM_MIN", v ? v : ""); }
+// The owner's minimum of 2 (issue 104) keeps a LAN host alone from voting; the scenarios written for a vote with
+// one player set the documented test override (frontend3.cpp matchmaking_min_players) so both versions vote.
+void one_player_vote() { setenv_mm_min("1"); }
 
 // host LAN: leader start at t0, first frame (19 -> 16)
 void host_lan_start(const Api &a, uint32_t t0) {
     s.clock = t0;
+    note('o');
     a.leader_start();
     dump("after leader_start");
     frame(t0);
@@ -877,6 +1068,7 @@ void register_all() {
         frame(4000);
     });
     S("mm_lan_gather_one_member", [](const Api &a) {
+        one_player_vote();
         std_setup(a, true, 1);
         host_lan_start(a, 1000);
         frame(1899);
@@ -905,15 +1097,20 @@ void register_all() {
         const char *name;
         int own;                                 // row of the host's own vote, -1 none
         std::vector<std::pair<int, int>> msgs;   // (slot, choice)
+        // The votes give a majority of the 3 players. Since F7 (5b9c6de, gate f334394) that ends the vote at once
+        // while no net game is chosen; these rounds run with net game 0 chosen, so both versions wait for the
+        // deadline. The early end itself: the new-only scenarios mm_f7_* below.
+        bool majority;
     };
-    for (const Votes &v : std::vector<Votes>{{"own1_m0_m0", 7, {{1, 0}, {2, 0}}},
-                                             {"own0_m1_m1", 0, {{1, 1}, {2, 1}}},
-                                             {"tie", 0, {{1, 1}}},
-                                             {"none", -1, {}},
-                                             {"members_only", -1, {{1, 0}, {2, 1}, {3, 1}}}}) {
+    for (const Votes &v : std::vector<Votes>{{"own1_m0_m0", 7, {{1, 0}, {2, 0}}, true},
+                                             {"own0_m1_m1", 0, {{1, 1}, {2, 1}}, true},
+                                             {"tie", 0, {{1, 1}}, false},
+                                             {"none", -1, {}, false},
+                                             {"members_only", -1, {{1, 0}, {2, 1}, {3, 1}}, true}}) {
         for (unsigned seed : {1u, 2u, 7u}) {
             S(std::string("mm_lan_round_") + v.name + "_seed" + std::to_string(seed), [v](const Api &a) {
                 std_setup(a, true, 3);
+                if (v.majority) put<int16_t>(NGM + 0x1ca0, 0);
                 s.create_clears_phase = true;
                 games_table({1, 2, 1, 2, 3});
                 host_lan_start(a, 5000);
@@ -1013,6 +1210,7 @@ void register_all() {
     for (const Pick &p : picks) {
         for (unsigned seed : {1u, 99u, 12345u}) {
             S(std::string("mm_pick_") + p.name + "_seed" + std::to_string(seed), [p](const Api &a) {
+                one_player_vote();
                 std_setup(a, true, 1);
                 p.prep();
                 host_to_vote(a, 300);
@@ -1196,23 +1394,33 @@ void register_all() {
         put<uint8_t>(VOTE + 1, 1);
         msg(a, 2, {0x13, 1});
     });
-    S("mm_host_leave_lan", [](const Api &a) {
+    // F9 (5b9c6de, parity-f-party-mm.md section 7): "The host only logs a member's kMsgLeave now" (the member left
+    // its party by itself); before, the LAN host ended matchmaking for everybody. New only.
+    N("mm_host_leave_lan", [](const Api &a) {
         std_setup(a, true, 3);
         push_page(0x1);
         host_lan_start(a, 10);
         push_page(PG_BOX);
         msg(a, 2, {0x15});
+        EXPECT(lines("log matchmaking: a player left matchmaking (slot 2)") == 1);
+        EXPECT(lines_from("send slot -1 [15]") == 0 && lines("mm_leave") == 0 && lines_from("log matchmaking: leaving") == 0);
+        EXPECT(top_id() == PG_BOX);   // the box stays: nobody leaves
         frame(11);
+        EXPECT(get<int32_t>(NETSM) == 16 && get<int32_t>(NETINFO + 0x34) == 1);   // still gathering
+        EXPECT(lines_from("log matchmaking: leaving") == 0);
     });
     S("mm_host_leave_ignored", [](const Api &a) {
         std_setup(a, true, 3);
         push_page(0x1);
         msg(a, 2, {0x15});
     });
-    S("mm_host_leave_not_running_page_top", [](const Api &a) {
+    N("mm_host_leave_not_running_page_top", [](const Api &a) {   // F9 as mm_host_leave_lan
         std_setup(a, true, 3);
         push_page(PG_MM);
         msg(a, 2, {0x15});
+        EXPECT(lines("log matchmaking: a player left matchmaking (slot 2)") == 1);
+        EXPECT(lines_from("send slot ") == 0 && lines("mm_leave") == 0 && lines_from("log matchmaking: leaving") == 0);
+        EXPECT(top_id() == PG_MM && get<int32_t>(NETINFO + 0x34) == 0);
     });
     S("mm_member_leave_messages", [](const Api &a) {
         std_setup(a, false, 3);
@@ -1315,6 +1523,9 @@ void register_all() {
         host_lan_start(a, 100);
         put<uint8_t>(NETINFO + 0x1c, 1);
         frame(101);
+        // leave() clears the error byte since the pre-squash change (mapped in expected_new): the second frame sees
+        // the error only when the game raises it again; without that: mm_leave_error_cleared (new only)
+        put<uint8_t>(NETINFO + 0x1c, 1);
         frame(102);
         put<uint8_t>(NETINFO + 0x1c, 0);
         frame(103);
@@ -1360,6 +1571,7 @@ void register_all() {
 
     // next round after a match
     S("mm_next_round", [](const Api &a) {
+        one_player_vote();
         std_setup(a, true, 1);
         games_table({1, 2, 3});
         const uint32_t tv = host_to_vote(a, 100);
@@ -1381,18 +1593,24 @@ void register_all() {
     });
 
     // ===== frontend3: online host =====
-    S("mm_online_steps", [](const Api &a) {
+    // The online host's search and gather were replaced by the PS3 rules (5b9c6de, parity-f-party-mm.md F1, F5, F6,
+    // F10 and section 7): these scenarios run the new code only and check those rules' values and log lines.
+    static const char *kSearch0 = "log matchmaking: Searching Game with Criteria 0 of 1 (playlist 0xabc123, index -1, 0 criteria row(s))";
+    static const char *kBegin0 = "mm_begin 0xabc123 index 0 pass 0 ping 0 rank_only 1";
+    N("mm_online_steps", [](const Api &a) {
         std_setup(a, true, 1);
         s.mm_online = true;
         s.mm_step = 0;
-        host_lan_start(a, 100);
+        host_lan_start(a, 100);   // F5: no criteria table: one pass, rank only
+        EXPECT(get<uint8_t>(NETINFO + 0x08) == 0);   // created-by-me 0 while searching
         frame(101);
         s.mm_step = 1;
         frame(102);
         s.mm_step = 3;
         frame(103);
         s.mm_step = 4;
-        frame(104);
+        frame(104);   // failed: reset, criteria 0, again 3 s later
+        EXPECT(lines("mm_reset") == 1);
         s.mm_step = 0;
         frame(500);
         frame(1003);
@@ -1405,21 +1623,30 @@ void register_all() {
         frame(1007);
         s.mm_step = 0;
         frame(1905);
+        EXPECT((frames_of(kBegin0) == std::vector<int64_t>{100, 101, 1004, 1905}));
+        EXPECT((frames_of(kSearch0) == std::vector<int64_t>{100, 101, 1004, 1905}));
+        EXPECT(lines("mm_reset") == 2 && get<uint8_t>(NETINFO + 0x08) == 0 && get<int32_t>(NETSM) == 19);
         s.mm_step = 2;
-        frame(1906);
-        frame(1907);
+        frame(1906);   // F1: our own room; reference = now + 8 s
+        EXPECT(get<int32_t>(NETSM) == 16 && get<uint8_t>(NETINFO + 0x08) == 1);
+        frame(1907);   // N = 0: 0 s after the reference, (4306 - 1907) / 300 = 7 s
+        EXPECT((frames_of("log matchmaking: 0 other player(s) connected: Game starting in 7 seconds") == std::vector<int64_t>{1907}));
         s.mm_online = false;
         put<int32_t>(NETSM, 19);
-        frame(1908);
+        frame(1908);   // offline again: the LAN path
+        EXPECT(get<int32_t>(NETSM) == 16 && get<uint8_t>(NETINFO + 0x08) == 1);
+        EXPECT(lines_from("log matchmaking: vote between") == 0 && lines_from("mm_begin") == 4);
     });
-    S("mm_online_idle_retry_wrap", [](const Api &a) {
+    N("mm_online_idle_retry_wrap", [](const Api &a) {
         std_setup(a, true, 1);
         s.mm_online = true;
         s.mm_step = 4;
-        host_lan_start(a, 0x7fffff00u);
+        host_lan_start(a, 0x7fffff00u);   // failed: the next pass 900 ticks later, across the clock wrap
         s.mm_step = 0;
         frame(0x80000000u);
         frame(0x80000300u);
+        EXPECT((frames_of(kBegin0) == std::vector<int64_t>{0x80000300ll}));
+        EXPECT(lines("mm_reset") == 1 && get<uint8_t>(NETINFO + 0x08) == 0);
     });
     struct Online {
         const char *env;
@@ -1435,13 +1662,17 @@ void register_all() {
         std::string env = o.env ? o.env : "unset";
         for (char &c : env)
             if (c == ' ') c = '_';
-        S("mm_online_gather_env_" + env + "_m" + std::to_string(o.members) + (o.ready ? "_ready" : ""), [o](const Api &a) {
+        // F1: N = the other players (at most 10); the decision comes at reference (room + 8 s) + the PS3 wait for N,
+        // never restarted, readiness does not count; enough players (our minimum, issue 104 KEPT, the override
+        // UNCHARTED_U2MP_MM_MIN first): the vote, else "time out", the room is left and the search starts again.
+        N("mm_online_gather_env_" + env + "_m" + std::to_string(o.members) + (o.ready ? "_ready" : ""), [o](const Api &a) {
+            static const uint32_t wait[11] = {0, 4, 8, 15, 20, 25, 30, 35, 40, 50, 0};   // seconds, spec F1 step 3
             setenv_mm_min(o.env);
             std_setup(a, true, o.members);
             games_table({1, 2, 3, 4});
             s.mm_online = true;
             s.mm_step = 2;
-            host_lan_start(a, 2000);   // Hosting: NET_SM 16, research time
+            host_lan_start(a, 2000);   // Hosting: NET_SM 16, reference 2000 + 2400
             if (o.ready)
                 for (int slot = 1; slot < o.members && slot < 32; slot++) msg(a, uint8_t(slot), {0x11});
             std::vector<uint32_t> offs = {1, 5999, 6000, 6001};
@@ -1455,15 +1686,281 @@ void register_all() {
                 }
             }
             for (uint32_t x : offs) frame(2000 + x);
+            const int n = o.members - 1 > 10 ? 10 : o.members - 1;
+            const uint32_t due = 2400 + 300 * wait[n];
+            int64_t at = -1;
+            for (uint32_t x : offs)
+                if (at < 0 && x >= due) at = 2000 + x;
+            const int forced = forced_min();
+            const bool enough = n + 1 >= (forced ? forced : 2);
+            char line[128];
+            std::snprintf(line, sizeof line, "log matchmaking: %d other player(s) connected: Game starting in %u seconds", n,
+                          (due - 1) / 300);
+            EXPECT(!frames_of(line).empty() && frames_of(line)[0] == 2001);   // again in each new room after a time out
+            std::snprintf(line, sizeof line, "log matchmaking: time out %d players: leaving the room, searching again", n);
+            if (enough) {
+                EXPECT(frames_of("log matchmaking: vote between net games ").size() == 1 &&
+                       frames_of("log matchmaking: vote between net games ")[0] == at);
+                EXPECT(lines_from("log matchmaking: time out") == 0 && lines("mm_research") == 0);
+            } else {
+                EXPECT(!frames_of(line).empty() && frames_of(line)[0] == at);
+                EXPECT(lines_from("log matchmaking: vote between") == 0 && lines("mm_research") >= 1);
+            }
         });
     }
-    S("mm_online_leave_message_room", [](const Api &a) {
+    // F9 / F1: a member's kMsgLeave in our room is only logged; the gathering goes on
+    N("mm_online_leave_message_room", [](const Api &a) {
         std_setup(a, true, 3);
         s.mm_online = true;
         s.mm_step = 2;
         host_lan_start(a, 100);
         msg(a, 2, {0x15});
+        EXPECT(lines("log matchmaking: a player left matchmaking (slot 2)") == 1 && lines("mm_leave") == 0);
         frame(101);
+        EXPECT((frames_of("log matchmaking: 2 other player(s) connected: Game starting in 15 seconds") == std::vector<int64_t>{101}));
+        EXPECT(get<int32_t>(NETSM) == 16 && lines_from("send slot -1 [15]") == 0);
+    });
+    // F5: one search pass per row of the criteria table b25ab071 (at most 3; ping limit s32 at +8 of each 0x14 row,
+    // <= 0: none), the tip index shows the pass, pass 0 by rank only; no room: a random 1..3 s, then the next pass;
+    // after the last: our own room (mm_create); a failure starts again from pass 0 after 3 s.
+    N("mm_online_criteria_passes", [](const Api &a) {
+        std::srand(4242);
+        const int r1 = std::rand(), r2 = std::rand();
+        std::srand(4242);   // the scenario's seed: the code draws r1, r2 for the pauses
+        std_setup(a, true, 1);
+        tips_table(4);
+        put<int32_t>(TIPS + 0x100 + 0x08, 150);
+        put<int32_t>(TIPS + 0x100 + 0x14 + 0x08, 300);
+        put<int32_t>(TIPS + 0x100 + 0x28 + 0x08, -1);
+        s.playlist_index = 7;
+        s.mm_online = true;
+        s.mm_step = 0;
+        host_lan_start(a, 100);
+        EXPECT(lines("log matchmaking: Searching Game with Criteria 0 of 3 (playlist 0xabc123, index 7, 4 criteria row(s))") == 1);
+        EXPECT(lines("mm_begin 0xabc123 index 7 pass 0 ping 150 rank_only 1") == 1 && get<int32_t>(TIP) == 0);
+        s.mm_step = 5;   // kMmNoRoom
+        frame(101);
+        const uint32_t p1 = 300 + uint32_t(r1 % 601), p2 = 300 + uint32_t(r2 % 601);
+        EXPECT(lines(fmt("log matchmaking: next criteria 1 in %lld ms", p1 * 10 / 3)) == 1 && lines("mm_reset") == 1);
+        s.mm_step = 0;
+        frame(101 + p1 - 1);
+        EXPECT(lines_from("mm_begin") == 1);
+        frame(101 + p1);
+        EXPECT(lines("mm_begin 0xabc123 index 7 pass 1 ping 300 rank_only 0") == 1 && get<int32_t>(TIP) == 1);
+        EXPECT(lines("log matchmaking: Searching Game with Criteria 1 of 3 (playlist 0xabc123, index 7, 4 criteria row(s))") == 1);
+        const uint32_t t2 = 102 + p1;
+        s.mm_step = 5;
+        frame(t2);
+        EXPECT(lines(fmt("log matchmaking: next criteria 2 in %lld ms", p2 * 10 / 3)) == 1);
+        s.mm_step = 0;
+        frame(t2 + p2);
+        EXPECT(lines("mm_begin 0xabc123 index 7 pass 2 ping 0 rank_only 0") == 1 && get<int32_t>(TIP) == 2);
+        s.mm_step = 5;
+        frame(t2 + p2 + 1);   // after the last pass: GATHER
+        EXPECT(lines("mm_create") == 1 && lines("mm_reset") == 3 && lines_from("mm_begin") == 3);
+        s.mm_step = 4;   // failed
+        frame(t2 + p2 + 2);
+        s.mm_step = 0;
+        frame(t2 + p2 + 2 + 899);
+        EXPECT(lines_from("mm_begin") == 3);
+        frame(t2 + p2 + 2 + 900);
+        EXPECT(lines("mm_begin 0xabc123 index 7 pass 0 ping 150 rank_only 1") == 2 && get<int32_t>(TIP) == 0);
+        EXPECT(get<uint8_t>(NETINFO + 0x08) == 0);
+    });
+    // F10: after a lost host a leader waits up to 10 s (3000 ticks) for its party to come back before it searches,
+    // whatever the clock reads when the wait starts (even and odd start)
+    for (const uint32_t t0 : {101u, 100u}) {
+        N(std::string("mm_online_party_back_wait_") + (t0 & 1 ? "odd" : "even") + "_clock", [t0](const Api &a) {
+            std_setup(a, true, 1);
+            s.mm_online = true;
+            s.mm_step = 0;
+            s.party_missing = 2;
+            host_lan_start(a, t0);
+            frame(t0 + 2999);   // still waiting
+            frame(t0 + 3001);   // the wait is over (a tick of rounding either way)
+            EXPECT(lines("log matchmaking: waiting for 2 party member(s) to come back before searching") == 1);
+            EXPECT((frames_of(kBegin0) == std::vector<int64_t>{t0 + 3001}));
+        });
+    }
+    // F1 step 4 (no decision while a reservation is open) and F6 (an odd count for a team playlist: the last of the
+    // slot list came alone -> removed, 5 s quiet, the gathering goes on)
+    N("mm_online_gather_pending_and_balance", [](const Api &a) {
+        std_setup(a, true, 4);
+        games_table({1, 2, 3});
+        s.mm_online = true;
+        s.mm_step = 2;
+        s.balance_slot = 2;
+        s.mm_pending = 1;
+        host_lan_start(a, 2000);   // reference 4400; N = 3: 15 s -> 8900
+        frame(2001);
+        EXPECT(lines("log matchmaking: 3 other player(s) connected: Game starting in 22 seconds") == 1);
+        frame(8900);
+        EXPECT(lines_from("log matchmaking: vote between") == 0 && lines_from("send slot 2 [18]") == 0);
+        s.mm_pending = 0;
+        frame(8901);
+        EXPECT(lines("log matchmaking: 4 players for a team playlist: slot 2 came alone, removed to balance the teams") == 1);
+        EXPECT(lines("send slot 2 [18] except -1") == 1 && lines_from("log matchmaking: vote between") == 0);
+        s.members = 3;   // the kicked player went
+        s.balance_slot = -1;
+        frame(10400);   // N = 2 (wait passed), but still quiet
+        EXPECT(lines("log matchmaking: 2 other player(s) connected: Game starting in 0 seconds") == 1);
+        EXPECT(lines_from("log matchmaking: vote between") == 0);
+        frame(10401);
+        EXPECT((frames_of("log matchmaking: vote between net games ") == std::vector<int64_t>{10401}));
+        EXPECT(get<int32_t>(NETSM) == 20 && lines("voice::unmute_strangers") == 1);
+    });
+    N("mm_online_gather_coop_no_balance", [](const Api &a) {   // F6: co-op playlists have an odd maximum
+        std_setup(a, true, 4);
+        games_table({4, 8, 1});
+        s.playlist = true;
+        s.types = {4, 8};
+        s.mm_online = true;
+        s.mm_step = 2;
+        s.balance_slot = 2;
+        host_lan_start(a, 2000);
+        frame(8899);
+        frame(8900);
+        EXPECT((frames_of("log matchmaking: vote between net games ") == std::vector<int64_t>{8900}));
+        EXPECT(lines_from("send slot 2 [18]") == 0);
+    });
+
+    // ===== F7 (5b9c6de, gate f334394): the vote ends at once on a majority while no net game is chosen =====
+    N("mm_f7_majority_ends_vote", [](const Api &a) {
+        std_setup(a, true, 3);
+        games_table({1, 2, 1, 2, 3});
+        host_lan_start(a, 5000);
+        msg(a, 1, {0x11});
+        msg(a, 2, {0x11});
+        frame(5900);   // vote
+        const int32_t g0 = get<int32_t>(VOTE + 8);
+        msg(a, 1, {0x13, 0});
+        msg(a, 2, {0x13, 0});
+        frame(5901);   // 2 of 3 > 3 / 2
+        EXPECT((frames_of("log matchmaking: the vote is decided by a majority (2 / 0 of 3 players)") == std::vector<int64_t>{5901}));
+        EXPECT(lines(fmt("SetNetGame img+0x113b760 %lld null 10", g0)) == 1);
+        EXPECT(lines(fmt("log matchmaking: votes 2 / 0, net game %lld wins", g0)) == 1);
+        EXPECT(get<int32_t>(NETINFO + 0x34) == 3 && get<uint32_t>(NETINFO + 0x20) == 5901 + 3000 && get<uint8_t>(VOTE + 1) == 1);
+        EXPECT(lines_from("send slot -1 [14") == 1);
+    });
+    N("mm_f7_split_two_players", [](const Api &a) {   // spec section 4 scenario 6: 2 players, 1 vote each: random
+        std_setup(a, true, 2);
+        games_table({1, 2, 3});
+        host_lan_start(a, 100);
+        msg(a, 1, {0x11});
+        frame(1000);   // vote
+        vote_cb(0);
+        msg(a, 1, {0x13, 1});
+        frame(1001);
+        EXPECT((frames_of("log matchmaking: the vote is decided by a majority (1 / 1 of 2 players)") == std::vector<int64_t>{1001}));
+        const int16_t g = get<int16_t>(NGM + 0x1ca0);
+        EXPECT(get<int32_t>(NETINFO + 0x34) == 3 && (g == get<int32_t>(VOTE + 8) || g == get<int32_t>(VOTE + 12)));
+    });
+
+    // ===== F9 / F10 (5b9c6de): leaving a stranger's room =====
+    static const std::vector<uint8_t> kParty = {0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11};   // 0x1122334455667788
+    N("mm_f9_leader_in_stranger_room", [](const Api &a) {   // tells its party through the host, leaves 0.3 s later
+        std_setup(a, false, 3);
+        s.active = true;
+        s.host_in_party = false;
+        s.own_party_id = 0x1122334455667788ull;
+        msg(a, 0, {0x10});
+        frame(10);
+        page_ev(3);
+        call_yes();
+        frame(11);
+        EXPECT(lines("send slot 0 [198877665544332211] except -1") == 1);
+        EXPECT(lines("log matchmaking: the party leader leaves matchmaking: the party is told (0x108)") == 1);
+        frame(100);
+        EXPECT(lines_from("log matchmaking: leaving") == 0);
+        frame(101);
+        EXPECT((frames_of("log matchmaking: leaving") == std::vector<int64_t>{101}));
+        EXPECT(lines("send slot 0 [15] except -1") == 1 && lines("mm_leave") == 1 && lines("session::leave_party") == 0);
+    });
+    N("mm_f9_member_follows_leader", [](const Api &a) {   // our party's leader left: back to it (PS3 0x108)
+        std_setup(a, false, 3);
+        s.active = true;
+        s.party_member = true;
+        s.own_party_id = 0x1122334455667788ull;
+        msg(a, 0, {0x10});
+        frame(1);
+        std::vector<uint8_t> m = {0x19};
+        m.insert(m.end(), kParty.begin(), kParty.end());
+        std::vector<uint8_t> other = m;
+        other[8] = 0x12;
+        msg(a, 0, other);                                  // another party
+        msg(a, 2, m);                                      // not from the host
+        msg(a, 0, std::vector<uint8_t>(m.begin(), m.end() - 1));   // short
+        EXPECT(lines_from("log matchmaking: our party leader") == 0);
+        msg(a, 0, m);
+        EXPECT(lines("log matchmaking: our party leader left matchmaking: following it back") == 1);
+        frame(2);
+        EXPECT(lines("log matchmaking: leaving (our leader left)") == 1 && lines("mm_leave_to_leader") == 1);
+        EXPECT(lines_from("send slot 0 [15]") == 0 && lines("mm_leave") == 0);
+    });
+    N("mm_f9_party_leave_relay", [](const Api &a) {   // the host passes 0x19 on to the room
+        std_setup(a, true, 3);
+        host_lan_start(a, 10);
+        std::vector<uint8_t> m = {0x19};
+        m.insert(m.end(), kParty.begin(), kParty.end());
+        msg(a, 2, m);
+        EXPECT(lines("send slot -1 [198877665544332211] except 2") == 1 && lines_from("log matchmaking: our party") == 0);
+    });
+    N("mm_f10_stranger_host_left", [](const Api &a) {   // "Host Asked to leave the room": search again
+        std_setup(a, false, 3);
+        s.active = true;
+        s.host_in_party = false;
+        s.match_room = 0xabcdef;
+        msg(a, 0, {0x10});
+        frame(1);
+        msg(a, 0, {0x15});
+        EXPECT(lines("log matchmaking: Host Asked to leave the room abcdef") == 1);
+        EXPECT(lines("mm_host_gone 'the host left matchmaking' bad 0") == 1 && lines_from("log matchmaking: leaving") == 0);
+    });
+
+    // ===== issue 104 (pre-squash): the LAN minimum and the gather timer restart =====
+    N("mm_lan_one_player_waits", [](const Api &a) {   // minimum 2: a host alone never votes
+        std_setup(a, true, 1);
+        games_table({1, 2});
+        host_lan_start(a, 1000);
+        frame(1900);
+        frame(4000);
+        EXPECT(lines_from("log matchmaking: vote between") == 0 && get<int32_t>(NETSM) == 16);
+        EXPECT((frames_of("playlist_game_types -> 0") == std::vector<int64_t>{1900, 4000}));
+    });
+    N("mm_lan_coop_playlist_one_player", [](const Api &a) {   // a co-op-only playlist starts with 1
+        std_setup(a, true, 1);
+        s.playlist = true;
+        s.types = {4, 9};
+        games_table({4, 9, 1});
+        host_lan_start(a, 1000);
+        frame(1899);
+        frame(1900);
+        EXPECT((frames_of("log matchmaking: vote between net games ") == std::vector<int64_t>{1900}));
+    });
+    N("mm_lan_gather_timer_restart", [](const Api &a) {   // a newcomer restarts the LAN gather wait
+        std_setup(a, true, 2);
+        games_table({1, 2});
+        host_lan_start(a, 1000);
+        msg(a, 1, {0x11});
+        frame(1500);
+        s.members = 3;
+        frame(1600);
+        msg(a, 2, {0x11});
+        frame(1900);
+        frame(2499);
+        frame(2500);
+        EXPECT((frames_of("log matchmaking: 3 player(s) joined: gather timer restarted") == std::vector<int64_t>{1600}));
+        EXPECT((frames_of("log matchmaking: vote between net games ") == std::vector<int64_t>{2500}));
+    });
+    N("mm_leave_error_cleared", [](const Api &a) {   // the leave clears the error byte: one leave only
+        std_setup(a, true, 2);
+        push_page(0x1);
+        host_lan_start(a, 100);
+        put<uint8_t>(NETINFO + 0x1c, 1);
+        frame(101);
+        EXPECT(get<uint8_t>(NETINFO + 0x1c) == 0 && lines("log matchmaking: leaving (the party left)") == 1);
+        frame(102);
+        EXPECT(lines("log matchmaking: leaving (the party left)") == 1);
     });
 
     // ===== on_peer_joined =====
@@ -1492,6 +1989,7 @@ void register_all() {
         a.on_peer_joined(255);
     });
     S("mm_peer_phase2_active", [](const Api &a) {
+        one_player_vote();
         std_setup(a, true, 1);
         games_table({1, 2, 3});
         host_to_vote(a, 1);
@@ -1501,6 +1999,7 @@ void register_all() {
         a.on_peer_joined(6);
     });
     S("mm_peer_phase2_inactive", [](const Api &a) {
+        one_player_vote();
         std_setup(a, true, 1);
         games_table({1, 2, 3});
         host_to_vote(a, 1);
@@ -1508,6 +2007,7 @@ void register_all() {
         a.on_peer_joined(5);
     });
     S("mm_peer_phase3", [](const Api &a) {
+        one_player_vote();
         std_setup(a, true, 1);
         games_table({1, 2, 3});
         const uint32_t tv = host_to_vote(a, 1);
@@ -1556,6 +2056,7 @@ void register_all() {
 
     // ===== frontend3 with the preload off =====
     S("mm_round_without_preload", [](const Api &a) {
+        one_player_vote();
         write_all();
         mem[0x641690] = 0;
         install_all(a);
@@ -1570,26 +2071,51 @@ void register_all() {
 }
 
 bool run(const Scen &sc, bool verbose) {
+    if (sc.new_only) {
+        clear();
+        bind_both();
+        s = hx::fe::State{};
+        dc.clear();
+        steps.clear();
+        std::srand(sc.seed);
+        sc.body(kNew);
+        if (verbose)
+            for (const auto &l : calls) std::printf("  %s\n", l.c_str());
+        if (expect_failures) {
+            std::printf("FAIL %s (new only): %d check(s)\n", sc.name.c_str(), expect_failures);
+            return false;
+        }
+        std::printf("PASS %s (new only, %zu records)\n", sc.name.c_str(), calls.size());
+        return true;
+    }
     std::vector<std::string> r[2];
     std::vector<uint8_t> im[2];
+    std::vector<Step> old_steps;
     const Api *apis[2] = {&kOld, &kNew};
     for (int k = 0; k < 2; k++) {
         clear();
         bind_both();
         s = hx::fe::State{};
         dc.clear();
+        steps.clear();
         std::srand(sc.seed);
         sc.body(*apis[k]);
         normalize();
         rec("rand next %d", std::rand());
         r[k] = calls;
         im[k] = snapshot();
+        if (k == 0) old_steps = steps;
     }
     if (verbose)
         for (int k = 0; k < 2; k++) {
             std::printf("==== %s ====\n", k ? "new" : "old");
             for (const auto &l : r[k]) std::printf("  %s\n", l.c_str());
         }
+    if (expected_new(r[0], old_steps)) im[0][NETINFO + 0x1c] = 0;
+    if (verbose) {
+        std::printf("==== old, documented changes mapped ====\n");
+        for (const auto &l : r[0]) std::printf("  %s\n", l.c_str());
+    }
     const bool ok = same(sc.name.c_str(), r[0], r[1], &im[0], &im[1]);
     if (ok) std::printf("PASS %s (%zu records)\n", sc.name.c_str(), r[0].size());
     return ok;

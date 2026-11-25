@@ -21,6 +21,17 @@ struct State {
     bool playlist = false;
     std::vector<int32_t> types;
     std::vector<int32_t> dlc_off;        // net game indexes dlc_net_game_available() refuses
+    // asked only by the new code (parity D/E/F, J3, 475fba8). The defaults are what online.cpp answers on LAN (the
+    // online program not started), the game the old code was written for.
+    int32_t playlist_index = -1;         // menus.cpp playlist_index(): -1 = not one of ours
+    bool active = false;                 // online::active() (also true while mm_online: matchmaking needs it)
+    bool host_in_party = true;           // true when not online or we are the host
+    bool party_member = false;
+    uint64_t own_party_id = 0;
+    uint64_t match_room = 0;
+    int party_missing = 0;
+    int mm_pending = 0;                  // online::mm_pending_members()
+    int balance_slot = -1;               // session::mm_balance_slot(): -1 none
     // record the pure queries too (is_host, member_count, mm_online)
     bool rec_queries = true;
 };
