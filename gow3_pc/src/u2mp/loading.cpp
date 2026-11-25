@@ -387,7 +387,7 @@ void log_page(uint8_t *page, const char *when) {
 }
 
 void draw_rosters(float alpha, float x, float y, float dt) {
-    if (!g_rosters_on) return;
+    if (!g_rosters_on || menu_up()) return;   // PS3 draws the roster page only while no menu is up
     uint8_t *page = find_page(kRosterPage);
     if (!page) return;
 
@@ -1092,6 +1092,26 @@ bool menu_text_in_rect(const float *xform, const char *text, float x, float y, f
                                   int, int);
     guest<Fn>(fItemText)(image.base + kDrawCtx, nullptr, xf, text, rect, 1, 1, 0, clip, 0, 0, 0, -1);
     return true;
+}
+
+bool menu_up() {
+    // The word's PS4 users (parity-m-features.md 10.2): its inlined setter (state 5, time 0, rate 1.0), the death
+    // camera's D-pad gate and the "a menu is open" helper, both a lea of the menu manager and a compare with 0.
+    static const bool ok = [] {
+        static const unsigned char kSetter[] = {0xc7, 0x83, 0x14, 0x10, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00,
+                                                0xc7, 0x83, 0x18, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                                                0xc7, 0x83, 0x1c, 0x10, 0x00, 0x00, 0x00, 0x00, 0x80, 0x3f};
+        static const unsigned char kCamera[] = {0x48, 0x8d, 0x05, 0xe8, 0x14, 0xad, 0x00,
+                                                0x83, 0xb8, 0x14, 0x10, 0x00, 0x00, 0x00};
+        static const unsigned char kHelper[] = {0x48, 0x8d, 0x05, 0x21, 0xaa, 0xc6, 0x00,
+                                                0x83, 0xb8, 0x14, 0x10, 0x00, 0x00, 0x00};
+        const bool same = image.matches(0x5e5b82, kSetter, sizeof kSetter) &&
+                          image.matches(0x665151, kCamera, sizeof kCamera) &&
+                          image.matches(0x4cbc18, kHelper, sizeof kHelper);
+        if (!same) log("menu state word +0x1014: its users are not as expected, treated as \"no menu up\"");
+        return same;
+    }();
+    return ok && peek<int32_t>(kMenu + 0x1014) != 0;
 }
 
 }  // namespace u2mp

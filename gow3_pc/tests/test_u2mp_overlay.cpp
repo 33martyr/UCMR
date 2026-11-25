@@ -4,6 +4,7 @@
 // stand-in ticker object (spec parity-ticker-respawn.md 1.2 - 1.6), the team lists' voice column rule (spec
 // parity-j-voice-medals.md J4) and the Mute Players list rules (spec parity-n-remaining.md N2).
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 
@@ -23,17 +24,22 @@ static int failures = 0;
 static bool near(float a, float b) { return std::fabs(a - b) < 1e-5f; }
 
 static void test_fade() {
-    // Speed 1.0: a full fade in takes 1 s of frames; speed 2.0 half that; out the same way; clamped.
+    // speed x ticks / 75: speed 1.0 = 4 per second (a full fade in 0.25 s = 75 ticks), speed 2.0 = 8 per second.
+    // 60 fps frames are 5 ticks.
     float f = 0.0f;
-    for (int i = 0; i < 10; ++i) f = fade_step(f, true, 1.0f, 0.05f);
-    CHECK(near(f, 0.5f));
-    for (int i = 0; i < 20; ++i) f = fade_step(f, true, 1.0f, 0.05f);
+    for (int i = 0; i < 6; ++i) f = fade_step(f, true, 1.0f, 5.0f);   // 0.1 s
+    CHECK(near(f, 0.4f));
+    for (int i = 0; i < 9; ++i) f = fade_step(f, true, 1.0f, 5.0f);   // 0.25 s in all
+    CHECK(near(f, 1.0f));
+    f = fade_step(f, true, 1.0f, 5.0f);
     CHECK(f == 1.0f);
-    for (int i = 0; i < 5; ++i) f = fade_step(f, false, 2.0f, 0.05f);
-    CHECK(near(f, 0.5f));
-    for (int i = 0; i < 10; ++i) f = fade_step(f, false, 2.0f, 0.05f);
+    for (int i = 0; i < 3; ++i) f = fade_step(f, false, 2.0f, 5.0f);  // 15 ticks at 8 per second
+    CHECK(near(f, 0.6f));
+    for (int i = 0; i < 5; ++i) f = fade_step(f, false, 2.0f, 5.0f);
     CHECK(f == 0.0f);
-    CHECK(fade_step(0.0f, true, 1.0f, 0.0f) == 0.0f);   // first frame (dt 0) moves nothing
+    CHECK(fade_step(0.0f, true, 1.0f, 0.0f) == 0.0f);   // no frame step (paused): nothing moves
+    CHECK(near(fade_step(0.0f, true, 1.0f, 75.0f), 1.0f));
+    CHECK(near(kPerTick * 300.0f, 4.0f));
 }
 
 static void test_priority() {
@@ -62,39 +68,229 @@ static void test_slide() {
     CHECK(near(slide_ease(0.5f, false), 0.25f));
 }
 
-static void test_states() {
-    CHECK(state_entry(2, -1, false) == -1);
-    CHECK(state_entry(3, -1, false) == 2);
-    CHECK(state_entry(4, -1, false) == 3);
-    CHECK(state_entry(5, -1, false) == 0);
-    CHECK(state_entry(5, 3, false) == 3);
-    CHECK(state_entry(5, 1, false) == 0);
-    CHECK(state_entry(3, -1, true) == 2);
-    CHECK(state_entry(4, -1, true) == 3);
-    CHECK(state_entry(5, -1, true) == -1);
-    CHECK(state_entry(0, -1, false) == -1);
+static bool shown_are(const Entries &e, bool a, bool b, bool c, bool d) {
+    return e.shown[0] == a && e.shown[1] == b && e.shown[2] == c && e.shown[3] == d;
 }
 
-static void test_auto_edge() {
-    bool last = false;
-    CHECK(auto_edge(last, false) == Edge::None);
-    CHECK(auto_edge(last, true) == Edge::Opened && last);
-    CHECK(auto_edge(last, true) == Edge::None);
-    CHECK(auto_edge(last, false) == Edge::Closed && !last);
-    CHECK(auto_edge(last, false) == Edge::None);
+static Frame playing(bool auto_flag = false, bool pressed = false) {
+    Frame f;
+    f.state = 2;
+    f.auto_flag = auto_flag;
+    f.pressed = pressed;
+    return f;
+}
+
+static void test_auto_open() {
+    // Rule 6: rising edge shows entry 0 at speed 1.0 without sound, falling edge hides it.
+    Entries e;
+    FrameResult r = update_entries(e, playing(true));
+    CHECK(shown_are(e, true, false, false, false) && e.speed[0] == 1.0f && r.sound == Sound::None && r.relayout[0]);
+    r = update_entries(e, playing(true));
+    CHECK(e.shown[0] && !r.relayout[0]);   // no edge: nothing new
+    update_entries(e, playing(false));
+    CHECK(!e.shown[0] && !e.by_button);
+
+    // The falling edge also hides a board the player opened by button (open question 10 settled).
+    Entries b;
+    r = update_entries(b, playing(false, true));
+    CHECK(b.shown[0] && b.by_button && b.speed[0] == 2.0f && r.sound == Sound::Open && r.toggled);
+    update_entries(b, playing(true));
+    CHECK(b.shown[0] && b.by_button && b.speed[0] == 1.0f);   // the rising edge shows it again at speed 1.0
+    update_entries(b, playing(false));
+    CHECK(!b.shown[0] && !b.by_button && b.speed[0] == 1.0f);
+}
+
+static void test_auto_notice() {
+    // A HUD notification forces the flag off unless the board was opened by button.
+    Entries e;
+    Frame f = playing(true);
+    f.notice = true;
+    update_entries(e, f);
+    CHECK(!e.shown[0] && !e.auto_last);
+    f.notice = false;
+    update_entries(e, f);   // the message is gone: now the rising edge
+    CHECK(e.shown[0] && e.auto_last);
+
+    Entries b;
+    update_entries(b, playing(false, true));   // opened by button
+    f = playing(true);
+    f.notice = true;
+    update_entries(b, f);
+    CHECK(b.auto_last && b.shown[0]);
+}
+
+static void test_every_player_out_rule() {
+    // Out: entry 0 shown every frame at speed 1.0, the button does nothing.
+    Entries e;
+    Frame f = playing(false, true);
+    f.out = true;
+    FrameResult r = update_entries(e, f);
+    CHECK(e.shown[0] && e.speed[0] == 1.0f && r.sound == Sound::None && !r.toggled);
+    // Out with a falling edge: the hide still runs in the same frame (one frame off).
+    Entries g;
+    update_entries(g, playing(true));
+    f = playing(false);
+    f.out = true;
+    r = update_entries(g, f);
+    CHECK(!g.shown[0] && !g.by_button);
+    r = update_entries(g, f);
+    CHECK(g.shown[0] && r.relayout[0]);
+}
+
+static void test_button() {
+    Entries e;
+    FrameResult r = update_entries(e, playing(false, true));
+    CHECK(e.shown[0] && e.speed[0] == 2.0f && r.sound == Sound::Open && e.by_button);
+    r = update_entries(e, playing(false, true));
+    CHECK(!e.shown[0] && e.speed[0] == 2.0f && r.sound == Sound::Close && !e.by_button);
+    // The button only works in state 2.
+    Frame f;
+    f.state = 3;
+    f.pressed = true;
+    r = update_entries(e, f);
+    CHECK(r.sound == Sound::None && !e.shown[0]);
+}
+
+static void test_states() {
+    // States 3 / 4: everything cleared and RESULTS / ROUND_RESULTS shown, asked to lay out again every frame.
+    Entries e;
+    update_entries(e, playing(false, true));
+    Frame f;
+    f.state = 3;
+    FrameResult r = update_entries(e, f);
+    CHECK(shown_are(e, false, false, true, false) && r.relayout[2]);
+    r = update_entries(e, f);
+    CHECK(shown_are(e, false, false, true, false) && r.relayout[2]);
+    f.state = 4;
+    r = update_entries(e, f);
+    CHECK(shown_are(e, false, false, false, true) && r.relayout[3]);
+    // End reason 3 / 8 shows entry 0 in these states only with the film controller state (false outside films).
+    f.state = 0;
+    f.end_reason = 3;
+    update_entries(e, f);
+    CHECK(shown_are(e, false, false, false, false));
+    f.film_entry0 = true;
+    update_entries(e, f);
+    CHECK(shown_are(e, true, false, false, false));
+    f.end_reason = 1;
+    update_entries(e, f);
+    CHECK(shown_are(e, false, false, false, false));
+
+    // State 5: entry 0 shown (speed unchanged), RESULTS / ROUND_RESULTS hidden.
+    Entries s;
+    s.speed[0] = 2.0f;
+    f = Frame{};
+    f.state = 3;
+    update_entries(s, f);
+    f.state = 5;
+    update_entries(s, f);
+    CHECK(shown_are(s, true, false, false, false) && s.speed[0] == 2.0f);
+    // Sub-state 3: entry 3 set and cleared again in the same frame; entry 0 keeps its flag.
+    Entries q;
+    f.substate = 3;
+    FrameResult rq = update_entries(q, f);
+    CHECK(shown_are(q, false, false, false, false) && rq.relayout[3]);
+    q.shown[0] = true;
+    update_entries(q, f);
+    CHECK(shown_are(q, true, false, false, false));
+
+    // Back in state 2 after state 5: entries 0 and 3 hidden, the mark cleared.
+    s.by_button = true;
+    update_entries(s, playing());
+    CHECK(shown_are(s, false, false, false, false) && !s.by_button && s.prev_state == 2);
+
+    // Cinema (type 11): all cleared; 3 -> entry 2, 4 -> entry 3, nothing else (no automatic board, no button).
+    Entries c;
+    f = playing(true, true);
+    f.cinema = true;
+    r = update_entries(c, f);
+    CHECK(shown_are(c, false, false, false, false) && r.sound == Sound::None);
+    f.state = 3;
+    update_entries(c, f);
+    CHECK(shown_are(c, false, false, true, false));
+    f.state = 4;
+    update_entries(c, f);
+    CHECK(shown_are(c, false, false, false, true));
+    f.state = 5;
+    update_entries(c, f);
+    CHECK(shown_are(c, false, false, false, false));
+
+    // The film query e68ae001 answered true clears every flag.
+    Entries m;
+    f = Frame{};
+    f.state = 3;
+    f.film_clear = true;
+    update_entries(m, f);
+    CHECK(shown_are(m, false, false, false, false));
+    // Entry 1 is never shown (its debug request byte is not implemented).
+}
+
+static void test_alpha() {
+    CHECK(overlay_alpha(2, 0, 0, 0.25f) == 0.25f);   // the HUD alpha
+    CHECK(overlay_alpha(3, 0, 0, 0.25f) == 1.0f);
+    CHECK(overlay_alpha(4, 0, 0, 0.25f) == 1.0f);
+    CHECK(overlay_alpha(5, 0, 0, 0.25f) == 1.0f);
+    CHECK(overlay_alpha(2, 4, 0, 0.25f) == 1.0f && overlay_alpha(2, 8, 0, 0.25f) == 1.0f);
+    CHECK(overlay_alpha(2, 9, 0, 0.25f) == 1.0f && overlay_alpha(2, 12, 0, 0.25f) == 1.0f);
+    CHECK(overlay_alpha(2, 3, 0, 0.25f) == 0.25f);   // game type 3 is no longer a 1.0 case
+    CHECK(overlay_alpha(2, 0, 3, 0.25f) == 1.0f && overlay_alpha(2, 0, 8, 0.25f) == 1.0f);
+    CHECK(overlay_alpha(2, 0, 1, 0.25f) == 0.25f);
+}
+
+static void test_player_out() {
+    TrackerTimes t;
+    CHECK(tracker_out(t, 1000));   // not in use: out
+    t.in_use = true;
+    t.spawn = 100;
+    t.died = 50;
+    CHECK(!tracker_out(t, 1000));   // alive
+    t.died = 100;
+    CHECK(!tracker_out(t, 1000));   // died == spawn: strictly after is needed
+    t.died = 200;
+    CHECK(tracker_out(t, 1000) && tracker_out(t, 200));
+    CHECK(!tracker_out(t, 199));    // clock before the death time
+    t.died = 50;
+    t.flag_a = true;
+    t.a_time = 500;
+    CHECK(tracker_out(t, 500) && !tracker_out(t, 499));
+    t.flag_a = false;
+    t.flag_b = true;
+    t.b_time = 600;
+    CHECK(tracker_out(t, 600) && !tracker_out(t, 599));
+    // Clock differences wrap like 32-bit integers.
+    t.flag_b = false;
+    t.spawn = INT32_MIN;
+    t.died = INT32_MAX;
+    CHECK(tracker_out(t, INT32_MIN));   // INT32_MIN - INT32_MAX wraps to 1
+
+    TrackerTimes all[3];
+    CHECK(every_player_out(all, 3, 0));   // none in use
+    all[1].in_use = true;
+    all[1].died = 10;
+    CHECK(every_player_out(all, 3, 10));
+    all[2].in_use = true;
+    CHECK(!every_player_out(all, 3, 10));   // one still in play
+    CHECK(every_player_out(all, 0, 0));
 }
 
 static void test_hint() {
-    // In at 1/s, out at 2/s, clamped.
+    // In at 1 x ticks / 75 (4 per second), out at 2 x ticks / 75 (8 per second), clamped.
     float h = 0.0f;
-    for (int i = 0; i < 10; ++i) h = hint_step(h, true, 0.05f);
-    CHECK(near(h, 0.5f));
-    h = hint_step(h, false, 0.1f);
-    CHECK(near(h, 0.3f));
-    h = hint_step(h, false, 0.5f);
+    for (int i = 0; i < 6; ++i) h = hint_step(h, true, 5.0f);
+    CHECK(near(h, 0.4f));
+    h = hint_step(h, false, 7.5f);
+    CHECK(near(h, 0.2f));
+    h = hint_step(h, false, 30.0f);
     CHECK(h == 0.0f);
-    for (int i = 0; i < 30; ++i) h = hint_step(h, true, 0.05f);
+    for (int i = 0; i < 20; ++i) h = hint_step(h, true, 5.0f);
     CHECK(h == 1.0f);
+    CHECK(hint_step(0.5f, true, 0.0f) == 0.5f);
+
+    CHECK(hint_wanted(false, true, 2, false));
+    CHECK(!hint_wanted(true, true, 2, false));    // a menu is up
+    CHECK(!hint_wanted(false, false, 2, false));  // no death camera
+    CHECK(!hint_wanted(false, true, 3, false));   // not playing
+    CHECK(!hint_wanted(false, true, 2, true));    // every player out
 }
 
 // ---- ticker ----
@@ -204,8 +400,13 @@ int main() {
     test_fade();
     test_priority();
     test_slide();
+    test_auto_open();
+    test_auto_notice();
+    test_every_player_out_rule();
+    test_button();
     test_states();
-    test_auto_edge();
+    test_alpha();
+    test_player_out();
     test_hint();
     test_ticker();
     test_voice_column();
