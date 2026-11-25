@@ -2459,6 +2459,7 @@ U2MP_GUEST void button_multiplayer(void *, void *, void *) {
     netinit_prepare();
     netpatch_load();
     if (!active) {
+        voice::reset_volume();   // PS3 voice init (NetInit) made the speaker port at full volume each time (J6)
         if (!start_transport()) {
             // PS3 0x438bc8 without a network: message box 0x88a082af / OK over the main menu, not in Multiplayer.
             log("Multiplayer could not start: network message, staying in the main menu");
@@ -3048,6 +3049,12 @@ bool party_stranger(uint32_t net_id) {
     if (!active || !online::active() || net_id == my_id) return false;
     const auto it = npids.find(net_id);
     return it != npids.end() && !it->second.empty() && !online::in_own_party(it->second);
+}
+
+bool party_member(uint32_t net_id) {
+    if (!active || !online::active() || net_id == my_id) return true;
+    const auto it = npids.find(net_id);
+    return it != npids.end() && online::in_own_party(it->second);
 }
 
 int mm_balance_slot() { return active && hosting ? balance_kick_slot() : -1; }

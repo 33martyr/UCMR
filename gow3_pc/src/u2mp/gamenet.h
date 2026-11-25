@@ -30,6 +30,10 @@ int attach(uint8_t slot, uint32_t key, bool direct);
 void detach(uint8_t slot);
 // The guest address of a record's message layer (for the session layer), or 0.
 uint64_t message_layer(uint8_t slot);
+// The PS3 talking level of each connection record (PS4 record +0x1c8, spec parity-j-voice-medals.md J1), which the
+// game's readers (scoreboard voice column, overhead name tags, talk-time counter) find by key (= tracker +0x23c):
+// a record in use keyed k gets level(k), every other record 0. Game thread, once per frame (voice.cpp).
+void set_talk_levels(float (*level)(uint32_t key));
 
 // Checks this build's message layer and caches its functions. Returns false if it differs.
 bool install();

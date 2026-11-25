@@ -147,7 +147,6 @@ Declared in `frontend3.h`, namespace `u2mp::matchmaking`:
 - `void on_migrated(bool host);` called by session.cpp `online_migrated` when matchmaking goes on under a
   new room host (not reached while lobby host migration is off).
 - `void on_host_left(bool host);` called by online.cpp when a stranger's matchmaking room ended for us (3.4.13).
-- `bool strangers_muted();` asked by voice.cpp (3.4.13).
 
 Also used (2026-11-25, spec parity-f 7): `online::mm_begin(playlist, index, MmCriteria)`, `mm_create()`,
 `mm_pending_members()`, `party_missing()`, `host_in_party()`, `party_member()`, `own_party_id()`, `match_room()`,
@@ -289,7 +288,7 @@ Session messages (type byte first; multi-byte fields little-endian, unaligned):
 The file keeps, per process: running, leave requested, ready sent, created, gather start time (LAN),
 gather players (LAN), ready-slot bit set (32 bits), next tip time, last logged NET_SM (initially -1), last seen phase,
 online room flag, gather reference (online, 0 unset), gather count last logged (initially -1), retry time, criteria
-pass, party wait start, quiet-until time, strangers muted, leave-at time, follow-leader-out. "Reset the machine"
+pass, party wait start, quiet-until time, leave-at time, follow-leader-out. "Reset the machine"
 means: all of these to false/0, except the last logged NET_SM and the gather count to -1. The machine starts in the reset state. Every reset also forgets the last
 logged NET_SM, so the `NET_SM` log line (3.4.6) prints again on the next update.
 
@@ -306,10 +305,9 @@ Common operations (named here only to describe them once):
 - **begin(host)**: reset the machine; then running = true, gather start = clock, ready bits = 1 (bit 0),
   next tip = clock + 2400; clear vote block; netInfo+0x34 = 1; u8 netInfo+0x08 = 1 if host and not
   `online::mm_online()`, else 0 (online the host first searches: the status line shows the criteria row text until
-  the host has its own room); last seen phase = 1; strangers muted = `online::mm_online()`; log
-  `matchmaking: started (%s)` with "host" or "member".
-- **open vote(a, b, t)**: first, if strangers muted: strangers muted = false and log
-  `matchmaking: the vote opens: players outside the party are heard now` (PS3 0x4b0700 / 0x4b0868).
+  the host has its own room); last seen phase = 1; log `matchmaking: started (%s)` with "host" or "member".
+- **open vote(a, b, t)**: first `voice::unmute_strangers()`: every present player outside our party is unmuted
+  (PS3 0x4b0700 / 0x4b0868; the one mute flag, `parity-j-voice-medals.md` J3).
   Then vote block = active 1, closed 0, pad 0, mine -1, game0 a, game1 b, counts 0;
   netInfo+0x34 = 2; set deadline(t); then `frontend6::preload_net_game(true, true, true)`.
 - **apply result(g, t)**: vote+0x01 = 1; set net game(g); netInfo+0x34 = 3; set deadline(t); then
@@ -529,14 +527,14 @@ data[0]:
   leader left matchmaking: following it back`; follow-leader-out = true.
 - other types: nothing.
 
-#### 3.4.13 `matchmaking::on_host_left(host)` and `matchmaking::strangers_muted()`
+#### 3.4.13 `matchmaking::on_host_left(host)`
 
 on_host_left (called by online.cpp after a stranger's room ended for us, F10): log `matchmaking: left the room
 (35 -> 19): %s` ("searching again from the first criteria" / "waiting for our leader"); reset the machine; clear
 vote block; netInfo+0x34 = 1; u32 netInfo+0x20 = 0; NET_SM = 19; ensure page.
 
-strangers_muted: running and strangers muted and s32 netInfo+0x34 == 1. voice.cpp drops received voice of
-`session::party_stranger(speaker)` while it is true (F8).
+(The stranger mute of F8 is no longer a matchmaking state: voice.cpp mutes a new connection outside our party and
+the vote opening unmutes it, `parity-j-voice-medals.md` J3.)
 
 ### 3.5 Install
 

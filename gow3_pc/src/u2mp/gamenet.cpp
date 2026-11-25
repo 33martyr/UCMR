@@ -20,6 +20,7 @@ namespace rules = gamenet_rules;
 constexpr uint64_t kRecords = 0x1152a18;     // 32 connection records, 0x220 bytes each
 constexpr uint64_t kRecordSize = 0x220;
 constexpr int kRecordCount = 32;
+constexpr uint64_t kTalkLevel = 0x1c8;        // float, PS3 voice record talking level (no PS4 code writes it)
 constexpr uint64_t kMessageVtable = 0x103fc80;
 constexpr uint64_t kFrameClock = 0x1116180 + 0x204;  // game frame counter (300 per second)
 constexpr uint64_t kNoopHook = 0x5e9d80;             // M+0x150 receive hook the game installs
@@ -312,6 +313,14 @@ void detach(uint8_t slot) {
 
 uint64_t message_layer(uint8_t slot) {
     return slot <= net::kMaxPeers && peers[slot].used ? layer_of(peers[slot].record) : 0;
+}
+
+void set_talk_levels(float (*level)(uint32_t key)) {
+    if (!image.base) return;
+    for (int i = 0; i < kRecordCount; ++i) {
+        const uint64_t rec = record_address(i);
+        field<float>(rec, kTalkLevel) = field<uint8_t>(rec, 0x04) ? level(field<uint32_t>(rec, 0x00)) : 0.0f;
+    }
 }
 
 void receive(uint8_t slot, const uint8_t *data, size_t size) {

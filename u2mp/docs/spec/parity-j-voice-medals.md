@@ -101,7 +101,7 @@ and only when at least 120 bytes are queued for that connection.
 - **Voice init `0x4e71d8` / voice end `0x4e7038`** (NetInit `0x447a5c`, teardown `0x4386d0`): cellVoice start/stop,
   the three global ports, the mic -> encoder link, error logs. PLATFORM: voice.cpp opens its SDL streams when the
   first other member is present and `voice::stop` closes them from the session teardown. The audible results (voice
-  on while online, off after leaving) match. The volume reset at init is item J5.
+  on while online, off after leaving) match. The volume reset at init is item J6.
 - **Per-peer port `0x4e77e0`** (connection manager init `0x4e9d28`, 32 records) and **record reset `0x4e6f04`**
   (from `0x4e8a50`: unmute, empty the queue, then mute): PLATFORM; voice.cpp creates a jitter buffer and decoder per
   speaker on the first packet and `forget()` drops them when the member leaves. The mute-on-new-connection rule is J3.
@@ -117,7 +117,8 @@ and only when at least 120 bytes are queued for that connection.
   COVERED by voice.cpp `update_gating` / `all_audible` (`parity-e` 2.1).
 - **Voice off.** PS3's flag is the PSN account chat restriction. Ours: `UNCHARTED_U2MP_VOICE=off` gives the same
   result (nothing sent, nothing played, no talking icons, the host still relays the others' voice). Nothing reads
-  PS4 `+0x2c8`; leaving it 0 is fine (open question 4 for an RPCN chat-restriction source).
+  PS4 `+0x2c8`; leaving it 0 is fine. Open question 4 (an RPCN chat-restriction source): skipped, the online
+  program's interface (`u2_online_abi.h`) gives the runtime no ticket subject status to read.
 - **Push to talk.** Not on PS3. Our default (`open`, voice-activity gate) is the PS3 behaviour; `ptt` is a PC option
   and stays.
 - **File read helper `0x4e7988`** (filed under voice by the matcher, but it is not voice): read a named file into a
@@ -139,6 +140,11 @@ and only when at least 120 bytes are queued for that connection.
 
 ## 3. MISSING items
 
+Implementation state (2026-11-25, branch `u2mp-ps3-parity-3`): J1, J2, J3, J6 and J8 done; J7 off (hook point not
+confirmed, see J7); J4 and J5 pending (they need scoreboard.cpp, which another branch is editing). Each item ends
+with a **Done** / **Pending** paragraph. Rules with no game in them (level decay, which packets count, mute
+transitions) are `voice::decay_talk_level` / `is_talking` / `use_voice` / `next_mute`, tested by `u2mp-voice-test`.
+
 ### J1. Talking level in the game's connection records (PS3 `0x4e6cd0`, `0x4e7560`; readers `0x4c7c70`, `0x412d14`, `0x8aa448`, `0x4df460`)
 
 PS3 keeps a talking level per connection (section 0). PS4 kept every reader of it but nothing writes it, so on PC:
@@ -158,6 +164,18 @@ PS4 readers compare against a constant expected to be 1.0 (`0xe61210`, `0xe61ca0
 install; if one is not 1.0 the level scale above still holds because the readers only test "at least the threshold").
 `voice::talking` should then be "level >= 1.0" too, so every indicator agrees (same third of a second at 30 fps).
 
+**Done.** voice.cpp keeps one level per net id (`receive` sets 10, `frame` lowers it by 1.0 per call, not below 0;
+`forget` and `stop` zero it) and `gamenet::set_talk_levels` writes, every frame, `level(key)` to `+0x1c8` of each
+record in use (0 to every other record, so a reused record starts dark; the local id always gets 0).
+`voice::talking` = level >= 1.0. Checked in the PS4 1.02 image: all four threshold constants are 1.0; the readers
+(scoreboard `0x5b2cb0`, name tags `0x55c0ad..0x55c0e1`, talk time `0x66c4a0`) find the
+record by comparing record `+0` with tracker `+0x23c` over the 32 records reached through `0x104ae30` (+8), which is
+the key `gamenet::attach` writes (= the net id, `session.cpp` tracker `+0x23c`).
+Open part (topology): a client attaches only the host's record (star, `session.cpp on_peer`); the other clients have
+no record on it, so on a client the game's own readers (name tags, scoreboard column, talk time) light only for the
+host; our roster / matchmaking rows (`voice::talking`) light for everyone. Records for relayed players would change
+how PS4 `SendNetEvent 0x644ab0` routes events (relay list), so they are not added here.
+
 ### J2. Which voice lights a talking indicator (PS3 `0x4e6cd0`, `0x4e7464`, flow `0x43cfb0` / `0x43d0e0`)
 
 PS3: a player's level rises whenever their voice data arrives - also when I muted them (mute only silences), also for
@@ -167,11 +185,15 @@ not send to players they do not hear) or when I have voice off.
 Ours: `receive` returns before marking "talking" for muted players and strangers, and marks it for players silenced
 by in-match gating. Parity:
 
-- mark talking (J1 level, `heard_ms`) for muted players and for strangers too; the rows keep showing the muted icon
+- mark talking (J1 level) for muted players and for strangers too; the rows keep showing the muted icon
   for them (mute wins there), the overhead name tag shows the talking icon (PS3 does not look at mute there);
 - do not mark it for a speaker the in-match gating currently silences (the PS3 sender would not have sent; the rules
   are symmetric, so the receiver's own gating result is the same answer);
 - with voice off, mark nothing (already so: `enabled()` false).
+
+**Done.** `receive` asks `use_voice(voice on, gated silent, muted, playback stream)`: the level rises when voice is on
+and the in-match gating does not silence the speaker (mute and stranger status do not matter); the frames are played
+only when it rose, the speaker is not muted and there is a playback stream.
 
 ### J3. One mute flag, muted on arrival (PS3 `0x4e8a50` reset, `0x4e9e98`, `0x4c40f0`, `0x4b0700`, `0x4b0868`; resolves `parity-f` open question 2)
 
@@ -195,6 +217,16 @@ Parity (voice.cpp + frontend3.cpp + session.cpp): drop the separate state and us
 - `voice::muted` reports this flag, so rows, popups (Mute / Unmute label, Mute All / Unmute All visibility) and the
   scoreboard (J4) all follow it.
 
+**Done** (owner: PS3 exactly, late joiners stay muted until the next vote). frontend3.cpp's `strangers_muted` state
+is gone. voice.cpp `frame` tracks every remote member: on arrival it is muted unless `session::party_member` (new:
+off the online link everyone is; online only once its NpId is known and in our party room, so a member whose NpId
+is not known yet starts muted, as a PS3 connection does, and is unmuted when it shows up in our party); the first
+frame it is a party member it is unmuted ("joined our party", once per connection, so a later NpId flicker cannot
+undo a hand mute); `open_vote` (host and client) calls `voice::unmute_strangers`, which unmutes every present player
+that is not a party member, also hand mutes; leaving forgets the flag. `muted()` / `toggle_mute()` never apply to
+the local player. Logs: `voice: net id N connected outside our party: muted until the vote opens`, `voice: net id N
+joined our party: unmuted`, `voice: the vote opens: players outside our party are heard now (K unmuted)`.
+
 ### J4. Scoreboard voice column: muted icon (PS3 `0x412d14` via `0x4c9de8`; PS4 `0x5b2ac0`)
 
 PS3, voice column `0x4c217b` of the in-match scoreboard, for a row that holds a player other than the local one: the
@@ -202,6 +234,8 @@ muted icon `0x7a5f5bf1` when that player is muted; otherwise the talking icon `0
 nothing. The local player's row shows nothing. PS4 removed the muted branch and kept only the talking test (fed by
 J1). To do: answer the muted icon first for muted players (same image record as PS3: type 3, image id, table 1 as the
 talking icon already uses), then the PS4 talking branch.
+
+**Pending** (scoreboard.cpp belongs to another branch right now). The muted state it needs is ready: `voice::muted`.
 
 ### J5. Scoreboard "mute this player" action (PS3 flow `0x443248`, branch at `0x44387c`; PS4 `0x5ed0ca`)
 
@@ -211,12 +245,19 @@ is not the local player and has a connection, that player's mute is toggled. No 
 as PS4 computes them) and then does nothing. To do: when that search finds the entry, toggle the mute of the entry's
 player through `voice::toggle_mute`, never for the local player.
 
+**Pending** (scoreboard.cpp, as J4). `voice::toggle_mute` already refuses the local player.
+
 ### J6. Voice volume back to full on each online start (PS3 `0x4e71d8`)
 
 PS3 creates the speaker port at volume 1.0 in every NetInit, so the slider shows 20 again each time online
 multiplayer is entered, whatever was set before. Ours keeps the last slider value for the process lifetime (start
 value from `UNCHARTED_U2MP_VOICE_VOLUME`, default 1). Parity: put the volume back to its start value when the session
 is torn down (or at the next online start). Open question 3 (the owner may prefer remembering it).
+
+**Done** (owner: back to full). `session.cpp button_multiplayer`, when it starts a new session (the NetInit
+counterpart), calls `voice::reset_volume()`: the volume goes back to its start value, 1.0 (slider 20) unless
+`UNCHARTED_U2MP_VOICE_VOLUME` sets another; log `voice: volume back to X (online multiplayer entered)` when it
+changed.
 
 ### J7. Own character's mouth follows the microphone (PS3 `0x51b3ec` -> `0x437c0` with `0x4e6f78`)
 
@@ -227,12 +268,26 @@ voice-line value. To do: find the PS4 counterpart of the channel setter (PS4 cod
 capture loudness while our gate is open (`Gate` / capture callback already measure it; the scale must match the
 voice-line values, open question 5). Remote characters are not affected on PS3 either.
 
+**Off (not confirmed).** PS4 1.02: `0x23c98b` and `0x47305b` both lie in channel lookups for sid `0x94bb3775`;
+`0x473010` is a setter (value in xmm0, channel list in rsi; it scales the value by the constant at `0xe6087c`, caps
+it at `0xe60880` and acts on the channel only when the result is above 0). It has three callers, each feeding a sound object's amplitude
+(vtable `+0xf8`) times a constant: `0x21d3a6` (object `+0x253c`), `0x607763` (tail jump, object `+0xc80`, sound
+`+0x2c98`) and `0x714db6` (object `+0x2ec0`, clamped at 0). Which one is the local player's character update, and
+whether the sid is the mouth (it is not in our name dictionary), cannot be told from the image alone, so nothing is
+hooked. voice.cpp `log_mouth_state` checks the setter's bytes when the audio opens and logs `voice: own character's
+mouth follows voice lines only, not the microphone (PS3 parity J7 off: channel setter 0x473010 present|differs, ...)`.
+To finish: confirm the caller and the channel in game (for example by forcing a value through one call site), then
+match the scale (question 5).
+
 ### J8. No talking icon for the local player (PS3 rows `0x4bcb38`, scoreboard `0x4c9de8` / `0x4c7c70`)
 
 PS3 looks the voice state up through the member's connection, and the local player has none, so the own row never
 shows the talking (or muted) icon anywhere. Ours: `voice::talking(local id)` is true while we send, so the own roster
 row lights up. Parity: no icon for the local player. Open question 1 (a "you are transmitting" hint is useful with
 push to talk).
+
+**Done** (owner: PS3, no icon). `voice::talking` and `voice::muted` answer false for the local id, `frame` no longer
+marks our own sending, and `toggle_mute` ignores the local id.
 
 ## 4. Test scenarios
 
@@ -255,34 +310,36 @@ push to talk).
 
 ## 5. Open questions
 
-1. J8: keep our own-row talking icon as a deliberate PC extra (useful with push to talk), or follow PS3 (none)?
-2. J3: PS3 keeps late joiners muted until the next vote. Follow it exactly (the default here), or unmute players who
-   arrive after the vote?
-3. J6: reset the voice volume to full on each online start (PS3) or remember the slider value (current)?
-4. Voice off: should a chat restriction from the RPCN ticket (if the online program can read the subject status)
-   force voice off like PS3's PSN restriction, or is `UNCHARTED_U2MP_VOICE=off` enough?
+1. ANSWERED (owner, 2026-11-25): J8: follow PS3, no icon on the own row.
+2. ANSWERED (owner, 2026-11-25): J3: PS3 exactly, late joiners stay muted until the next vote.
+3. ANSWERED (owner, 2026-11-25): J6: back to full on each online multiplayer entry.
+4. SKIPPED (2026-11-25): Voice off from an RPCN chat restriction: the online program's interface gives the runtime no
+   ticket subject status, so `UNCHARTED_U2MP_VOICE=off` stays the only switch.
 5. J7: the channel's value range (voice-line amplitude scale at PS3 data `0xe10458` base, divisor `-0x7fc4`) and the
    loudness scale of cellVoice's energy level (0..1 assumed) must be matched to our RMS gate; confirm the channel is
-   the mouth on PS4 before shipping.
+   the mouth on PS4 and which of the setter's three callers is the local player's update (J7 Off paragraph) before
+   shipping.
 6. J1: the purpose of PS4 reader `0x66644b` (inside `0x666310`..) was not traced; it only reads the level.
+7. J1: on a client the game's readers light only for the host (star topology: no connection record for the other
+   clients). Relayed records would fix it but change PS4 event routing; owner's call.
 
 ## 6. Status table
 
 | PS3 | Role (what it does) | Status | Where (our code / PS4) / item |
 |---|---|---|---|
 | 0x4dbe70 | bandwidth stats overlay (devkit DIP switch only) | PLATFORM | developer only; nothing |
-| 0x4e6cd0 | voice receive: frames to the player's port, talking level 10, last-heard time | MISSING | voice.cpp `receive`; J1, J2 |
+| 0x4e6cd0 | voice receive: frames to the player's port, talking level 10, last-heard time | COVERED | voice.cpp `receive` / `use_voice`, `gamenet::set_talk_levels`; J1, J2 (client view of other clients: J1 open part) |
 | 0x4e6e24 | master (speaker) volume read | COVERED | menus.cpp `query_volume`, `voice::volume` |
 | 0x4e6e64 | one player's playback volume | COVERED | voice.cpp `update_gating` / `all_audible` (`parity-e` 2.1) |
 | 0x4e6e94 | master volume set | COVERED | menus.cpp `query_volume`, `voice::set_volume` |
-| 0x4e6ecc | is this player muted | MISSING | `voice::muted`; J3 (strangers), J4 (scoreboard) |
+| 0x4e6ecc | is this player muted | MISSING | `voice::muted` (one flag, J3 done); J4 (scoreboard muted icon) pending |
 | 0x4e6f04 | unmute and empty the queue (record reset) | PLATFORM | voice.cpp `forget` |
-| 0x4e6f50 | set a player's mute | MISSING | `voice::toggle_mute` / `set_muted`; J3 (arrival, vote, party join), J5 (scoreboard) |
-| 0x4e6f78 | microphone loudness while voice is detected | MISSING | voice.cpp `Gate` (PLATFORM part); J7 (mouth) |
+| 0x4e6f50 | set a player's mute | MISSING | `voice::toggle_mute` / `set_muted` / `unmute_strangers`, `frame` arrival and party join (J3 done); J5 (scoreboard action) pending |
+| 0x4e6f78 | microphone loudness while voice is detected | MISSING | voice.cpp `Gate` (PLATFORM part); J7 (mouth) off, hook point not confirmed |
 | 0x4e7038 | voice end: ports, stop, end | PLATFORM | `voice::stop` from the session teardown |
-| 0x4e71d8 | voice init: ports at volume 1.0, mic -> encoder | MISSING | voice.cpp `open_audio` (PLATFORM part); J6 (volume reset) |
+| 0x4e71d8 | voice init: ports at volume 1.0, mic -> encoder | COVERED | voice.cpp `open_audio` (PLATFORM part); `voice::reset_volume` from `button_multiplayer` (J6) |
 | 0x4e7464 | voice send: one 120-byte chunk per packet, only to players heard | PLATFORM | voice.cpp `frame` (star relay); visible part J2 |
-| 0x4e7560 | voice read: mic data to every connection queue, telemetry byte, level decay | MISSING | voice.cpp capture + `frame` (PLATFORM part); J1 (decay) |
+| 0x4e7560 | voice read: mic data to every connection queue, telemetry byte, level decay | COVERED | voice.cpp capture + `frame` (PLATFORM part); `decay_talk_level` in `frame` (J1) |
 | 0x4e77e0 | per-connection voice port, queue, volume 1.0 | PLATFORM | voice.cpp `Speaker` on first packet |
 | 0x4e7988 | read a named file into a buffer (not voice) | PLATFORM | progression_store.cpp / netpatch.cpp |
 | 0x468dc0 | EarnMedalClient (60) Write: empty | COVERED | PS4 `0x61d270` |
@@ -292,5 +349,6 @@ push to talk).
 | 0x469ef8 | EarnMedal (61) Read (slot 2): the same three words | COVERED | events.cpp `read_earn_medal` |
 | 0x46b760 | EarnMedal (61) Apply: award to the tracker with that net id | COVERED | PS4 `0x61d1e0` -> `0x5779a0` intact |
 
-Counts: 21 rows. COVERED 9, PLATFORM 6, MISSING 6 (items J1..J8; J4, J5 and J8 come from tracing the callers of the
-mute and talking queries).
+Counts: 21 rows. COVERED 12, PLATFORM 6, MISSING 3 (0x4e6ecc: J4, 0x4e6f50: J5, 0x4e6f78: J7). Items: J1, J2, J3, J6,
+J8 done; J4, J5 pending (scoreboard.cpp); J7 off. J4, J5 and J8 come from tracing the callers of the mute and
+talking queries.

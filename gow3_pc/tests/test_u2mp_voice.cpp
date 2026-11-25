@@ -5,6 +5,7 @@
 // 2. Jitter buffer: reordering, loss (with FEC look-ahead), late and duplicate frames, rebuffering,
 //    sequence wrap-around, latency cap.
 // 3. Mixer clamp and the voice-activity gate.
+// 4. PS3 parity J1..J3 (spec parity-j-voice-medals.md): talking level decay, which packets light it, mute flag.
 #include "../src/u2mp/voice.h"
 
 #include <cmath>
@@ -178,12 +179,66 @@ static void mixer_and_gate() {
     CHECK(open == 14);   // held 300 ms (15 frames, counting the speech frame)
 }
 
+static void talking_level() {
+    // set to 10 on voice, 1.0 lower per frame: talking (>= 1.0) for the frame it arrives and 9 decays more
+    float level = kTalkOnVoice;
+    int frames = 0;
+    while (is_talking(level)) {
+        ++frames;
+        level = decay_talk_level(level);
+    }
+    CHECK(frames == 10);
+    CHECK(level == 0.0f);
+    CHECK(decay_talk_level(0.0f) == 0.0f);   // stays at 0
+    CHECK(decay_talk_level(0.5f) == 0.0f);   // never below 0
+    CHECK(!is_talking(0.99f) && is_talking(1.0f));
+}
+
+static void which_packets_count() {
+    // heard: lights and plays
+    VoiceUse u = use_voice(true, false, false, true);
+    CHECK(u.talking && u.played);
+    // muted (by hand, or a stranger before the vote): lights the level, silent
+    u = use_voice(true, false, true, true);
+    CHECK(u.talking && !u.played);
+    // the in-match gating silences the speaker: neither (the PS3 sender would not have sent)
+    u = use_voice(true, true, false, true);
+    CHECK(!u.talking && !u.played);
+    // our voice off: neither
+    u = use_voice(false, false, false, true);
+    CHECK(!u.talking && !u.played);
+    // no playback stream: still lights the level
+    u = use_voice(true, false, false, false);
+    CHECK(u.talking && !u.played);
+}
+
+static void mute_transitions() {
+    // a new connection: muted unless a member of our party
+    CHECK(next_mute(false, MuteEvent::Arrived, false));
+    CHECK(!next_mute(false, MuteEvent::Arrived, true));
+    // joining our party unmutes
+    CHECK(!next_mute(true, MuteEvent::JoinedParty, true));
+    // the vote unmutes everyone outside the party, also a hand mute; party members keep theirs
+    CHECK(!next_mute(true, MuteEvent::VoteOpened, false));
+    CHECK(!next_mute(false, MuteEvent::VoteOpened, false));
+    CHECK(next_mute(true, MuteEvent::VoteOpened, true));
+    CHECK(!next_mute(false, MuteEvent::VoteOpened, true));
+    // late joiner (after the vote): muted until the next vote
+    bool muted = next_mute(false, MuteEvent::Arrived, false);
+    CHECK(muted);
+    muted = next_mute(muted, MuteEvent::VoteOpened, false);
+    CHECK(!muted);
+}
+
 int main() {
     codec_round_trip();
     jitter_ordering();
     jitter_loss();
     jitter_wrap_and_cap();
     mixer_and_gate();
+    talking_level();
+    which_packets_count();
+    mute_transitions();
     if (failures) {
         std::printf("%d failure(s)\n", failures);
         return 1;

@@ -23,6 +23,7 @@
 #include "online.h"
 #include "session_api.h"
 #include "u2mp_internal.h"
+#include "voice.h"
 
 namespace u2mp {
 namespace {
@@ -180,7 +181,6 @@ struct Machine {
     int criteria = 0;            // the search pass (PS3 criteria index 0xf22630)
     uint32_t party_wait = 0;     // leader: since when it waits for its party to come back (0 none)
     uint32_t quiet_until = 0;    // no gather decision before (a balance kick runs)
-    bool strangers_muted = false;
     uint32_t leave_at = 0;       // leader in a stranger's room: leave then (0 none)
     bool follow_leader_out = false;   // our party's leader left matchmaking: go back to it
 };
@@ -244,19 +244,13 @@ void begin(bool host) {
     const bool online = online::mm_online();
     put<uint8_t>(kNetInfo + kInfoCreatedByMe, host && !online ? 1 : 0);
     m.seen_phase = 1;
-    m.strangers_muted = online;
     log("matchmaking: started (%s)", host ? "host" : "member");
 }
 
-// PS3 0x4b0700 (client) / 0x4b0868 (host): the vote opening unmutes every player outside our party.
-void unmute_strangers() {
-    if (!m.strangers_muted) return;
-    m.strangers_muted = false;
-    log("matchmaking: the vote opens: players outside the party are heard now");
-}
-
 void open_vote(int16_t a, int16_t b, uint32_t ticks) {
-    unmute_strangers();
+    // PS3 0x4b0700 (client) / 0x4b0868 (host): the vote opening unmutes every player outside our party (spec
+    // parity-j-voice-medals.md J3: the one mute flag, set when they connected).
+    voice::unmute_strangers();
     put<uint8_t>(kVote + 0x00, 1);
     put<uint8_t>(kVote + 0x01, 0);
     put<uint8_t>(kVote + 0x02, 0);
@@ -860,8 +854,6 @@ void on_host_left(bool host) {
     set_net_sm(kSmStartMatchmaking);
     ensure_page();
 }
-
-bool strangers_muted() { return m.running && m.strangers_muted && phase() == 1; }
 
 void on_message(uint8_t from, const uint8_t *data, size_t size) {
     if (size == 0) return;
