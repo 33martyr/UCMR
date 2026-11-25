@@ -28,7 +28,7 @@ void text_set_slot(int slot, const char *text);
 constexpr uint32_t kTextPlayer = sid("U2MP_PC_TEXT_PLAYER"), kTextStore = sid("U2MP_PC_TEXT_STORE"),
                    kTextVoice = sid("U2MP_PC_TEXT_VOICE"), kTextLeader = sid("U2MP_PC_TEXT_LEADER"),
                    kTextInvite = sid("U2MP_PC_TEXT_INVITE"), kTextClanTag = sid("U2MP_PC_TEXT_CLANTAG"),
-                   kTextTwitter = sid("U2MP_PC_TEXT_TWITTER"), kTextCinemaSend = sid("U2MP_PC_TEXT_CINEMA_SEND"),
+                   kTextCinemaSend = sid("U2MP_PC_TEXT_CINEMA_SEND"),
                    kTextCinemaReceive = sid("U2MP_PC_TEXT_CINEMA_RECEIVE"), kTextYou = sid("U2MP_PC_TEXT_YOU"),
                    kTextMuted = sid("U2MP_PC_TEXT_MUTED"), kTextUnmuted = sid("U2MP_PC_TEXT_UNMUTED"),
                    kTextDeclineRequest = sid("U2MP_PC_TEXT_DECLINE_REQUEST"),

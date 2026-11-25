@@ -13,8 +13,7 @@
 #include <cstring>
 #include <xmmintrin.h>
 
-#include <windows.h>
-
+#include "host_memory.h"
 #include "u2mp_internal.h"
 
 extern "C" int runtime_memory_is_mapped(uintptr_t address, uint64_t size);
@@ -45,11 +44,7 @@ template <typename F> F guest(uint64_t offset) { return reinterpret_cast<F>(imag
 
 bool readable(uint64_t address, size_t bytes) {
     if (!address || !bytes) return false;
-    MEMORY_BASIC_INFORMATION m{};
-    if (VirtualQuery(reinterpret_cast<const void *>(address), &m, sizeof m) != sizeof m) return false;
-    if (m.State != MEM_COMMIT || (m.Protect & (PAGE_NOACCESS | PAGE_GUARD))) return false;
-    const uint64_t end = address + bytes;
-    return end >= address && end <= uint64_t(reinterpret_cast<uintptr_t>(m.BaseAddress)) + m.RegionSize;
+    return host_readable(reinterpret_cast<const void *>(address), bytes);
 }
 
 // Integer arithmetic on game clocks wraps like the game's 32-bit registers do.
@@ -810,7 +805,8 @@ void booster_pair(uint64_t a, uint64_t b, float fade) {
 
 void boosters(uint64_t element, uint64_t local, uint32_t flags, bool coop) {
     float fade = load<float>(element + 0x1920);
-    if (load<uint8_t>(abs_of(kNgm) + 0x209c) != 0 && (flags & 0x40000) && global<int32_t>(kCinemaMode) != 0 &&
+    // Film site: only in the follow camera (cinema mode 0), as PS3 0x8af18c (parity-n-remaining.md N1).
+    if (load<uint8_t>(abs_of(kNgm) + 0x209c) != 0 && (flags & 0x40000) && global<int32_t>(kCinemaMode) == 0 &&
         local) {
         uint64_t a = booster_by_index(load<int32_t>(local + 0x2a0));
         uint64_t b = booster_by_index(load<int32_t>(local + 0x2a4));

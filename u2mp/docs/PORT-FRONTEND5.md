@@ -28,7 +28,7 @@ and `0x4233c4(menu, PAGE_MULTIPLAYER_LOADING)` (page record +216 = 2: its lists 
 
 | # | PS3 | what | data | status |
 |---|---|---|---|---|
-| 1 | `0x4ae6a0..0x4ae6ec` | `0x158ff8(cdf70794, ee0494, obj+4, 30, 1.0)`: looks like a DC tunable read (default 30) | | callee not identified |
+| 1 | `0x4ae6a0..0x4ae6ec` | `0x158ff8(cdf70794, ee0494, obj+4, 30, 1.0)`: looks like a DC tunable read (default 30) | | identified (`spec/parity-n-remaining.md` N4): publishes the "shown" byte as a short-lived named state nobody reads; no visible effect, nothing to port |
 | 2 | `0x4aef94..0x4aefdc` | **background**: when `0x49e6e0(ngm)`, sprintf(`"loading-screens/%s"`, `"fort.dds"`) and `0x414968(menu+0x10, path)`: the gallery loader, `"%s/build/main/gallery1/%s"`, path at slot +444, request +180 = 1, +699 = 0, +700 = 10 | PS4 has the file: `uiextra.psarc: gallery1/loading-screens/fort.dds`; PS4 gallery loader inlined at `0x58b5c8` (slot `[widget+0x238]`: path +0x268, request +0x120, +0x367, +0x368 = 10; the widget gets the slot at construction `0x5c5fce` from `[rbp-0x158]`, most likely `menu+0x10` as on PS3) | traced, not ported |
 | 3 | `0x4aeff8..0x4af06c` | obj+0 fade: += / -= frame time ([e60a00]+244), clamped 0..1 | | traced |
 | 4 | `0x4ae724..0x4ae7ec` | colour transforms: identity `0x420f58`, copy `0x421548`, from packed colour `0x421018(0xff000000)`, compose `0x4212ec` (10 floats: 5 multipliers, 5 offsets); alpha = (obj+0 - 0.4) * 1.6667 clamped 0..1 | | traced |

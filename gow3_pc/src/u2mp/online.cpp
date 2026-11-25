@@ -41,14 +41,6 @@
 #include <string>
 #include <vector>
 
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
-
 #include "cinema.h"
 #include "frontend3.h"
 #include "online.h"
@@ -210,9 +202,8 @@ bool load() {
         log("online: off (UNCHARTED_U2MP_JOIN is set: LAN join by address)");
         return false;
     }
-    wchar_t path[1024];
-    const DWORD n = GetEnvironmentVariableW(L"UNCHARTED_U2MP_ONLINE_EXE", path, DWORD(sizeof path / sizeof *path));
-    if (!n || n >= sizeof path / sizeof *path) {
+    online_link::Path path;
+    if (!online_link::env_path("UNCHARTED_U2MP_ONLINE_EXE", path)) {
         log("online: off (UNCHARTED_U2MP_ONLINE_EXE not set: no online extension): LAN only");
         return false;
     }
@@ -1133,7 +1124,7 @@ bool joinable(const PresenceData &d) {
 uint64_t match_end_now() {
     static uint64_t kept = 0;
     const float limit = G<float>(kNgm + 0x21b8);
-    if (!(limit > 0.0f)) return kept = 0;
+    if (!(limit > 0.0f) || int32_t(limit * 300.0f) <= 0) return kept = 0;
     const int16_t game = G<int16_t>(kNgm + 0x1ca0);
     const uint8_t *games = guest<const uint8_t *(U2MP_GUEST *)(uint32_t)>(0xa15e70)(0x3b9a067du);   // *net-games*
     int32_t type = -1;
@@ -1141,6 +1132,9 @@ uint64_t match_end_now() {
         const uint8_t *records = *reinterpret_cast<uint8_t *const *>(games + 8);
         if (records) type = *reinterpret_cast<const int32_t *>(records + 0x90 * size_t(game) + 0xc);
     }
+    // PS3 (parity-n-inlined N1): no end time without a current net game record, nor for co-op (types 4, 8, 9, 12),
+    // so friends see no "Match ends in" line for a co-op game.
+    if (type < 0 || type == 4 || type == 8 || type == 9 || type == 12) return kept = 0;
     // The clock the HUD counts down: from the round start, from the match start in game type 10.
     const int32_t start = G<int32_t>(kNgm + (type == 10 ? 0x1d60 : 0x1d5c));
     const int32_t elapsed = int32_t(uint32_t(G<int32_t>(0x1116384)) - uint32_t(start));

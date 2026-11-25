@@ -136,5 +136,8 @@ void install_crashlog() {
 
 }  // namespace u2mp
 #else
+// POSIX: nothing to add. The runtime's own SIGSEGV / SIGBUS / SIGILL handler (probe.c fault) already writes the
+// fault with its guest offset or host module and the backtrace before the process ends; a handler installed here
+// would replace that one, which also recovers the guest faults the runtime expects.
 namespace u2mp { void install_crashlog() {} }
 #endif

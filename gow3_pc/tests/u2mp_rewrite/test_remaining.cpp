@@ -15,6 +15,7 @@
 // by "same buffer as before", the TextDb hook is executed instead of compared byte for byte.
 #include "harness.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <functional>
@@ -43,6 +44,7 @@ namespace u2mp {
 bool edit_clan_tag();
 void cinema_pick_friend();
 void clan_tag_frame();
+void clan_tag_check_frame();   // new only (parity A 2.1)
 }  // namespace u2mp
 
 namespace {
@@ -91,9 +93,9 @@ void call_rel(uint64_t at, uint64_t target) {   // E8 rel32 at `at`
     put<int32_t>(at + 1, int32_t(int64_t(target) - int64_t(at + 5)));
 }
 
-const uint64_t kRetStubs[20] = {0x61b900, 0x5ec490, 0x5ec460, 0x5ebde0, 0x5ec4a0, 0x5ec4b0, 0x5ec480,
+const uint64_t kRetStubs[18] = {0x61b900, 0x5ec490, 0x5ec460, 0x5ebde0, 0x5ec4a0, 0x5ec4b0, 0x5ec480,
                                 0x5ec4c0, 0x5ecb70, 0x5ebdd0, 0x5ebea0, 0x5ec000, 0x5ed8a0, 0x5ed8b0,
-                                0x5ed8c0, 0x64e900, 0x6769d0, 0x6769e0, 0x5e4510, 0x5e4520};
+                                0x5ed8c0, 0x64e900, 0x5e4510, 0x5e4520};
 
 // the clean image: every check of install_remaining passes
 void base() {
@@ -230,31 +232,44 @@ std::vector<uint8_t> masked() {
 int g_total = 0, g_pass = 0;
 std::vector<std::string> g_failed;
 
-void run(const char *name, const std::function<void()> &setup, const std::function<void(const Ns &)> &act) {
+using Rec = std::vector<std::string>;
+
+// one build on a fresh image: setup, install, act; its record (and the masked image)
+Rec run_side(const Ns &ns, const std::function<void()> &setup, const std::function<void(const Ns &)> &act,
+             std::vector<uint8_t> *img) {
+    hx::clear();
+    hx::bind_both();
+    st = hx::fk::State{};
+    g_tables.clear();
+    g_dead.clear();
+    base();
+    if (setup) setup();
+    int installed = 0;
+    ns.install(installed);
+    rec("installed %d", installed);
+    guest_stubs();
+    if (act) act(ns);
+    if (img) *img = masked();
+    return hx::calls;
+}
+
+// to_new: the old record in the form a documented change gives it (named where a scenario passes one); it runs
+// right after the old build, so it sees that build's scenario state.
+void run(const char *name, const std::function<void()> &setup, const std::function<void(const Ns &)> &act,
+         const std::function<void(Rec &)> &to_new = {}) {
     std::vector<std::string> calls[2];
     std::vector<uint8_t> img[2];
     for (int k = 0; k < 2; k++) {
-        const Ns &ns = k ? kNew : kOld;
-        hx::clear();
-        hx::bind_both();
-        st = hx::fk::State{};
-        g_tables.clear();
-        g_dead.clear();
-        base();
-        if (setup) setup();
-        int installed = 0;
-        ns.install(installed);
-        rec("installed %d", installed);
-        guest_stubs();
-        if (act) act(ns);
-        calls[k] = hx::calls;
-        img[k] = masked();
+        calls[k] = run_side(k ? kNew : kOld, setup, act, &img[k]);
+        if (k == 0 && to_new) to_new(calls[0]);
     }
     g_total++;
-    // HX_SHOW=<part of a scenario name>: print the old build's record of the matching scenarios
+    // HX_SHOW=<part of a scenario name>: print both builds' records of the matching scenarios
     if (const char *show = std::getenv("HX_SHOW"); show && std::strstr(name, show)) {
-        std::printf("---- %s (old)\n", name);
-        for (const auto &c : calls[0]) std::printf("  %s\n", c.c_str());
+        for (int k = 0; k < 2; k++) {
+            std::printf("---- %s (%s)\n", name, k ? "new" : "old");
+            for (const auto &c : calls[k]) std::printf("  %s\n", c.c_str());
+        }
     }
     if (hx::same(name, calls[0], calls[1], &img[0], &img[1])) {
         g_pass++;
@@ -262,6 +277,101 @@ void run(const char *name, const std::function<void()> &setup, const std::functi
     } else {
         g_failed.push_back(name);
     }
+}
+
+// ---- new-only scenarios: behaviour the old code did not have, checked against the specs ------------------------
+const char *g_scenario = "";
+int g_failed_checks = 0;
+#define EXPECT(c)                                                                     \
+    do {                                                                              \
+        if (!(c)) {                                                                   \
+            std::printf("FAIL %s (line %d): %s\n", g_scenario, __LINE__, #c);         \
+            ++g_failed_checks;                                                        \
+        }                                                                             \
+    } while (0)
+void run_new(const char *name, const std::function<void()> &setup, const std::function<void(const Ns &)> &act,
+             const std::function<void(const Rec &)> &check) {
+    const Rec r = run_side(kNew, setup, act, nullptr);
+    g_total++;
+    g_scenario = name;
+    const int before = g_failed_checks;
+    check(r);
+    const bool ok = g_failed_checks == before;
+    const char *show = std::getenv("HX_SHOW");
+    if (!ok || (show && std::strstr(name, show))) {
+        std::printf("---- %s (new)\n", name);
+        for (const auto &c : r) std::printf("  %s\n", c.c_str());
+    }
+    if (ok) {
+        g_pass++;
+        std::printf("PASS %s (new only)\n", name);
+    } else {
+        hx::failures++;
+        g_failed.push_back(name);
+    }
+}
+size_t count_of(const Rec &r, const std::string &line) { return size_t(std::count(r.begin(), r.end(), line)); }
+size_t count_prefix(const Rec &r, const std::string &prefix) {
+    size_t n = 0;
+    for (const auto &l : r) n += l.rfind(prefix, 0) == 0;
+    return n;
+}
+// the ShowPopup record of a descriptor: title, page, then {text, callback} pairs (19 words in all)
+std::string popup_line(uint32_t title, const std::vector<std::pair<uint32_t, uint32_t>> &opts, uint32_t page = 0x99ab57c2) {
+    uint32_t d[0x13] = {title, page, uint32_t(opts.size())};
+    for (size_t i = 0; i < opts.size() && i < 8; i++) d[3 + 2 * i] = opts[i].first, d[4 + 2 * i] = opts[i].second;
+    std::string s;
+    char b[16];
+    for (int i = 0; i < 0x13; i++) {
+        std::snprintf(b, sizeof b, "%s%x", i ? " " : "", d[i]);
+        s += b;
+    }
+    return "ShowPopup img+0x1136640 [" + s + "] 1";
+}
+
+// ---- documented changes: old record -> new form ------------------------------------------------------------------
+void rename_line(Rec &r, const std::string &from, const std::string &to) {
+    for (auto &l : r)
+        if (l == from) l = to;
+}
+void insert_after(Rec &r, const std::string &anchor, const std::string &line) {
+    for (size_t i = 0; i < r.size(); i++)
+        if (r[i] == anchor) r.insert(r.begin() + std::ptrdiff_t(++i), line);
+}
+// parity-g-friends.md G1 (f11e480): Players Met rows come from progression_players_met (at most 50, the store's
+// rule) instead of progression_recent_players(50).
+void players_met_rows(Rec &r) { rename_line(r, "progression_recent_players 50", "progression_players_met"); }
+// parity-e-flow2.md 2.7 (fa52c63): the party row popup labels Mute / Unmute by the member's voice state, asked right
+// after the row's text is set (nobody is muted in these scenarios: "Mute" as before).
+std::function<void(Rec &)> mute_label(const char *name, uint32_t id) {
+    return [=](Rec &r) {
+        insert_after(r, std::string("text_set_player [") + name + "]", "voice::muted " + std::to_string(id) + " -> 0");
+    };
+}
+// Friends list (parity-b-menus.md, b2782c2: the pick is kept by name, the list being sorted; parity-e-flow2.md 2.8,
+// fa52c63: Join / Invite only for a friend outside our party, asked with friend_view; parity-g-friends.md G4,
+// f11e480, and b2782c2: View Profile shows the friend card lines, else the profile text, and the party members).
+// The stand-ins give no card lines, no presence and no party list, so the texts stay the old ones.
+void friends_list(Rec &r) {
+    auto name_of = [](int i) { return i >= 0 && size_t(i) < st.friends.size() ? st.friends[size_t(i)].name : std::string(); };
+    Rec out;
+    for (size_t i = 0; i < r.size(); i++) {
+        const std::string &l = r[i];
+        int k = -1;
+        if (std::sscanf(l.c_str(), "online::friend_row %d", &k) == 1 && i && r[i - 1] == "online::friend_count")
+            out.push_back("online::friend_name " + std::to_string(k));
+        else if (std::sscanf(l.c_str(), "online::friend_joinable %d", &k) == 1)
+            out.push_back("online::friend_view " + std::to_string(k));
+        else if (std::sscanf(l.c_str(), "online::accept_request %d", &k) == 1 || std::sscanf(l.c_str(), "online::remove_friend %d", &k) == 1)
+            out.push_back("online::friend_index [" + name_of(k) + "]");
+        else if (std::sscanf(l.c_str(), "online::join_friend %d", &k) == 1 || std::sscanf(l.c_str(), "online::invite_friend %d", &k) == 1)
+            out.insert(out.end(), 2, "online::friend_index [" + name_of(k) + "]");
+        else if (std::sscanf(l.c_str(), "online::profile_text %d", &k) == 1)
+            out.insert(out.end(), {"online::friend_index [" + name_of(k) + "]", "online::friend_party " + std::to_string(k) + " -> 0",
+                                   "friend_card_lines " + std::to_string(k), "online::friend_view " + std::to_string(k)});
+        out.push_back(l);
+    }
+    r = out;
 }
 
 void cb(uint64_t off, uint32_t ev = 0, uint32_t row = 0, uint32_t n = 0) {
@@ -477,7 +587,12 @@ int main() {
     // ======== state as the process starts (must run first) ========
     run("initial: Kick From Party, no member selected", nullptr, [](const Ns &) { cb(0x5ec4a0); });
     run("initial: Promote, no member selected", [] { st.promote_result = true; }, [](const Ns &) { cb(0x5ec4c0); });
-    run("initial: Mute, no member selected", members, [](const Ns &) { cb(0x5ec4b0); });
+    // parity-d-flow1.md 2.4 (d582ac6), new only: Mute flips the member's flag silently (no "muted" box, no voice-off
+    // box); net id 0 is the fake roster's "Zero", not this PC
+    run_new("initial: Mute, no member selected", members, [](const Ns &) { cb(0x5ec4b0); }, [](const Rec &r) {
+        EXPECT(count_of(r, "session::member_name 0") == 1 && count_of(r, "voice::toggle_mute 0") == 1);
+        EXPECT(count_of(r, "show_page 0x719e9fec") == 0 && count_of(r, "voice::enabled") == 0);
+    });
     run("initial: Join Party online, no friend selected", [] { st.active = true; }, [](const Ns &) { cb(0x5ec000); });
     run("initial: Invite To Party online, no friend selected", [] { st.active = true; }, [](const Ns &) { cb_null(0x5ebee0); });
     run("initial: clan_tag_frame not editing (no poll)", [] { st.poll_results = {1}; },
@@ -691,9 +806,11 @@ int main() {
     b6("damage INT_MIN", [] { put<int32_t>(EV + 0x14, INT32_MIN); });
 
     // ======== B7 KickGriefer ========
+    // parity-c-match.md 2.2 (70949df): the host's griefer kick kicks with block (session::kick_griefer)
     auto b7 = [](const char *n, std::function<void()> s) {
         run(n, [s] { put<uint32_t>(EV + 0x0c, 0x80000007u); if (s) s(); },
-            [](const Ns &) { reinterpret_cast<void(U2MP_GUEST *)(void *, void *)>(mem + 0x61b900)(mem + EV, nullptr); });
+            [](const Ns &) { reinterpret_cast<void(U2MP_GUEST *)(void *, void *)>(mem + 0x61b900)(mem + EV, nullptr); },
+            [](Rec &r) { rename_line(r, "session::kick 2147483655", "session::kick_griefer 2147483655"); });
     };
     b7("B7 not host", [] { put<uint64_t>(MATCH + 0x10, 1); put<uint32_t>(MATCH + 0xb04, 1); });
     b7("B7 host, kick true", [] { st.kick_result = true; });
@@ -702,19 +819,50 @@ int main() {
 
     // ======== B8 / B9 / B10 ========
     run("B8 party row 15 -> 5 not found", members, [](const Ns &) { cb(0x5ec490, 0, 0, 15); });
-    run("B8 party row 13 -> 3 (other member, client)", members, [](const Ns &) { cb(0x5ec490, 0, 0, 13); });
+    run("B8 party row 13 -> 3 (other member, client)", members, [](const Ns &) { cb(0x5ec490, 0, 0, 13); },
+        mute_label("Carol", 33));
     run("B8 party row 0xffffffff % 10", members, [](const Ns &) { cb(0x5ec490, 0, 0, 0xffffffffu); });
-    run("B8 own row", members, [](const Ns &) { cb(0x5ec490, 0, 0, 0); });
-    run("B8 match row other member as host offline", [] { members(); st.is_host = true; }, [](const Ns &) { cb(0x5ec460, 0, 7, 1); });
-    run("B8 match row other member as host online", [] { members(); st.is_host = true; st.active = true; }, [](const Ns &) { cb(0x5ec460, 0, 0, 3); });
-    run("B8 match row client online", [] { members(); st.active = true; }, [](const Ns &) { cb(0x5ec460, 0, 0, 1); });
-    run("B8 match row -1 (signed)", members, [](const Ns &) { cb(0x5ec460, 0, 0, 0xffffffffu); });
-    run("B8 match row 13 (no % 10)", members, [](const Ns &) { cb(0x5ec460, 0, 0, 13); });
-    run("B8 arg NULL (party, match)", members, [](const Ns &) { cb_null(0x5ec490); cb_null(0x5ec460); });
+    // parity-b-menus.md (b2782c2), new only: the own row has no popup and no box any more (its row query answers op 7
+    // with 0, so the game drops the press; one that still arrives does nothing)
+    auto own_row_nothing = [](const Rec &r) {
+        EXPECT(count_of(r, "session::member_at 0") == 1 && count_prefix(r, "text_set_player") == 0);
+        EXPECT(count_prefix(r, "ShowPopup") == 0 && count_of(r, "show_page 0x719e9fec") == 0);
+    };
+    run_new("B8 own row", members, [](const Ns &) { cb(0x5ec490, 0, 0, 0); }, own_row_nothing);
+    // Match / postgame rows (parity-e-flow2.md 2.7, fa52c63; parity-h-session.md H7, 426f4dd), new only: the
+    // matchmaking slot list (mm_member_at), no title, no host options: Mute / Unmute (not on the own row), Mute All
+    // unless every other is muted, Unmute All unless none is. Others here: the party's 22 and 33 (page mode 0).
+    const std::string kMatchPopup = popup_line(0, {{0xffbbac12, 0x7273924c}, {0xd381d5d8, 0x8d703d6c}});
+    auto match_popup = [kMatchPopup](int row, const char *name) {
+        return [=](const Rec &r) {
+            EXPECT(count_of(r, "session::mm_member_at " + std::to_string(row)) == 1);
+            EXPECT(count_of(r, std::string("text_set_player [") + name + "]") == 1);
+            EXPECT(count_of(r, "voice::all_muted [22,33] -> 0") == 1 && count_of(r, "voice::none_muted [22,33] -> 1") == 1);
+            EXPECT(count_of(r, kMatchPopup) == 1 && count_prefix(r, "ShowPopup") == 1);
+            EXPECT(count_of(r, "session::is_host") == 0 && count_of(r, "online::active") == 0);
+        };
+    };
+    run_new("B8 match row other member as host offline", [] { members(); st.is_host = true; }, [](const Ns &) { cb(0x5ec460, 0, 7, 1); },
+            match_popup(1, "Bob"));
+    run_new("B8 match row other member as host online", [] { members(); st.is_host = true; st.active = true; },
+            [](const Ns &) { cb(0x5ec460, 0, 0, 3); }, match_popup(3, "Carol"));
+    run_new("B8 match row client online", [] { members(); st.active = true; }, [](const Ns &) { cb(0x5ec460, 0, 0, 1); },
+            match_popup(1, "Bob"));
+    // b2782c2: the match rows read the matchmaking slot list
+    run("B8 match row -1 (signed)", members, [](const Ns &) { cb(0x5ec460, 0, 0, 0xffffffffu); },
+        [](Rec &r) { rename_line(r, "session::member_at -1", "session::mm_member_at -1"); });
+    run("B8 match row 13 (no % 10)", members, [](const Ns &) { cb(0x5ec460, 0, 0, 13); },
+        [](Rec &r) { rename_line(r, "session::member_at 13", "session::mm_member_at 13"); });
+    run_new("B8 arg NULL (party, match)", members, [](const Ns &) { cb_null(0x5ec490); cb_null(0x5ec460); }, [](const Rec &r) {
+        // party row 0 (own): nothing; match row 0 (own): no Mute, only Mute All
+        EXPECT(count_of(r, "session::member_at 0") >= 1 && count_of(r, "session::mm_member_at 0") == 1);
+        EXPECT(count_prefix(r, "ShowPopup") == 1 && count_of(r, popup_line(0, {{0xd381d5d8, 0x8d703d6c}})) == 1);
+        EXPECT(count_of(r, "show_page 0x719e9fec") == 0 && count_prefix(r, "voice::muted") == 0);
+    });
     run("B8 member with id 0 selected, then kick", [] { members(); st.local_id = 5; st.is_host = true; },
-        [](const Ns &) { cb(0x5ec490, 0, 0, 9); cb(0x5ec4a0); });
-    run("B9 LIST_FRIENDS offline: row from +4", members, [](const Ns &) { cb(0x5ebde0, 0, 1, 3); });
-    run("B9 LIST_FRIENDS offline: arg NULL", members, [](const Ns &) { cb_null(0x5ebde0); });
+        [](const Ns &) { cb(0x5ec490, 0, 0, 9); cb(0x5ec4a0); }, mute_label("Zero", 0));
+    run("B9 LIST_FRIENDS offline: row from +4", members, [](const Ns &) { cb(0x5ebde0, 0, 1, 3); }, mute_label("Bob", 22));
+    run_new("B9 LIST_FRIENDS offline: arg NULL", members, [](const Ns &) { cb_null(0x5ebde0); }, own_row_nothing);
     run("B9 LIST_FRIENDS online row 0 (join list)", [] { st.active = true; friends5(); }, [](const Ns &) { cb(0x5ebde0, 0, 0, 0); });
     run("B9 LIST_FRIENDS online arg NULL", [] { st.active = true; friends5(); }, [](const Ns &) { cb_null(0x5ebde0); });
     for (int r = 1; r <= 7; r++) {
@@ -723,28 +871,29 @@ int main() {
         run(n, [] { st.active = true; friends5(); }, [r](const Ns &) {
             cb(0x5ebde0, 0, uint32_t(r), 0);
             rec("cb count %u", get<uint32_t>(MENU + 0x18ec));
-        });
+        }, friends_list);
     }
     run("B9 LIST_FRIENDS online row -1 (0xffffffff)", [] { st.active = true; friends5(); }, [](const Ns &) { cb(0x5ebde0, 0, 0xffffffffu, 0); });
     for (int c = 0; c < 4; c++) {
         char n[64];
         std::snprintf(n, sizeof n, "B9 kind 0 joinable=%d online=%d", c & 1, c >> 1);
         run(n, [c] { st.active = true; st.friends = {F("X - x", "x", 0, (c >> 1) != 0, (c & 1) != 0)}; },
-            [](const Ns &) { cb(0x5ebde0, 0, 1, 0); });
+            [](const Ns &) { cb(0x5ebde0, 0, 1, 0); }, friends_list);
     }
     for (int r = 1; r <= 5; r++) {
         char n[64];
         std::snprintf(n, sizeof n, "B9 table full (128 foreign), row %d", r);
-        run(n, [] { st.active = true; friends5(); fill_cbs(128); }, [r](const Ns &) { cb(0x5ebde0, 0, uint32_t(r), 0); });
+        run(n, [] { st.active = true; friends5(); fill_cbs(128); }, [r](const Ns &) { cb(0x5ebde0, 0, uint32_t(r), 0); },
+            friends_list);
     }
     run("B9 table 127 entries (only ACCEPT fits), kind 1 and 0", [] { st.active = true; friends5(); fill_cbs(127); },
         [](const Ns &) {
             cb(0x5ebde0, 0, 3, 0);
             cb(0x5ebde0, 0, 1, 0);
             rec("cb count %u", get<uint32_t>(MENU + 0x18ec));
-        });
+        }, friends_list);
     run("B9 table 126 entries (ACCEPT, REMOVE fit)", [] { st.active = true; friends5(); fill_cbs(126); },
-        [](const Ns &) { cb(0x5ebde0, 0, 3, 0); cb(0x5ebde0, 0, 4, 0); });
+        [](const Ns &) { cb(0x5ebde0, 0, 3, 0); cb(0x5ebde0, 0, 4, 0); }, friends_list);
     run("B9 our ids already present (overwritten in place)", [] {
         st.active = true;
         friends5();
@@ -752,18 +901,18 @@ int main() {
         put_cb(2, sid("U2MP_PC_CB_FRIEND_REMOVE"));
         put_cb(5, 0x3fe6f70e);
         put_cb(7, sid("U2MP_PC_CB_FRIEND_ACCEPT"));
-    }, [](const Ns &) { cb(0x5ebde0, 0, 3, 0); rec("cb count %u", get<uint32_t>(MENU + 0x18ec)); });
+    }, [](const Ns &) { cb(0x5ebde0, 0, 3, 0); rec("cb count %u", get<uint32_t>(MENU + 0x18ec)); }, friends_list);
     run("B9 our id at entry 5 with count 200 (found, no append)", [] {
         st.active = true; friends5(); fill_cbs(200);
         put_cb(5, sid("U2MP_PC_CB_FRIEND_ACCEPT"));
         put_cb(6, sid("U2MP_PC_CB_FRIEND_REMOVE"));
         put_cb(130, 0x3fe6f70e);
-    }, [](const Ns &) { cb(0x5ebde0, 0, 1, 0); cb(0x5ebde0, 0, 3, 0); });
+    }, [](const Ns &) { cb(0x5ebde0, 0, 1, 0); cb(0x5ebde0, 0, 3, 0); }, friends_list);
     run("B9 duplicate id in table (first one gets it)", [] {
         st.active = true; friends5(); fill_cbs(6);
         put_cb(1, 0x3fe6f70e);
         put_cb(4, 0x3fe6f70e);
-    }, [](const Ns &) { cb(0x5ebde0, 0, 1, 0); });
+    }, [](const Ns &) { cb(0x5ebde0, 0, 1, 0); }, friends_list);
     run("B10 friend callbacks: accept, remove, profile", [] { st.active = true; friends5(); },
         [](const Ns &) {
             cb(0x5ebde0, 0, 3, 0);
@@ -773,7 +922,7 @@ int main() {
             cb(0x5ebde0, 0, 1, 0);
             call_registered(0x3fe6f70e);
             call_registered(sid("U2MP_PC_CB_FRIEND_REMOVE"));
-        });
+        }, friends_list);
     run("B10 out-of-range row keeps the selection", [] { st.active = true; friends5(); },
         [](const Ns &) {
             cb(0x5ebde0, 0, 2, 0);
@@ -781,22 +930,45 @@ int main() {
             call_registered(0x3fe6f70e);
             cb(0x5ec000);
             cb(0x5ebee0);
-        });
+        }, friends_list);
+    // View Profile with the friend's party (parity-g-friends.md G4, f11e480), new only: the profile text, then the
+    // title "Party" (the game's text, here the TextDb stand-in's) and one online id per line
+    run_new("G4 View Profile lists the friend's party", [] {
+        st.active = true;
+        friends5();
+        st.party_known = true;
+        st.party = {"p1", "p2"};
+    }, [](const Ns &) { cb(0x5ebde0, 0, 2, 0); call_registered(0x3fe6f70e); }, [](const Rec &r) {
+        EXPECT(count_of(r, "online::friend_party 1 -> 1") == 1);
+        EXPECT(count_of(r, "text_set_player [profile of ben\\PCTEXT\\p1\\p2]") == 1);
+        EXPECT(count_of(r, "show_page 0x719e9fec") == 1);
+    });
+    // Friend popup of a friend already in our party (parity-e-flow2.md 2.8, fa52c63), new only: no Join / Invite
+    // (Ann is online and joinable), View Profile and Remove Friend stay
+    run_new("2.8 friend popup, friend in our party", [] { st.active = true; friends5(); st.party_member_friend = 0; },
+            [](const Ns &) { cb(0x5ebde0, 0, 1, 0); }, [](const Rec &r) {
+        std::string p;
+        for (const auto &l : r)
+            if (l.rfind("ShowPopup", 0) == 0) p = l;
+        EXPECT(count_prefix(r, "ShowPopup") == 1 && count_of(r, "online::friend_view 0") == 1);
+        EXPECT(p.find("b1600ce3") == std::string::npos && p.find("4a555973") == std::string::npos);
+        EXPECT(p.find(" 2 4040b706 3fe6f70e ") != std::string::npos);
+    });
 
     // ======== B11 / B12 ========
     auto recent50 = [] {
         st.recent.clear();
         for (int i = 0; i < 50; i++) st.recent.push_back("met" + std::to_string(i));
     };
-    run("B11 empty list", nullptr, [](const Ns &) { cb(0x5ebdf0, 0, 0, 0); });
-    run("B11 row 49 of 50 online", [recent50] { recent50(); st.active = true; }, [](const Ns &) { cb(0x5ebdf0, 0, 49, 0); });
-    run("B11 row 50 of 50", [recent50] { recent50(); }, [](const Ns &) { cb(0x5ebdf0, 0, 50, 0); });
-    run("B11 row -1", [recent50] { recent50(); }, [](const Ns &) { cb(0x5ebdf0, 0, 0xffffffffu, 0); });
-    run("B11 row 0 offline, arg NULL", [recent50] { recent50(); }, [](const Ns &) { cb_null(0x5ebdf0); });
-    run("B11 more than 50 recent (limit asked)", [] { for (int i = 0; i < 60; i++) st.recent.push_back("p" + std::to_string(i)); }, [](const Ns &) { cb(0x5ebdf0, 0, 55, 0); });
-    run("B11 registration failure (table full)", [recent50] { recent50(); st.active = true; fill_cbs(128); }, [](const Ns &) { cb(0x5ebdf0, 0, 2, 0); });
+    run("B11 empty list", nullptr, [](const Ns &) { cb(0x5ebdf0, 0, 0, 0); }, players_met_rows);
+    run("B11 row 49 of 50 online", [recent50] { recent50(); st.active = true; }, [](const Ns &) { cb(0x5ebdf0, 0, 49, 0); }, players_met_rows);
+    run("B11 row 50 of 50", [recent50] { recent50(); }, [](const Ns &) { cb(0x5ebdf0, 0, 50, 0); }, players_met_rows);
+    run("B11 row -1", [recent50] { recent50(); }, [](const Ns &) { cb(0x5ebdf0, 0, 0xffffffffu, 0); }, players_met_rows);
+    run("B11 row 0 offline, arg NULL", [recent50] { recent50(); }, [](const Ns &) { cb_null(0x5ebdf0); }, players_met_rows);
+    run("B11 more than 50 recent (limit asked)", [] { for (int i = 0; i < 60; i++) st.recent.push_back("p" + std::to_string(i)); }, [](const Ns &) { cb(0x5ebdf0, 0, 55, 0); }, players_met_rows);
+    run("B11 registration failure (table full)", [recent50] { recent50(); st.active = true; fill_cbs(128); }, [](const Ns &) { cb(0x5ebdf0, 0, 2, 0); }, players_met_rows);
     run("B11 registration: only MET_ADD fits", [recent50] { recent50(); st.active = true; fill_cbs(127); },
-        [](const Ns &) { cb(0x5ebdf0, 0, 2, 0); rec("cb count %u", get<uint32_t>(MENU + 0x18ec)); });
+        [](const Ns &) { cb(0x5ebdf0, 0, 2, 0); rec("cb count %u", get<uint32_t>(MENU + 0x18ec)); }, players_met_rows);
     run("B12 add true / false, profile non-empty / empty", [recent50] { recent50(); st.active = true; st.summary = "summary text"; },
         [](const Ns &) {
             cb(0x5ebdf0, 0, 7, 0);
@@ -806,24 +978,106 @@ int main() {
             call_registered(sid("U2MP_PC_CB_MET_PROFILE"));
             st.summary.clear();
             call_registered(sid("U2MP_PC_CB_MET_PROFILE"));
-        });
+        }, players_met_rows);
 
     // ======== B13 .. B17 ========
+    // New only: the member is selected through a match row, whose popup is the new one (B8 match rows above), and
+    // Mute / Promote follow parity-d-flow1.md 2.4 (d582ac6): Mute flips the flag silently (no "muted" or voice-off
+    // box), a promote that went through goes to PAGE_LOBBY 0xb99a3235 (opened: it is not on the page stack).
     auto sel = [](uint32_t row) { cb(0x5ec460, 0, 0, row); };   // selects members[row]
-    run("B13 kick true", [] { members(); st.is_host = true; }, [sel](const Ns &) { sel(1); cb(0x5ec4a0); });
-    run("B13 kick false", [] { members(); st.is_host = true; st.kick_result = false; }, [sel](const Ns &) { sel(3); cb(0x5ec4a0); });
-    run("B14 voice off", members, [sel](const Ns &) { sel(1); cb(0x5ec4b0); cb(0x5ec480); });
-    run("B14 member gone", members, [sel](const Ns &) { sel(1); st.members.clear(); cb(0x5ec4b0); });
-    run("B14 voice off overrides member gone", [] { members(); st.voice_enabled = false; }, [sel](const Ns &) { sel(1); st.members.clear(); cb(0x5ec480); });
-    run("B14 toggle to muted / unmuted", members, [sel](const Ns &) {
+    auto selected = [kMatchPopup](const Rec &r, const char *name) {
+        EXPECT(count_of(r, std::string("text_set_player [") + name + "]") == 1 && count_of(r, kMatchPopup) == 1);
+    };
+    auto no_box = [](const Rec &r) { EXPECT(count_of(r, "show_page 0x719e9fec") == 0 && count_of(r, "voice::enabled") == 0); };
+    run_new("B13 kick true", [] { members(); st.is_host = true; }, [sel](const Ns &) { sel(1); cb(0x5ec4a0); },
+            [selected](const Rec &r) {
+        selected(r, "Bob");
+        EXPECT(count_of(r, "session::kick 22") == 1 && count_prefix(r, "log Kick From Party") == 0);
+    });
+    run_new("B13 kick false", [] { members(); st.is_host = true; st.kick_result = false; }, [sel](const Ns &) { sel(3); cb(0x5ec4a0); },
+            [selected](const Rec &r) {
+        selected(r, "Carol");
+        EXPECT(count_of(r, "session::kick 33") == 1 && count_of(r, "log Kick From Party: net id 33 not kicked") == 1);
+    });
+    run_new("B14 voice off", members, [sel](const Ns &) { sel(1); cb(0x5ec4b0); cb(0x5ec480); }, [selected, no_box](const Rec &r) {
+        selected(r, "Bob");
+        EXPECT(count_of(r, "voice::toggle_mute 22") == 2);
+        no_box(r);
+    });
+    run_new("B14 member gone", members, [sel](const Ns &) { sel(1); st.members.clear(); cb(0x5ec4b0); }, [selected, no_box](const Rec &r) {
+        selected(r, "Bob");
+        EXPECT(count_of(r, "session::member_name 22") == 1 && count_prefix(r, "voice::toggle_mute") == 0);
+        no_box(r);
+    });
+    run_new("B14 voice off overrides member gone", [] { members(); st.voice_enabled = false; },
+            [sel](const Ns &) { sel(1); st.members.clear(); cb(0x5ec480); }, [selected, no_box](const Rec &r) {
+        selected(r, "Bob");
+        EXPECT(count_of(r, "session::member_name 22") == 1 && count_prefix(r, "voice::toggle_mute") == 0);
+        no_box(r);
+    });
+    run_new("B14 toggle to muted / unmuted", members, [sel](const Ns &) {
         sel(3);
         cb(0x5ec4b0);
         st.toggle_result = false;
         cb(0x5ec480);
+    }, [selected, no_box](const Rec &r) {
+        selected(r, "Carol");
+        EXPECT(count_of(r, "voice::toggle_mute 33") == 2);
+        no_box(r);
     });
-    run("B15 promote true", [] { members(); st.promote_result = true; }, [sel](const Ns &) { sel(1); cb(0x5ec4c0); });
-    run("B15 promote false", members, [sel](const Ns &) { sel(1); cb(0x5ec4c0); });
-    run("B15 promote, id 0 selected", [] { members(); st.promote_result = true; }, [sel](const Ns &) { sel(9); cb(0x5ec4c0); cb(0x5ec4b0); });
+    run_new("B15 promote true", [] { members(); st.promote_result = true; }, [sel](const Ns &) { sel(1); cb(0x5ec4c0); },
+            [selected](const Rec &r) {
+        selected(r, "Bob");
+        EXPECT(count_of(r, "online::promote 22") == 1 && count_of(r, "show_page 0xb99a3235") == 1);
+        EXPECT(count_of(r, "show_page 0x719e9fec") == 0 && count_prefix(r, "PopPage") == 0);
+    });
+    run_new("B15 promote false", members, [sel](const Ns &) { sel(1); cb(0x5ec4c0); }, [selected](const Rec &r) {
+        selected(r, "Bob");   // our failure box stays (a PC addition, 2.4)
+        EXPECT(count_of(r, "online::promote 22") == 1 && count_of(r, "show_page 0x719e9fec") == 1);
+        EXPECT(count_of(r, "show_page 0xb99a3235") == 0);
+    });
+    run_new("B15 promote, id 0 selected", [] { members(); st.promote_result = true; }, [sel](const Ns &) { sel(9); cb(0x5ec4c0); cb(0x5ec4b0); },
+            [selected](const Rec &r) {
+        selected(r, "Zero");   // id 0: no promote, the box; Mute: net id 0 is not this PC and is a member
+        EXPECT(count_prefix(r, "online::promote") == 0 && count_of(r, "show_page 0x719e9fec") == 1);
+        EXPECT(count_of(r, "voice::toggle_mute 0") == 1);
+    });
+    // H7 (parity-h-session.md H7, 426f4dd; parity-e-flow2.md 2.7), new only: the Mute All / Unmute All rules on a
+    // match row. Others: the party's members on our transport (page mode < 2) or the match list (otherwise).
+    auto three = [] {
+        members();
+        st.members.push_back({5, 55, "Dan"});
+    };
+    const uint32_t kMute = 0xffbbac12, kUnmute = 0xfa9c4838, kMatchMute = 0x7273924c;
+    const std::pair<uint32_t, uint32_t> kAll{0xd381d5d8, 0x8d703d6c}, kNone{0x3efad3ba, 0x65be38af};
+    run_new("H7 three others, one muted: both", [three] { three(); st.muted = {22}; }, [](const Ns &) { cb(0x5ec460, 0, 0, 1); },
+            [=](const Rec &r) {
+        EXPECT(count_of(r, popup_line(0, {{kUnmute, kMatchMute}, kAll, kNone})) == 1);
+    });
+    run_new("H7 Mute All, then Unmute All", three, [](const Ns &) {
+        cb(0x5ec460, 0, 0, 3);
+        call_registered(0x8d703d6c);
+        cb(0x5ec460, 0, 0, 3);
+        call_registered(0x65be38af);
+        cb(0x5ec460, 0, 0, 3);
+    }, [=](const Rec &r) {
+        EXPECT(count_of(r, "voice::set_all_muted [22,33,55] 1") == 1 && count_of(r, "voice::set_all_muted [22,33,55] 0") == 1);
+        EXPECT(count_of(r, popup_line(0, {{kMute, kMatchMute}, kAll})) == 2);      // first and last: nobody muted
+        EXPECT(count_of(r, popup_line(0, {{kUnmute, kMatchMute}, kNone})) == 1);   // after Mute All: everybody
+        EXPECT(count_prefix(r, "show_page") == 0);                                 // silently (2.4)
+    });
+    run_new("H7 alone: neither, own row: no popup", [] { st.members = {{0, 11, "Alice"}}; st.local_id = 11; },
+            [](const Ns &) { cb(0x5ec460, 0, 0, 0); }, [](const Rec &r) {
+        EXPECT(count_of(r, "voice::all_muted [] -> 1") == 1 && count_of(r, "voice::none_muted [] -> 1") == 1);
+        EXPECT(count_prefix(r, "ShowPopup") == 0);
+    });
+    run_new("H7 party pages leave out strangers, match pages do not", [] { members(); st.strangers = {33}; }, [](const Ns &) {
+        cb(0x5ec460, 0, 0, 1);
+        put<int32_t>(NETINFO + 0x2c4, 2);
+        cb(0x5ec460, 0, 0, 1);
+    }, [](const Rec &r) {
+        EXPECT(count_of(r, "voice::all_muted [22] -> 0") == 1 && count_of(r, "voice::all_muted [22,33] -> 0") == 1);
+    });
     auto ishost = [](const Ns &) {
         rec("party IsHost -> %u", unsigned(reinterpret_cast<uint8_t(U2MP_GUEST *)(void *, void *, void *)>(mem + 0x5ecb70)(nullptr, nullptr, nullptr)));
     };
@@ -839,9 +1093,9 @@ int main() {
     run("B18 join list false, mode 3", [] { put<int32_t>(NETINFO + 0x2c4, 3); }, [](const Ns &) { cb(0x5ebea0); });
     run("B18 join list false, mode -1", [] { put<int32_t>(NETINFO + 0x2c4, -1); }, [](const Ns &) { cb(0x5ebea0); });
     run("B19/B20 online off, friend selected", [] { st.active = true; friends5(); },
-        [](const Ns &) { cb(0x5ebde0, 0, 2, 0); st.active = false; cb(0x5ec000); cb(0x5ebee0); });
+        [](const Ns &) { cb(0x5ebde0, 0, 2, 0); st.active = false; cb(0x5ec000); cb(0x5ebee0); }, friends_list);
     run("B19/B20 valid row", [] { st.active = true; friends5(); },
-        [](const Ns &) { cb(0x5ebde0, 0, 5, 0); cb(0x5ec000); cb(0x5ebee0); });
+        [](const Ns &) { cb(0x5ebde0, 0, 5, 0); cb(0x5ec000); cb(0x5ebee0); }, friends_list);
     run("B21 cond 48 queries", nullptr, [](const Ns &ns) {
         q_call_ns(ns, 1, 0);
         st.invite_count = 3;
@@ -863,7 +1117,44 @@ int main() {
         q_call_ns(ns, 1, 1);
     });
 
-    // ======== B22 .. B27 and clantag.cpp ========
+    // ======== B22 .. B25 and clantag.cpp ========
+    // parity-a-leaderboards.md 2.1 (c91d21d, rules in clantag_rules.h since a93b2a8), new only: the per-frame tag check
+    // with no censor service (4.2 answered: accepted at once, "check unavailable"): A-C8 nothing while NET_SM <= 1,
+    // A-C7/A-C4 a loaded tag checked once on the first online frame (kept, career and member data published), nothing
+    // on the next frame, A-C5 a cleared tag published at once without a check. One scenario: the check's last tag
+    // lives as long as the process. A-C1..C3 and C6 need a censor the online program does not offer.
+    run_new("A-C 2.1 clan tag check per frame, no censor service", [] {
+        std::memcpy(mem + CLANTAG, "XYZ\0\0\0\0\0", 8);
+        put<int32_t>(NET_SM, 1);
+    }, [](const Ns &) {
+        rec("-> frame, NET_SM 1");
+        u2mp::clan_tag_check_frame();
+        put<int32_t>(NET_SM, 2);
+        rec("-> first online frame");
+        u2mp::clan_tag_check_frame();
+        rec("tag [%.8s]", reinterpret_cast<const char *>(mem + CLANTAG));
+        rec("-> next frame");
+        u2mp::clan_tag_check_frame();
+        std::memset(mem + CLANTAG, 0, 8);
+        rec("-> tag cleared");
+        u2mp::clan_tag_check_frame();
+        rec("-> frame after");
+        u2mp::clan_tag_check_frame();
+    }, [](const Rec &r) {
+        const Rec want = {"-> frame, NET_SM 1",
+                          "-> first online frame",
+                          "log clan tag: check unavailable, [XYZ] kept",
+                          "progression_publish_career",
+                          "online::member_data_changed",
+                          "tag [XYZ]",
+                          "-> next frame",
+                          "-> tag cleared",
+                          "progression_publish_career",
+                          "online::member_data_changed",
+                          "-> frame after"};
+        const auto at = std::find(r.begin(), r.end(), want[0]);
+        EXPECT(Rec(at, r.end()) == want);
+    });
     run("B22 clan tag begin fails", [] { st.begin_result = 0; }, [](const Ns &ns) {
         cb(0x5ed8a0);
         rec("edit -> %d", ns.edit() ? 1 : 0);
@@ -937,15 +1228,8 @@ int main() {
         cb_null(0x64e900);
         cb(0x64e900, 0, 0, 0xffffffffu);
     });
-    run("B26 twitter page event 6, 2, NULL", nullptr, [](const Ns &) {
-        cb(0x6769d0, 6);
-        cb(0x6769d0, 2);
-        cb_null(0x6769d0);
-    });
-    run("B27 twitter button", nullptr, [](const Ns &) { cb(0x6769e0); });
     run("message box with NULL descriptor", [] { put<uint64_t>(MENU + 0x17d0, 0); }, [](const Ns &ns) {
         cb(0x5ed8c0);
-        cb(0x6769e0);
         ns.notice("text");
     });
     run("message box words overwrite old content", [] { std::memset(mem + BOX, 0x77, 0x80); }, [](const Ns &) { cb(0x5ed8c0); });

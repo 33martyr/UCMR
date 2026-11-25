@@ -28,3 +28,14 @@ The Uncharted 2 multiplayer runtime (`gow3_pc/src/u2mp`) first carried function 
 
 The other files of the module (net, voice, online, gamenet, install, crashlog, netheap, menudraw, render, nullsites,
 dlc, texts, progression_store) were our own design from the start, not ports of game functions.
+
+## PS3 1.10 parity surveys
+
+The `parity-*.md` files compare the PS3 1.10 game with the PS4 code and our runtime, row by row of
+`maintainer-tools/research/u2-parity/ps4-missing-functions-audit.tsv`, and describe every missing behaviour for an
+implementer (`parity-a` .. `parity-m`, `parity-ticker-respawn`: the missing / stub / partial rows).
+
+| Survey | Audit rows | Result |
+|---|---|---|
+| parity-n-inlined.md | the 115 "inlined" rows | 97 inlined in live PS4 code, 7 ours, 3 platform, 7 dropped (trophies, Twitter), 1 missing (NI1: no presence match end in co-op, implemented); PS4 sites corrected for 11 rows |
+| parity-n-remaining.md | the last open items after groups A-M | N1 film boosters, N2 Mute Players lists, N3 Multiplayer Medals reachable, N4 loading id (no effect), N5 mouth follows mic, N6 talking indicators for every client: all implemented

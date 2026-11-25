@@ -139,12 +139,21 @@ mapping of the A / B flags in 2.3 that flag is PS4 state byte +0x3c bit 0x01, no
 - flag goes 1 -> 0 (the player is back): the scoreboard is hidden and the "shown by button" mark is cleared;
 - flag unchanged: nothing; the SELECT button (ours: touchpad) still toggles it (fade speed 2.0, with a sound).
 
-Two more inputs exist and are only noted here: when every present player has been dead (or in the A / B states) for a
-set time (`0x494178`; the threshold was not recovered) the scoreboard is shown every frame; and while `0x8a0348`
-(meaning unknown) answers true and the board was not opened by the button, the automatic flag is forced to 0. With
-NGM `+0x1ba4` set the automatic flag comes from two other lookups (`0x8a87d1da`, `0xf498c2b5`; meaning unknown).
+Two more inputs (settled 2026-11-25, PS4 facts in `parity-m-features.md` section 10): when every player is out
+(`0x494178`, threshold 0: "out" as soon as the player died after the last spawn or is in the A / B states;
+`parity-m-features.md` 10.6) the scoreboard is shown every frame; and while the HUD notification element shows a
+message (PS3 `0x8a0348`, PS4 `0x555550(0x1130008)`, 10.8) and the board was not opened by the button, the automatic
+flag is forced to 0. With NGM `+0x1ba4` (PS4 u8 `+0x209c`, the film playback flag) set, the automatic flag comes from
+the film controller instead: its answers to `8a87d1da` (index of the watched player, whose tracker must have died
+after its last spawn) and `f498c2b5` ("following a player", must be true) (10.8).
 
-So on PS3 a player who dies sees the scoreboard come up with the countdown row, and it goes away on respawn.
+PS4 has the exact twin of `0x6b6b3c`: `0x9766f0`, `bool fn(void)` (local character `[0x115bd20]`, query `1a9688ee`
+through `0x4c4090`, true for no character / no answer, else bit 0x01 of record byte `+0x3c`; verification bytes in
+`parity-m-features.md` 10.4). The bit-order mapping above is therefore confirmed by PS4 code, not only by the
+bitfield rule. The query answer is the same state record the process vtable `+0x88` returns.
+
+So on PS3 a player who dies sees the scoreboard come up with the countdown row, and it goes away on respawn (also
+when the player had opened it by button: the falling edge always hides it and clears the mark).
 
 ### 2.3 What the row answers (PS3 `0x4bf4a8`; PS4 `0x65b830` does the same, intact)
 
@@ -193,9 +202,12 @@ there; what is missing is PS3's automatic show while the local player is dead (2
 automatic flag turns on, hide it when it turns off. No HUD drawing of our own is needed (the third-party overlay
 drawing is not PS3 behaviour).
 
-Status: automatic show on death **DONE (CHECK)** 2026-11-25 (`scoreboard.cpp`, `gameplay.md` 1.4 step 6): the
-automatic flag is "no local character, or died time >= spawn time" (the rule 2 fields above, used only when the
-`0x65b830` verification bytes match); the state-record bit 15 is not used (its PS4 call is not mapped, section 4).
+Status: automatic show on death **DONE (CHECK)** 2026-11-25 (`scoreboard.cpp`, `gameplay.md` 1.4 steps 5-6): the
+automatic flag is PS4 `0x9766f0()` (verified bytes), forced off while a HUD notification shows and the board was not
+opened by button; "every player out" (threshold 0, flags A / B from the state record) shows the board every frame;
+the falling edge hides it and clears the mark. The stand-in (died / spawn test through the cond 44 fields) is gone.
+Film playback: the film controller's query call is not mapped, so the board does not open by itself in a film
+(`parity-m-features.md` open question 15). Still to see in a run: co-op "down" (open question 5).
 The row's text: **COVERED** (intact PS4 code, our texts). No HUD drawing of our own.
 
 ## 3. Test scenarios
@@ -217,10 +229,12 @@ The row's text: **COVERED** (intact PS4 code, our texts). No HUD drawing of our 
 
 ## 4. Unknown / not checked
 
-- Meaning of PS3 state flag bit 15 (PS4 +0x3c bit 0x01 by mapping): assumed "dead"; check live that it is set while
-  the local player is dead (it decides the automatic show together with "no character").
-- `0x8a0348` and NGM `+0x1ba4` (with lookups `0x8a87d1da` / `0xf498c2b5`) in 2.2, and the all-dead threshold of
-  `0x494178`.
+- Meaning of PS3 state flag bit 15 (PS4 `+0x3c` bit 0x01, now confirmed by the PS4 twin `0x9766f0`): not named in
+  either binary; the PS4 competitive killer-row query `0x65b490` uses it as "dead". Calling `0x9766f0` reproduces PS3
+  whatever it means; check live that it is set while dead (and whether it is set while down in co-op).
+- Settled 2026-11-25 (`parity-m-features.md` section 10): `0x8a0348` (HUD notification element, PS4 `0x555550`), NGM
+  `+0x1ba4` (film flag, PS4 `+0x209c`) with `8a87d1da` / `f498c2b5` (film controller answers, handle
+  `[0x1164080]`), the threshold of `0x494178` (0).
 - The text measure call inside `0x5d6500` (`0xcc9a70`) was taken as "measure"; its exact width units were not
   traced beyond being the same units as start and strip width.
 - Whether menu.bin row flags 2 (cond 44 row) / 4 (cond 87 row) change layout: not needed for parity (identical data).
@@ -234,4 +248,4 @@ The row's text: **COVERED** (intact PS4 code, our texts). No HUD drawing of our 
 | ticker visible | `0x42da40` | none: field +0x10 vs `[0x1116180+0x104]`/300 | DONE (`overlay_rules.cpp`) |
 | ticker refresh (10 s, finished, visible) | `0x447248` | none | DONE (`ticker.cpp`, from session.cpp page_handler), CHECK |
 | respawn / tries row (cond 44) | `0x4bf4a8` | `0x65b830` intact | COVERED |
-| scoreboard shown by itself while dead | `0x4cbf00` with `0x6b6b3c` | `scoreboard.cpp` (died / spawn test, not bit 15) | DONE, CHECK |
+| scoreboard shown by itself while dead | `0x4cbf00` with `0x6b6b3c` | `scoreboard.cpp` calls the exact PS4 twin `0x9766f0`, notification override `0x555550`, "every player out" | DONE, CHECK (film path open, `parity-m-features.md` open question 15) |

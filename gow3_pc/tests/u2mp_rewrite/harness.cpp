@@ -15,6 +15,15 @@ static void *exec_mem(size_t n) {
 }
 #endif
 
+// The runtime's guest-memory query (runtime_memory.c), which the modules use before they read a pointer they did
+// not make. In these tests every pointer a scenario hands out is readable (the fake image, its stub pool or host
+// memory), so a range counts as mapped unless it is plainly not a pointer: the first 64 KiB, or past the 47-bit user
+// address space (an unset -1 pointer, for example).
+extern "C" int runtime_memory_is_mapped(uintptr_t address, uint64_t size) {
+    constexpr uint64_t kLow = 0x10000, kTop = 1ull << 47;
+    return address >= kLow && address < kTop && size <= kTop - address;
+}
+
 namespace hx {
 
 uint8_t *mem = nullptr;

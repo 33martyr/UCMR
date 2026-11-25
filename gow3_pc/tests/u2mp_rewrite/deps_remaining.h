@@ -37,6 +37,13 @@ struct State {
     int cinema_received = 0;
     // voice.cpp
     bool voice_enabled = true, toggle_result = true;
+    std::vector<uint32_t> muted;        // muted net ids (only the new build asks: parity J3, H7 Mute All)
+    // session.cpp: net ids on our transport but not in our party (only the new build asks: parity H7)
+    std::vector<uint32_t> strangers;
+    // online.cpp: friend_party's cached member list (only the new build asks: parity G4)
+    bool party_known = false;
+    std::vector<std::string> party;
+    int party_member_friend = -1;       // friend_view: this friend row is a member of our party (parity E 2.8)
     // progression.cpp
     std::vector<std::string> recent;
     std::string summary;

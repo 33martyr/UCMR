@@ -8,6 +8,8 @@
 // empty folder as the current directory (store file, net-patch9.bin); paths are relative, so logs compare as text.
 // Compared: guest and host calls, logs, the store files (bytes and decoded), the image. Host pointers written into
 // the image (leaderboard rows/info) are compared by what they point at; the netpatch block address is masked in logs.
+#include <algorithm>
+#include <array>
 #include <cinttypes>
 #include <cstdio>
 #include <cstdlib>
@@ -40,7 +42,8 @@ int netpatch_load();
 namespace u2mp {
 void install_progression(int &installed);
 void progression_publish();
-std::vector<std::string> progression_recent_players(size_t max);
+std::vector<std::string> progression_players_met();   // was progression_recent_players (parity G1, f11e480)
+void progression_note_met(const std::vector<std::string> &names);
 std::string progression_player_summary(const std::string &name);
 void netinit_prepare();
 void netinit_match();
@@ -86,10 +89,22 @@ const Api OLD{"old",
               u2mp_old::netinit_dump,
               u2mp_old::install_netpatch,
               u2mp_old::netpatch_load};
+// parity-g-friends.md G1 (f11e480): progression_recent_players(max) became progression_players_met(), the Players
+// Met rows: at most kMetShown (50), no friend, no row a match's end added (unlisted). For what the old scenarios ask
+// (LAN, rows of the store, fewer than 50) the new list cut at `max` is the old answer. The friend-list question G1
+// adds (online::active, answered 0 = LAN) is dropped from the record here; the G1 scenarios (run_new) check it.
+std::vector<std::string> new_recent(size_t max) {
+    const size_t from = hx::calls.size();
+    std::vector<std::string> v = u2mp::progression_players_met();
+    hx::calls.erase(std::remove(hx::calls.begin() + std::ptrdiff_t(from), hx::calls.end(), std::string("online::active -> 0")),
+                    hx::calls.end());
+    if (v.size() > max) v.resize(max);
+    return v;
+}
 const Api NEW{"new",
               u2mp::install_progression,
               u2mp::progression_publish,
-              u2mp::progression_recent_players,
+              new_recent,
               u2mp::progression_player_summary,
               u2mp::netinit_prepare,
               u2mp::netinit_match,
@@ -482,6 +497,9 @@ const std::vector<Check> kNiChecks = {
     {0xb332a0, {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54, 0x53, 0x50, 0x41, 0x89}},
     {0xa15300, {0x55, 0x48, 0x89, 0xe5, 0x53, 0x48, 0x83, 0xec, 0x18, 0x4c, 0x8b, 0x05, 0xf0, 0x58, 0x63, 0x00}},
 };
+// The current netinit checks one more place (in 934a6ca, after the rewrite): the call in NetEventPlayerSetup::Apply
+// that resets the slots, PS4 1.02 bytes (boot-linked.bin, image 0x632148).
+const Check kNiPlayerSetup = {0x632148, {0xe8, 0x43, 0xba, 0x00, 0x00}};
 constexpr uint64_t TA = 0x113d300, TB = 0x113d370, BOOST = 0x113a788, BSLOT = 0x1670000, BTAB = 0x1670100, BRECS = 0x1671000;
 
 // DcFind with its checked prologue kept: after the prologue, undo it and jump to the fake
@@ -493,6 +511,7 @@ void dcfind_trampoline() {
 }
 void ni_image() {
     for (const auto &c : kNiChecks) putb(c.at, c.b.data(), c.b.size());
+    putb(kNiPlayerSetup.at, kNiPlayerSetup.b.data(), kNiPlayerSetup.b.size());
     dcfind_trampoline();
     std::memset(mem + 0x1600000, 0xcd, 0x40000);
 }
@@ -582,19 +601,124 @@ void write_module(const std::vector<uint8_t> &v) {
 }
 
 // ---- running ---------------------------------------------------------------------------------------------
-struct Scenario {
-    std::string name;
-    std::function<void()> fn;
-};
-std::vector<Scenario> scenarios;
-void S(const std::string &name, std::function<void()> fn) { scenarios.push_back({name, std::move(fn)}); }
-
-fs::path g_root, g_base;
-
 struct Result {
     std::vector<std::string> rec;
     std::vector<uint8_t> img;
 };
+struct Scenario {
+    std::string name;
+    std::function<void()> fn;
+    // compared scenarios: the old result in the form a documented change gives it (named where it is set)
+    std::function<void(Result &)> to_new;
+    // set: a new-only scenario (behaviour the old code did not have); EXPECTs on the new result
+    std::function<void(const Result &)> check;
+};
+std::vector<Scenario> scenarios;
+void S(const std::string &name, std::function<void()> fn, std::function<void(Result &)> to_new = {}) {
+    scenarios.push_back({name, std::move(fn), std::move(to_new), {}});
+}
+void N(const std::string &name, std::function<void()> fn, std::function<void(const Result &)> check) {
+    scenarios.push_back({name, std::move(fn), {}, std::move(check)});
+}
+
+fs::path g_root, g_base;
+
+// ---- new-only checks ---------------------------------------------------------------------------------------
+const char *g_scenario = "";
+int g_failed_checks = 0;
+#define EXPECT(c)                                                                     \
+    do {                                                                              \
+        if (!(c)) {                                                                   \
+            std::printf("FAIL %s (line %d): %s\n", g_scenario, __LINE__, #c);         \
+            ++g_failed_checks;                                                        \
+        }                                                                             \
+    } while (0)
+size_t count_of(const Result &r, const std::string &line) { return size_t(std::count(r.rec.begin(), r.rec.end(), line)); }
+std::vector<std::string> starting(const Result &r, const std::string &prefix) {
+    std::vector<std::string> v;
+    for (const auto &l : r.rec)
+        if (l.rfind(prefix, 0) == 0) v.push_back(l);
+    return v;
+}
+std::vector<std::string> requests(const Result &r) { return starting(r, "online::board_request "); }
+std::string last_lb(const Result &r) {   // the LB fields at the end of the scenario
+    const auto v = starting(r, "lb total=");
+    return v.empty() ? std::string() : v.back();
+}
+std::string lb_line(uint32_t total, uint32_t count, int32_t page, uint64_t busy, uint32_t board, uint8_t friends,
+                    uint8_t refresh = 0) {
+    char b[160];
+    std::snprintf(b, sizeof b, "lb total=%u count=%u page=%d status=0 busy=%llu reset=0 board=%u friends=%u refresh=%u", total,
+                  count, page, (unsigned long long)busy, board, friends, refresh);
+    return b;
+}
+// row k of the LB rank rows (progression.md 1.5.12: online id text at +0, rank at +0x58)
+const uint8_t *lb_row(size_t k) {
+    const uint64_t p = get<uint64_t>(LB + 0x28);
+    return p ? reinterpret_cast<const uint8_t *>(uintptr_t(p)) + k * 0x80 : nullptr;
+}
+std::string row_id(size_t k) {
+    const uint8_t *r = lb_row(k);
+    return r ? std::string(reinterpret_cast<const char *>(r), strnlen(reinterpret_cast<const char *>(r), 0x58)) : "(none)";
+}
+uint32_t row_rank(size_t k) {
+    const uint8_t *r = lb_row(k);
+    uint32_t v = 0;
+    if (r) std::memcpy(&v, r + 0x58, 4);
+    return v;
+}
+
+// ---- documented changes: old record -> new form -------------------------------------------------------------
+// netinit, in 934a6ca (after the rewrite; reasons in netinit.cpp, no spec section): the first netinit_prepare /
+// netinit_match whose code checks pass also runs the net bit writer pass first (the fake image holds none of the 342
+// 1.02 sites: logged, nothing patched) and, after the boosters, turns the player-setup slot reset (0x632148, the real
+// call bytes) into NOPs. The other two additions (NetCharacter heap, foreground meshes) need guest state these
+// scenarios do not set. The N-G scenarios check all four.
+void ni_expected(Result &r) {
+    auto &v = r.rec;
+    for (size_t i = 0; i < v.size(); ++i) {
+        if (v[i] != "-> netinit_prepare" && v[i] != "-> netinit_match") continue;
+        size_t end = i + 1;
+        while (end < v.size() && v[end].rfind("history ", 0) != 0) ++end;
+        for (size_t k = i + 1; k < end; ++k)
+            if (v[k].size() > 20 && v[k].compare(v[k].size() - 20, 20, "differ; nothing done") == 0) return;
+        if (r.img[0x632148] == 0xe8) {
+            v.insert(v.begin() + std::ptrdiff_t(end), "log netinit: the player-setup event keeps the joiner's slots");
+            std::memset(r.img.data() + 0x632148, 0x90, 5);
+        }
+        v.insert(v.begin() + std::ptrdiff_t(i) + 1, "log netinit: 0 net bit writer sites, not the 342 of 1.02: masks left alone");
+        return;
+    }
+}
+// Headshots (475fba8, parity-d-flow1.md 2.10): a match the Leave hook records first asks the game type (net-games
+// lookup) to count the local player's headshots. Whether the old code recorded a match is not visible in its record,
+// so this one question is taken out of the new record where it stands (right after the Leave call); the HS scenarios
+// check it and the count.
+void drop_headshot_lookup(Result &r) {
+    auto &v = r.rec;
+    for (size_t i = 1; i < v.size(); ++i)
+        if (v[i - 1].rfind("-> leave ", 0) == 0 && v[i].rfind("DcLookup 0x3b9a067d -> ", 0) == 0) v.erase(v.begin() + std::ptrdiff_t(i));
+}
+// c91d21d (parity-a-leaderboards.md 2.3): every row of a range answer is read (the rows on the page come from the
+// answer's rows), not only the first 11 up to a missing one: the old record gets the reads it did not make.
+void read_whole_answer(Result &r) {
+    auto &v = r.rec;
+    for (size_t i = 0; i < v.size(); ++i) {
+        int n = 0;
+        if (std::sscanf(v[i].c_str(), "online::board_rows -> %d", &n) != 1) continue;
+        size_t j = i + 1;
+        int m = 0;
+        for (; j < v.size() && v[j].rfind("online::board_row ", 0) == 0; ++j) ++m;
+        std::vector<std::string> add;
+        for (int k = m; k < n; ++k) {
+            const bool ok = size_t(k) < st.scores.size() && !(size_t(k) < st.null_row.size() && st.null_row[size_t(k)]);
+            add.push_back("online::board_row " + std::to_string(k) + " -> " + (ok ? "row" : "NULL"));
+        }
+        v.insert(v.begin() + std::ptrdiff_t(j), add.begin(), add.end());
+        i = j + add.size() - 1;
+    }
+}
+
 Result run_side(const Api &api, const Scenario &sc) {
     hx::clear();
     hx::bind_both();
@@ -641,8 +765,23 @@ int run_one(const std::string &name, bool verbose) {
         g_root = safe / n2;
         fs::create_directories(g_root);
         fs::current_path(g_root);
+        if (sc.check) {   // new only
+            Result n = run_side(NEW, sc);
+            g_scenario = sc.name.c_str();
+            sc.check(n);
+            const bool ok = g_failed_checks == 0;
+            if (verbose || !ok) {
+                std::printf("---- %s new record\n", name.c_str());
+                for (auto &s : n.rec) std::printf("  %s\n", s.c_str());
+            }
+            std::printf("%s %s (new only, %zu records)\n", ok ? "PASS" : "FAIL", name.c_str(), n.rec.size());
+            return ok ? 0 : 1;
+        }
         Result o = run_side(OLD, sc);
+        ni_expected(o);
+        if (sc.to_new) sc.to_new(o);
         Result n = run_side(NEW, sc);
+        drop_headshot_lookup(n);
         const bool ok = hx::same(name.c_str(), o.rec, n.rec, &o.img, &n.img);
         if (verbose || !ok) {
             std::printf("---- %s old record\n", name.c_str());
@@ -1022,6 +1161,45 @@ void define() {
         leave();
         player_info();
     });
+    // Headshots (475fba8, parity-d-flow1.md 2.10), new only: the local player's kill records of kind 1 (killer = its
+    // net id, victim another player) of a competitive match go into the store's career count at Leave.
+    auto kills = [](const std::vector<std::array<uint16_t, 3>> &recs) {   // {kind, killer, victim}
+        put<uint64_t>(0x113b760, addr(0x1655000));   // NetGameManager +0: the local tracker, net id at +0x120
+        put<uint32_t>(0x1655000 + 0x120, 7);
+        put<uint32_t>(0x1147bd0 + 0xe8, uint32_t(recs.size()));
+        for (size_t i = 0; i < recs.size(); ++i) {
+            const uint64_t r = 0x1147bd0 + 0xec + 0x1c * i;
+            put<uint8_t>(r, uint8_t(recs[i][0]));
+            put<uint16_t>(r + 2, recs[i][1]);
+            put<uint16_t>(r + 4, recs[i][2]);
+        }
+    };
+    auto stored_headshots = [] {
+        std::ifstream f(g_root / "new" / "progression.bin", std::ios::binary);
+        std::vector<uint8_t> b((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        ps::Store s;
+        return ps::decode(b.data(), b.size(), s) ? int64_t(s.headshots) : -1;
+    };
+    for (int type : {5, 4})
+        N(type == 5 ? "HS-1 competitive match: headshots counted" : "HS-2 co-op match: no headshots", [kills, type] {
+            prog_setup();
+            use_store_path();
+            connected_state();
+            net_games(3, type);
+            put<int16_t>(0x113d400, 1);
+            kills({{1, 7, 9}, {1, 7, 7}, {0, 7, 9}, {1, 8, 7}, {1, 7, 3}});   // headshots 1 and 5 are the player's
+            match(two(), 5, 3, 1, 0);
+            leave();
+            leave();   // the same match again: not counted twice
+        }, [type, stored_headshots](const Result &r) {
+            std::vector<size_t> after;   // what follows each Leave call
+            for (size_t i = 0; i + 1 < r.rec.size(); ++i)
+                if (r.rec[i] == "-> leave 0xc85e199d") after.push_back(i + 1);
+            EXPECT(after.size() == 2 && r.rec[after[0]] == "DcLookup 0x3b9a067d -> img+0x1651000" &&
+                   r.rec[after[1]] != r.rec[after[0]]);
+            EXPECT(count_of(r, "log progression: 2 headshot(s) this match, 2 in all") == (type == 5 ? 1u : 0u));
+            EXPECT(stored_headshots() == (type == 5 ? 2 : 0));
+        });
 
     // ---------------- leaderboard list ----------------
     auto lb_setup = [] {
@@ -1140,8 +1318,8 @@ void define() {
     };
     const Start ss[] = {{"friends ok", 1, 0, true},  {"r<0 ok", 0, 0, true},   {"r>=0 ok", 0, 1, true},
                         {"friends false", 1, 0, false}, {"r<0 false", 0, 0, false}, {"r>=0 false", 0, 1, false}};
-    for (const auto &s : ss)
-        S(std::string("P-B10 start ") + s.name, [lb_setup, s] {
+    for (const auto &s : ss) {
+        auto body = [lb_setup, s] {
             lb_setup();
             st.linked = true;
             st.request_default = s.ok;
@@ -1151,7 +1329,23 @@ void define() {
             put<uint32_t>(LB + 0x70, 9);
             list_update();
             list_update();   // waits when started
+        };
+        if (s.ok) {
+            S(std::string("P-B10 start ") + s.name, body);
+            continue;
+        }
+        // c91d21d: a fetch that cannot start shows an empty list (PS3), no longer the local board; a "my page" lookup
+        // that cannot start asks page 0 of the global range instead (parity-a-leaderboards.md 2.3). New only.
+        N(std::string("P-B10 start ") + s.name, body, [s](const Result &r) {
+            std::vector<std::string> want;
+            if (s.friends) want = {"online::board_request 302 1 0 100 -> 0"};   // 2.2: at most 100 friends
+            else if (!s.delta) want = {"online::board_request 302 2 0 1 -> 0", "online::board_request 302 0 1 11 -> 0"};
+            else want = {"online::board_request 302 0 12 11 -> 0"};          // page 1 from rank 12
+            EXPECT(requests(r) == want);
+            EXPECT(count_of(r, "log rankings: online board 302 failed: empty list") == 1);
+            EXPECT(last_lb(r) == lb_line(0, 0, s.delta ? 1 : 0, 0, 2, s.friends));
         });
+    }
     S("P-B11a progress wait", [lb_setup] {
         lb_setup();
         st.linked = true;
@@ -1161,8 +1355,10 @@ void define() {
         list_update();
         list_update();
     });
+    // c91d21d (parity-a-leaderboards.md 2.3): a failed "my page" lookup asks page 0 of the global range, and a failed
+    // range shows an empty list (no local board). New only.
     for (uint32_t b : {1u, 7u})
-        S("P-B11b failure, LB board " + std::to_string(b), [lb_setup, b] {
+        N("P-B11b failure, LB board " + std::to_string(b), [lb_setup, b] {
             lb_setup();
             st.linked = true;
             st.board_state = 1;
@@ -1172,8 +1368,13 @@ void define() {
             put<uint32_t>(LB + 0x80, b);
             list_update();
             list_update();
+        }, [b](const Result &r) {
+            EXPECT(requests(r) == std::vector<std::string>({"online::board_request 301 2 0 1 -> 1",
+                                                            "online::board_request 301 0 1 11 -> 1"}));
+            EXPECT(count_of(r, "log rankings: online board 301 failed: empty list") == 1);
+            EXPECT(last_lb(r) == lb_line(0, 0, 0, 0, b, 0));
         });
-    S("P-B11b2 failure with refresh pending", [lb_setup] {
+    N("P-B11b2 failure with refresh pending", [lb_setup] {
         lb_setup();
         st.linked = true;
         st.board_state = 1;
@@ -1182,6 +1383,11 @@ void define() {
         st.board_state = -3;
         put<uint8_t>(LB + 0x85, 1);
         list_update();
+    }, [](const Result &r) {   // the failed lookup goes on with page 0 of the range: still busy, refresh kept
+        EXPECT(requests(r) == std::vector<std::string>({"online::board_request 301 2 0 1 -> 1",
+                                                        "online::board_request 301 0 1 11 -> 1"}));
+        EXPECT(starting(r, "log rankings:").empty());
+        EXPECT(last_lb(r) == lb_line(50, 0, 0, 1, 1, 0, 1));
     });
     struct Stage1 {
         const char *name;
@@ -1192,8 +1398,8 @@ void define() {
     const Stage1 s1[] = {{"row NULL", true, 0, true}, {"rank 0", false, 0, true}, {"rank 23", false, 23, true},
                          {"rank 11", false, 11, true}, {"rank 12", false, 12, true}, {"rank 23 request false", false, 23, false},
                          {"rank 0xffffffff", false, 0xffffffffu, true}};
-    for (const auto &s : s1)
-        S(std::string("P-B11c stage 1 ") + s.name, [lb_setup, s] {
+    for (const auto &s : s1) {
+        auto body = [lb_setup, s] {
             lb_setup();
             st.linked = true;
             st.board_state = 1;
@@ -1208,7 +1414,29 @@ void define() {
             st.total = 400;
             list_update();   // stage 2 fill (or idle)
             list_update();
+        };
+        if (s.request_ok && s.rank != 0xffffffffu) {
+            S(std::string("P-B11c stage 1 ") + s.name, body, read_whole_answer);
+            continue;
+        }
+        // c91d21d (2.3), new only: the range of rank 23's page (2) cannot start: empty list on page 2. Rank 0xffffffff:
+        // page (rank - 1) / 11 = 390451572, so rows on page = 400 - page * 11 clamped to 0..11 = 0.
+        N(std::string("P-B11c stage 1 ") + s.name, body, [s](const Result &r) {
+            if (!s.request_ok) {
+                EXPECT(requests(r) == std::vector<std::string>({"online::board_request 303 2 0 1 -> 1",
+                                                                "online::board_request 303 0 23 11 -> 0"}));
+                EXPECT(count_of(r, "log rankings: online board 303 failed: empty list") == 1);
+                EXPECT(last_lb(r) == lb_line(0, 0, 2, 0, 3, 0));
+            } else {
+                EXPECT(requests(r) == std::vector<std::string>({"online::board_request 303 2 0 1 -> 1",
+                                                                "online::board_request 303 0 4294967293 11 -> 1"}));
+                EXPECT(starting(r, "log rankings:").empty());
+                EXPECT(last_lb(r) == lb_line(400, 0, 390451572, 0, 3, 0));
+            }
         });
+    }
+    // c91d21d (2.3): rows on page = total - page * 11 clamped to 0..11 (77 on page 1: 11), not the 5 rows the answer
+    // held; the rows themselves are filled as before.
     S("P-B11d stage 2 fill details", [lb_setup] {
         lb_setup();
         st.linked = true;
@@ -1222,32 +1450,33 @@ void define() {
         st.rows = 5;
         st.total = 77;
         list_update();
+    }, [](Result &r) {
+        const std::string from = "lb total=77 count=5 page=1 ", to = "lb total=77 count=11 page=1 ";
+        for (auto &l : r.rec)
+            if (l.rfind(from, 0) == 0) l = to + l.substr(from.size());
+        if (r.img[LB + 0x70] == 5) r.img[LB + 0x70] = 11;
     });
-    S("P-B11d2 stage 2, 13 rows, NULL at 3", [lb_setup] {
-        lb_setup();
-        st.linked = true;
-        st.board_state = 1;
-        list_state(0, 0, 1, 0, 0, 0, 50);
-        list_update();
-        st.board_state = 0;
-        online_rows(13);
-        st.null_row = {false, false, false, true};
-        st.rows = 13;
-        st.total = 13;
-        list_update();
-    });
-    S("P-B11d3 stage 2, 13 rows, 13 present", [lb_setup] {
-        lb_setup();
-        st.linked = true;
-        st.board_state = 1;
-        list_state(0, 0, 1, 0, 0, 0, 50);
-        list_update();
-        st.board_state = 0;
-        online_rows(13);
-        st.rows = 13;
-        st.total = 13;
-        list_update();
-    });
+    // c91d21d (2.3), new only: total 13 on page 1 is 2 rows on the page, the answer's first two (a missing row is
+    // left out of the answer, not the end of it).
+    for (bool null3 : {true, false})
+        N(null3 ? "P-B11d2 stage 2, 13 rows, NULL at 3" : "P-B11d3 stage 2, 13 rows, 13 present", [lb_setup, null3] {
+            lb_setup();
+            st.linked = true;
+            st.board_state = 1;
+            list_state(0, 0, 1, 0, 0, 0, 50);
+            list_update();
+            st.board_state = 0;
+            online_rows(13);
+            if (null3) st.null_row = {false, false, false, true};
+            st.rows = 13;
+            st.total = 13;
+            list_update();
+        }, [](const Result &r) {
+            EXPECT(requests(r) == std::vector<std::string>({"online::board_request 300 0 12 11 -> 1"}));
+            EXPECT(last_lb(r) == lb_line(13, 2, 1, 0, 0, 0));
+            EXPECT(row_id(0) == "user00" && row_rank(0) == 1 && row_id(1) == "user01" && row_rank(1) == 2);
+            EXPECT(row_id(2).empty() && row_rank(2) == 0);
+        });
     struct Stage3 {
         const char *name;
         int32_t delta;   // 0: page -1 (friends changed); else scroll to page 2
@@ -1257,8 +1486,11 @@ void define() {
     const Stage3 s3[] = {{"page -1, me at 3 and 14", 0, {3, 14}, 20}, {"page -1, me not found", 0, {}, 20},
                          {"page -1, me at 14, n 12 (scan limited)", 0, {14}, 12}, {"page 2", 2, {3}, 30},
                          {"page -1, n 0", 0, {}, 0}};
+    // Friends board (c91d21d, parity-a-leaderboards.md 2.2), new only: the player and the first 100 friends of the
+    // friend list with their records, unscored ones dropped, by rank; page -1: the player's index / 11; page p:
+    // min(p, (kept - 1) / 11); total twice the kept count. No friends here: the player's first row only.
     for (const auto &s : s3)
-        S(std::string("P-B11e stage 3 ") + s.name, [lb_setup, s] {
+        N(std::string("P-B11e stage 3 ") + s.name, [lb_setup, s] {
             lb_setup();
             st.linked = true;
             st.board_state = 1;
@@ -1271,8 +1503,15 @@ void define() {
             st.my_npid = "Me";
             st.rows = s.n;
             list_update();
+        }, [s](const Result &r) {
+            EXPECT(requests(r) == std::vector<std::string>({"online::board_request 301 1 0 100 -> 1"}));
+            EXPECT(count_of(r, "online::my_npid_text -> [Me]") == 1 && count_of(r, "online::friend_npids 100 -> 0") == 1);
+            const bool found = !s.mine.empty() && s.mine[0] < s.n;   // the player's first row of the answer
+            EXPECT(last_lb(r) == lb_line(found ? 2 : 0, found ? 1 : 0, 0, 0, 1, 1));
+            if (found) EXPECT(row_id(0) == "Me" && row_rank(0) == uint32_t(s.mine[0] + 1));
+            EXPECT(row_id(found ? 1 : 0).empty());
         });
-    S("P-B11g stage 3 npid of 20 bytes without NUL", [lb_setup] {
+    N("P-B11g stage 3 npid of 20 bytes without NUL", [lb_setup] {
         lb_setup();
         st.linked = true;
         st.board_state = 1;
@@ -1287,8 +1526,11 @@ void define() {
         st.rows = 30;
         list_update();
         st.null_row.assign(30, false);
+    }, [](const Result &r) {   // the 20-byte id is the player's (rows 13 and 25); the first one is kept
+        EXPECT(last_lb(r) == lb_line(2, 1, 0, 0, 1, 1));
+        EXPECT(row_id(0) == "ABCDEFGHIJKLMNOPQRST" && row_rank(0) == 14 && row_id(1).empty());
     });
-    S("P-B11h stage 3 NULL rows in scan", [lb_setup] {
+    N("P-B11h stage 3 NULL rows in scan", [lb_setup] {
         lb_setup();
         st.linked = true;
         st.board_state = 1;
@@ -1303,6 +1545,88 @@ void define() {
         st.my_npid = "Me";
         st.rows = 20;
         list_update();
+    }, [](const Result &r) {   // the player's row is missing from the answer: no entry, empty page 0
+        EXPECT(last_lb(r) == lb_line(0, 0, 0, 0, 1, 1));
+        EXPECT(row_id(0).empty());
+    });
+    // parity-a-leaderboards.md 3, A-F1..A-F4 and A-G3 (c91d21d), new only.
+    auto friends_board = [lb_setup](int32_t delta, uint32_t lb_total, std::vector<U2oScore> rows, std::vector<std::string> friends) {
+        lb_setup();
+        st.linked = true;
+        st.board_state = 1;
+        if (delta) list_state(1, 1, delta, 1, 1, 0, lb_total);
+        else list_state(1, 1, 0, 1, 0, 0, lb_total);   // friends filter changed: page -1
+        list_update();
+        st.board_state = 0;
+        st.scores = std::move(rows);
+        st.rows = int(st.scores.size());
+        st.friends = std::move(friends);
+        st.my_npid = "Me";
+        list_update();
+    };
+    auto srow = [](const char *id, uint32_t rank) { return score_row(id, rank, 1000 - rank, 7, {}, 0); };
+    N("A-F1 friends board: ranks 40, 7, unscored, player 12", [friends_board, srow] {
+        friends_board(0, 50, {srow("X", 1), srow("F40", 40), srow("Me", 12), srow("F0", 0), srow("F7", 7)}, {"F40", "F0", "F7"});
+    }, [](const Result &r) {   // X is no friend; F0 has no score; by rank; total 2 x 3
+        EXPECT(last_lb(r) == lb_line(6, 3, 0, 0, 1, 1));
+        EXPECT(row_id(0) == "F7" && row_rank(0) == 7 && row_id(1) == "Me" && row_rank(1) == 12 && row_id(2) == "F40" &&
+               row_rank(2) == 40 && row_id(3).empty());
+    });
+    N("A-F2 friends board: 120 friends, 100 used", [friends_board, srow] {
+        std::vector<std::string> f;
+        for (int i = 0; i < 120; ++i) f.push_back("f" + std::to_string(100 + i));
+        friends_board(0, 50, {srow("f105", 5), srow("f210", 3), srow("Me", 9)}, f);   // f210 is the 111th friend
+    }, [](const Result &r) {
+        EXPECT(requests(r) == std::vector<std::string>({"online::board_request 301 1 0 100 -> 1"}));
+        EXPECT(count_of(r, "online::friend_npids 100 -> 120") == 1);
+        EXPECT(last_lb(r) == lb_line(4, 2, 0, 0, 1, 1));
+        EXPECT(row_id(0) == "f105" && row_id(1) == "Me" && row_id(2).empty());
+    });
+    auto fifteen = [srow](bool with_me) {   // friends ranked 1..14, the player 15th
+        std::vector<U2oScore> rows;
+        std::vector<std::string> f;
+        for (int i = 1; i <= 14; ++i) {
+            f.push_back("g" + std::to_string(i));
+            rows.push_back(srow(f.back().c_str(), uint32_t(i)));
+        }
+        if (with_me) rows.push_back(srow("Me", 15));
+        return std::make_pair(rows, f);
+    };
+    N("A-F3 friends board: page -1, the player 15th", [friends_board, fifteen] {
+        auto [rows, f] = fifteen(true);
+        friends_board(0, 50, rows, f);
+    }, [](const Result &r) {   // page 14 / 11 = 1: 4 rows
+        EXPECT(last_lb(r) == lb_line(30, 4, 1, 0, 1, 1));
+        EXPECT(row_id(0) == "g12" && row_id(3) == "Me" && row_rank(3) == 15 && row_id(4).empty());
+    });
+    N("A-F4 friends board: page 5 with 14 kept", [friends_board, fifteen] {
+        auto [rows, f] = fifteen(false);
+        friends_board(5, 200, rows, f);
+    }, [](const Result &r) {   // min(5, 13 / 11) = page 1: 3 rows
+        EXPECT(last_lb(r) == lb_line(28, 3, 1, 0, 1, 1));
+        EXPECT(row_id(0) == "g12" && row_id(2) == "g14" && row_id(3).empty());
+    });
+    N("A-F4b friends board: page 5 with 0 kept", [friends_board, srow] {
+        friends_board(5, 200, {srow("X", 3)}, {});
+    }, [](const Result &r) {   // the page stays 5, empty
+        EXPECT(last_lb(r) == lb_line(0, 0, 5, 0, 1, 1));
+        EXPECT(row_id(0).empty());
+    });
+    N("A-G3 global board: total 25 on page 2", [lb_setup] {
+        lb_setup();
+        st.linked = true;
+        st.board_state = 1;
+        list_state(0, 0, 2, 0, 0, 0, 50);
+        list_update();
+        st.board_state = 0;
+        online_rows(11);
+        st.rows = 11;
+        st.total = 25;
+        list_update();
+    }, [](const Result &r) {   // range from rank 23; rows on page 25 - 22 = 3
+        EXPECT(requests(r) == std::vector<std::string>({"online::board_request 300 0 23 11 -> 1"}));
+        EXPECT(last_lb(r) == lb_line(25, 3, 2, 0, 0, 0));
+        EXPECT(row_id(2) == "user02" && row_id(3).empty());
     });
     S("P-B12 list overlapping LB", [lb_setup] {
         lb_setup();
@@ -1390,6 +1714,100 @@ void define() {
         for (const std::string n : {std::string("Known"), std::string("Unknown"), std::string(31, 'L'), std::string("known"),
                                     std::string("")})
             rec("summary [%s] -> [%s]", n.c_str(), A->summary(n).c_str());
+    });
+
+    // ---------------- Players Met (parity-g-friends.md G1, f11e480), new only ----------------
+    auto met = [] {
+        std::string s;
+        for (auto &n : u2mp::progression_players_met()) s += "[" + n + "]";
+        rec("players met -> %s", s.c_str());
+    };
+    auto met_store = [] {   // local "Stored"; A, C listed; B known from a match's end only; a stale local row
+        ps::Store s = make_store();
+        add_recent(s, "A", 1, 1, 1, 1, 5);
+        add_recent(s, "B", 1, 1, 1, 1, 9);
+        s.recent.back().unlisted = true;
+        add_recent(s, "Stored", 1, 1, 1, 1, 7);
+        add_recent(s, "C", 1, 1, 1, 1, 8);
+        write_store("progression.bin", s);
+        use_store_path();
+    };
+    N("G1-1 LAN: listed rows, newest first", [met, met_store] {
+        prog_setup();
+        met_store();
+        met();
+    }, [](const Result &r) {
+        EXPECT(count_of(r, "players met -> [C][A]") == 1);
+        EXPECT(starting(r, "online::is_friend").empty() && starting(r, "online::friend_list_ready").empty());
+    });
+    N("G1-2 online, friend list not known yet: empty", [met, met_store] {
+        prog_setup();
+        met_store();
+        st.active = true;
+        st.friend_list_ready = false;
+        met();
+    }, [](const Result &r) {
+        EXPECT(count_of(r, "players met -> ") == 1);
+        EXPECT(count_of(r, "online::friend_list_ready -> 0") == 1);
+    });
+    N("G1-3 online: a friend is no Players Met row", [met, met_store] {
+        prog_setup();
+        met_store();
+        st.active = true;
+        st.friends = {"A"};
+        met();
+    }, [](const Result &r) {
+        EXPECT(count_of(r, "players met -> [C]") == 1);
+        EXPECT(count_of(r, "online::is_friend [A] -> 1") == 1 && count_of(r, "online::is_friend [C] -> 0") == 1);
+    });
+    N("G1-4 at most 50 rows", [] {
+        prog_setup();
+        ps::Store s = make_store();
+        for (int i = 0; i < 60; ++i) add_recent(s, "M" + std::to_string(10 + i), 1, 1, 1, 1, uint64_t(100 + i));
+        write_store("progression.bin", s);
+        use_store_path();
+        const auto v = u2mp::progression_players_met();
+        rec("players met %zu first [%s] last [%s]", v.size(), v.empty() ? "" : v.front().c_str(), v.empty() ? "" : v.back().c_str());
+    }, [](const Result &r) { EXPECT(count_of(r, "players met 50 first [M69] last [M20]") == 1); });
+    N("G1-5 match start: strangers added, store written", [met, met_store] {
+        prog_setup();
+        met_store();
+        st.active = true;
+        st.friends = {"F"};
+        rec("-> note_met");
+        u2mp::progression_note_met({"X", "Stored", "A", "", "F", "Y", "X", "B"});
+        met();
+    }, [](const Result &r) {   // not the player, a listed row, an empty name, a friend or a name twice; B listed again
+        EXPECT(starting(r, "log progression: adding player") ==
+               std::vector<std::string>({"log progression: adding player X to Players Met",
+                                         "log progression: adding player Y to Players Met",
+                                         "log progression: adding player B to Players Met"}));
+        EXPECT(count_of(r, "players met -> [B][X][Y][C][A]") == 1);   // seen now; equal times keep the store's order
+        EXPECT(count_of(r, "  recent [X] k0 d0 w0 l0 s0 c0 m0 n0 r0 seen1700000000") == 1);
+    });
+    N("G1-6 a match's end lists nobody; the next match start does", [met] {
+        prog_setup();
+        use_store_path();
+        connected_state();
+        match(two(), 5, 3, 1, 0);
+        leave();
+        met();
+        rec("-> note_met");
+        u2mp::progression_note_met({"Rival"});
+        met();
+    }, [](const Result &r) {
+        EXPECT(count_of(r, "players met -> ") == 1 && count_of(r, "players met -> [Rival]") == 1);
+        EXPECT(count_of(r, "log progression: adding player Rival to Players Met") == 1);
+    });
+    N("G1-7 at most 16 per match start", [met] {
+        prog_setup();
+        use_store_path();
+        std::vector<std::string> names;
+        for (int i = 0; i < 17; ++i) names.push_back("N" + std::to_string(10 + i));
+        u2mp::progression_note_met(names);
+    }, [](const Result &r) {
+        EXPECT(starting(r, "log progression: adding player").size() == 16);
+        EXPECT(count_of(r, "log progression: adding player N26 to Players Met") == 0);
     });
 
     // ---------------- netinit ----------------
@@ -1536,6 +1954,53 @@ void define() {
         A->ni_dump("z");
     });
     S("N-14 match first", [] { ni_image(); boosters(2, {3, 0}); nmatch(); prepare(); });
+    // ---------------- netinit additions of 934a6ca (see ni_expected), new only ----------------
+    N("N-G1 player-setup slot reset made NOPs, once", [] { ni_image(); boosters(3, {0, 5, 0}); prepare(); prepare(); },
+      [](const Result &r) {
+          EXPECT(count_of(r, "log netinit: the player-setup event keeps the joiner's slots") == 1);
+          EXPECT(std::memcmp(mem + 0x632148, "\x90\x90\x90\x90\x90", 5) == 0);
+      });
+    N("N-G2 player-setup check differs: nothing done", [] { ni_image(); mem[0x632148] = 0xe9; prepare(); },
+      [](const Result &r) {
+          EXPECT(count_of(r, "log netinit: bytes at 0x632148 (player-setup slot reset) differ; nothing done") == 1);
+          EXPECT(starting(r, "netheap_alloc").empty() && starting(r, "log netinit: 0 net bit writer").empty());
+          EXPECT(mem[0x632148] == 0xe9);
+      });
+    // a net bit writer site of 1.02 (0x5e1434: mov eax,-1; mov cl,r8b; shl eax,cl) and its fix (or rax,-1; shl rax,cl)
+    static const uint8_t kSite[10] = {0xb8, 0xff, 0xff, 0xff, 0xff, 0x44, 0x88, 0xc1, 0xd3, 0xe0};
+    static const uint8_t kFixed[10] = {0x44, 0x88, 0xc1, 0x48, 0x83, 0xc8, 0xff, 0x48, 0xd3, 0xe0};
+    for (int sites : {342, 1})
+        N("N-G3 net bit writers, " + std::to_string(sites) + " site(s)", [sites] {
+            ni_image();
+            for (int i = 0; i < sites; ++i) putb(0x5e2000 + 16 * uint64_t(i), kSite, sizeof kSite);
+            prepare();
+            nmatch();
+        }, [sites](const Result &r) {
+            const char *want = sites == 342 ? "log netinit: net bit writer word masks fixed (342 of 342)"
+                                            : "log netinit: 1 net bit writer sites, not the 342 of 1.02: masks left alone";
+            EXPECT(count_of(r, want) == 1 && starting(r, "log netinit: ").size() >= 1);
+            int fixed = 0;
+            for (int i = 0; i < sites; ++i) fixed += std::memcmp(mem + 0x5e2000 + 16 * i, kFixed, 10) == 0;
+            EXPECT(fixed == (sites == 342 ? 342 : 0));
+        });
+    for (uint32_t heap : {0x20000u, 0x40000u})
+        N(heap == 0x20000 ? "N-G4 NetCharacter heap 128 -> 512 KiB" : "N-G4b NetCharacter heap not 128 KiB: kept", [heap] {
+            ni_image();
+            put<uint32_t>(0x14cee28 + 0x10, 0xf2c86c22);   // NetCharacter's process type node: id, heap size
+            put<uint32_t>(0x14cee28 + 0x18, heap);
+            prepare();
+        }, [heap](const Result &r) {
+            EXPECT(count_of(r, "log netinit: NetCharacter process heap 128 -> 512 KiB") == (heap == 0x20000 ? 1u : 0u));
+            EXPECT(get<uint32_t>(0x14cee28 + 0x18) == (heap == 0x20000 ? 0x80000u : heap));
+        });
+    N("N-G5 foreground meshes shown", [] {
+        ni_image();
+        putb(0x5f228d, reinterpret_cast<const uint8_t *>("\x41\xc6\x87\xbf\x00\x00\x00\x01"), 8);   // 1.02 bytes
+        prepare();
+    }, [](const Result &r) {
+        EXPECT(count_of(r, "log netinit: foreground meshes shown (0x5f228d stores 0)") == 1);
+        EXPECT(std::memcmp(mem + 0x5f228d, "\x41\xc6\x87\xbf\x00\x00\x00\x00", 8) == 0);
+    });
 
     // ---------------- netpatch ----------------
     S("X-I1 install all match", [] { np_image(); np_install(); });

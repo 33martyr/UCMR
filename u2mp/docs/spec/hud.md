@@ -591,8 +591,8 @@ result in the loop: 0.
 
 fade = f32 element+0x1920.
 
-1. Film site: when u8 ngm+0x209c != 0, flags has 0x40000, s32 [0x113b008] != 0 and local is
-   non-NULL: a booster pair of (booster by index local+0x2a0, booster by index local+0x2a4).
+1. Film site: when u8 ngm+0x209c != 0, flags has 0x40000, s32 [0x113b008] == 0 (cinema mode 0, the
+   follow camera; `parity-n-remaining.md` N1) and local is non-NULL: a booster pair of (booster by index local+0x2a0, booster by index local+0x2a4).
 2. Loadout site: when not co-op and flags has 0x10 and boosters are allowed: a booster pair of
    (booster by id [0x1147544], booster by id [0x1147548]). "Allowed" is checked only when the
    first two conditions hold.

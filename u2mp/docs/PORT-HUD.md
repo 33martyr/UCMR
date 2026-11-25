@@ -65,7 +65,7 @@ The third pass (section 5) ported the parts listed here. Their PS3 order, gates 
 | type 7 (Turf War) territory panel | `0x8af960..0x8afe6c`, `0x8aff14` | type 7, flag 0x40000 | set +0x60 / rect +0x68 / text +0x78; territories ngm+0x1d80 | ported (5.5) |
 | objective carrier icon | `0x8af360..0x8af41c`, `0x8afe70..0x8b00b8` | score panel branch, not types 1 / 2 | ngm+0x1cc0 / +0x1cc8; set +0x18 / +0x20 / +0x28 | ported, two pieces left (5.5) |
 | co-op type 9 money / wave | `0x8af4e0..0x8af5c0` | type 9, flag 0x8000, wave screen hidden | set +0xc0 / +0xc8 / +0xd0 | ported (5.4) |
-| booster icons `0x8a9bbc` | `0x8af5c4` (film), `0x8af440` (loadout) | film: ngm+0x209c, flag 0x40000, cinema mode; loadout: competitive, flag 0x10 **set** | tracker +0x2a0 / +0x2a4; loadout 0x11474f8+0x4c | ported (5.4) |
+| booster icons `0x8a9bbc` | `0x8af5c4` (film), `0x8af440` (loadout) | film: ngm+0x209c, flag 0x40000, cinema mode 0; loadout: competitive, flag 0x10 **set** | tracker +0x2a0 / +0x2a4; loadout 0x11474f8+0x4c | ported (5.4) |
 | theater HUD (`0x8a8ed8` camera selector, `0x8ac3f0` camera name / progress / "x%2.1f" speed) | `0x8af620` | film, flag 0x100000, `[0xe1eb2c]` == 0 | element +0x1928 | not ported (5.6) |
 | message list / kill feed | `0x8af424` | competitive, not type 11, flag 0x80000 | element +0x40 | ported (4.1) |
 | names over heads `0x8aeeb0` -> `0x8adb60` | `0x8af4c4` | flag 0x20000 | element +0x860 | ported (5.2) |
@@ -219,7 +219,8 @@ fades in with the first glyph's curve and out with the last glyph's. It is clear
 
 The booster icons (`0x8a9bbc`) are 76.8 x 38.4 quads at x = hud+0x340 + 90, y = 150 and 180.72, white
 at fade x 0.75. They are drawn at two sites:
-- **Film site:** ngm+0x209c, flag 0x40000, cinema mode `[0x113a990+0x678]`. It draws the watched
+- **Film site:** ngm+0x209c, flag 0x40000, cinema mode `[0x113a990+0x678]` == 0 (cinema mode 0 = follow
+  camera; free and orbit cameras show no film boosters, `parity-n-remaining.md` N1). It draws the watched
   player's boosters by index from tracker +0x2a0 / +0x2a4 (SetBooster `0x662dd0`).
 - **Loadout site:** competitive, flag 0x10 set, boosters allowed (ngm+0x1e80, game record +0x6c). It
   draws the loadout ids 0x11474f8+0x4c / +0x50, looked up in the booster list 0x113a788.

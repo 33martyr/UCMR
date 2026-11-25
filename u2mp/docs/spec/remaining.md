@@ -52,7 +52,7 @@ few code sites read address 0 because a PS4 accessor was folded to NULL. This fi
 
 - restores two net event Applies: NetEventNpcDealDamage (event 44) and NetEventKickGriefer (event 69);
 - gives the frontend menu callbacks of the party, player, friends, players-met, invites, clan tag,
-  store, Twitter and cinema-sharing buttons PC behaviour (popups, message boxes, the session and
+  store and cinema-sharing buttons PC behaviour (popups, message boxes, the session and
   online layers);
 - fixes four NULL-read sites (level record package, tracker values, empty tag table search,
   NetStatGame host name);
@@ -107,8 +107,6 @@ Menu callbacks have three pointer arguments (arg, unused, unused) and return not
 | 0x5ed8b0 | ret stub | same | `PAGE_MULTIPLAYER_PLAYER_OPTIONS` | B23 |
 | 0x5ed8c0 | ret stub | same | `store browse` | B24 |
 | 0x64e900 | ret stub | same | `matchmaking box (24df6961)` | B25 |
-| 0x6769d0 | ret stub | same | `PAGE_TWITTER` | B26 |
-| 0x6769e0 | ret stub | same | `BUTTON_TWITTER_*` | B27 |
 | 0x5e4510 | ret stub | same | `cinema send to friend (fe0e7de7)` | B28 |
 | 0x5e4520 | ret stub | same | `cinema receive from friend (6b2970e2)` | B29 |
 
@@ -244,7 +242,6 @@ Own ids (`sid` of the name; values for reference):
 | U2MP_PC_TEXT_LEADER | 0x284adbe1 |
 | U2MP_PC_TEXT_INVITE | 0xb6cb3439 |
 | U2MP_PC_TEXT_CLANTAG | 0xbc1d9250 |
-| U2MP_PC_TEXT_TWITTER | 0x1d8edde7 |
 | U2MP_PC_TEXT_CINEMA_SEND | 0xac28c06d |
 | U2MP_PC_TEXT_CINEMA_RECEIVE | 0x111b4b9d |
 | U2MP_PC_TEXT_YOU | 0xa4692016 |
@@ -539,13 +536,10 @@ F-box(`kTextStore`).
 v = arg +8. If v is non-zero, set the matchmaking answer flag (nothing reads it). Log
 `"matchmaking message box answered (%u)"` with v, always.
 
-#### B26. PAGE_TWITTER 0x6769d0
+#### B26 / B27. PAGE_TWITTER 0x6769d0, BUTTON_TWITTER_* 0x6769e0: DROPPED
 
-If the page event (arg +0) is 6: F-pop, then F-box(`kTextTwitter`).
-
-#### B27. BUTTON_TWITTER_* 0x6769e0
-
-F-box(`kTextTwitter`).
+Dropped (owner, 2026-11-25): the Twitter service is gone. Both slots stay PS4's `ret` stubs; no control leads to
+the page (`parity-k-twitter.md` 1.2).
 
 #### B28. Cinema send 0x5e4510 and `cinema_pick_friend()` (same behaviour)
 
@@ -620,7 +614,7 @@ Steps in this exact order (logs and `near_stub` use follow it). "+1" means `inst
 11. **Ret stubs**, in the order of the table in 1.2 starting at 0x61b900 and ending at 0x5e4520
     (KickGriefer, PARTY_PLAYERn, PLAYERn, LIST_FRIENDS, Kick, Mute 0x5ec4b0, Mute 0x5ec480,
     Promote, party IsHost, Save, INVITES, Join Party, CLANTAG, PLAYER_OPTIONS page, store, matchmaking
-    box, PAGE_TWITTER, BUTTON_TWITTER_*, cinema send, cinema receive). For each:
+    box, cinema send, cinema receive). For each:
     - needs popup (only PARTY_PLAYERn, PLAYERn, LIST_FRIENDS) and popup not OK: log
       `"%s: ShowPopup 0x%llx differs, left alone"` (name, 0x5cc480); skip.
     - not a ret stub: log `"%s at 0x%llx: not the stripped function this port expects, left alone"`
@@ -634,7 +628,7 @@ The function never fails as a whole and returns nothing.
 
 Install:
 - Clean image: every step installs; check the log lines in order and `installed` (+4 for 1-4, +1
-  TextDb, +1 NpcDealDamage, +3 for 8-10, +20 stubs = 29).
+  TextDb, +1 NpcDealDamage, +3 for 8-10, +18 stubs = 27).
 - Each byte check broken one at a time (0x644130, 0x640598, 0x4bf44c, 0x66c75d, 0x66c764, a wrong
   E8 target at 0x66c75f, then at 0x66c76d only, 0xcddc00, 0x60eb90, attack type [0] non-zero,
   [2] wrong, image size < 0xdef290+180, 0x61fa70, 0x5ebee0, 0x659b50, 0x5ebdf0, 0x5cc480, each
@@ -680,8 +674,8 @@ B18-B21: join list true; false with mode 0 and non-zero (page then box); join/in
 off, selected row -1, valid row; cond 48 op 1 with 0 and 3 invites, op 2 column 1 with 0 and 12
 invites, op 2 column 0, op 3.
 
-B22-B27: clan tag begin ok / fails; page event 6 with NET_SM 1 and 2, event 5; store; matchmaking
-answer 0 and 7; twitter event 6 and 2; twitter button.
+B22-B25: clan tag begin ok / fails; page event 6 with NET_SM 1 and 2, event 5; store; matchmaking
+answer 0 and 7.
 
 B28/B29: not linked; no friend online; 3 of 5 online; 10 online friends (only 8); a request row
 online (skipped); registration failing at slot 5; pick callback with index beyond the list; receive

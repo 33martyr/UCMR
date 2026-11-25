@@ -43,7 +43,7 @@ functions run inside flows that other files own; the table notes them.
 | `4bc310` | `65ecc0` | mode label list (entry table `0x1041560`) | Equivalent. The menu-entry and image lookups are inlined. "%s%s" and "%s%s \|@CFFFF8040\|%i" use netInfo+0x18. Nothing to do. |
 | `4bd2c4` | `656fe0` | "%i %s" (CUSTOMTIMELIMIT, cond 61) | Equivalent. The game-type lookup and IsHost are inlined. Nothing to do. |
 | `4bf768` | `65ae50` | "%s %s" (matchmaking vote rows, block `0x113db50` = PS3 `0xf21dcc`) | Equivalent. The lookups are inlined. Its data is empty until something fills the vote block, which on PS3 was the matchmaking machine. |
-| `4edea0` / `4f1208` | `675b30` / `676d30` | Twitter | Skipped. Twitter is a PC message box (remaining.cpp). |
+| `4edea0` / `4f1208` | `675b30` / `676d30` | Twitter | DROPPED (owner, 2026-11-25: service gone); the pages stay unreachable PS4 `ret` stubs. |
 
 ## Open items for the lead (resolved 2026-11-08, PORT-FRONTEND3.md)
 

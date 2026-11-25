@@ -91,7 +91,7 @@ the converters had when they were Python modules; the table says where each is n
 | `twin.cpp` | skins built from the PS4 campaign actor (twin) + the converted MP parts; `--validate-twins` | u2twin |
 | `netimg.cpp` | the PS3 menu images the PS4 net.pak lacks (`pak22/ps4/net-u2mp.pak`) | u2netimg |
 | `netpatch.cpp` | `dc1/ps4/net-patch9.bin` on the U3 DC converter | u2dc |
-| `overlay.cpp` | the menu overlay (main menu with a Multiplayer button) | u2mp_overlay |
+| `overlay.cpp` | the menu overlay `dc1/ps4/menu.bin` (version 6): a Multiplayer code button in the three main menus (PS3 order, Multiplayer Medals kept as shipped) and PAGE_MULTIPLAYER without its Trophies button (BUTTON_NETTROPHIES; owner 2026-11-25, PC has no trophies), each a new control list appended after the data (MENUS.md 1, 3.1) | u2mp_overlay |
 | `validate.cpp` | `--validate`: the reference-pair checks | validate |
 | `devtools.cpp` | the maintainer commands (`--dc`, `--hk-tables`, `--twin-build`, `--psarc`) | |
 

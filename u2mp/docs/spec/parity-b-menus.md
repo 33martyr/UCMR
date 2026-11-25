@@ -273,7 +273,7 @@ plumbing, replaced by our design (equivalent named, or "no equivalent"), **M** =
 | 4b8ebc | cond 3: join game list (room search results) | P | menus.cpp `query_join_list`, online.cpp `join_rows/join_row` (sec. 6) |
 | 4b9000 | index sort with explicit stack (cinema file list, cond 68) | C | PS4 cinema list (cinema.cpp area) |
 | 4b992c | cinema entry order: by +0x314, then name | C | PS4 intact |
-| 4b9a88 | cond 51..53, 131, 136: mode button labels | C | PS4 `655cf0`, texts.cpp |
+| 4b9a88 | cond 51..53, 131, 136: mode button labels | C (136: DROPPED, owner) | PS4 `655cf0`, texts.cpp; cond 136 (Trophies, BUTTON_NETTROPHIES): the import's menu overlay removes the button (PC has no trophies), so it is never asked and its text f1b9728c is gone |
 | 4b9cb8 | query builder: finds the cond's table entry, sets op, arg, element | C | PS4 helpers |
 | 4b9df4 | control method: op 17 | C | PS4 control class |
 | 4b9e4c | control method: op 16, returns value | C | PS4 control class |

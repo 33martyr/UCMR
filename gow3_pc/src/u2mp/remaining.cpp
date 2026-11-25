@@ -3,16 +3,19 @@
 //
 // - two net event Applies (NpcDealDamage, KickGriefer);
 // - the frontend menu callbacks of the party, player, friends, players-met, invites, clan tag,
-//   store, Twitter and cinema-sharing buttons, answered with PC popups, message boxes and the
+//   store and cinema-sharing buttons, answered with PC popups, message boxes and the
 //   session / online layers;
 // - the NULL-read sites (level record package, tracker values, empty tag table search, NetStatGame
 //   host name);
 // - the TextDb::Find hook that lets texts.cpp serve PC texts;
+// - the Mute Players lists: selecting a player's row toggles that player's voice mute;
 // - show_notice() and cinema_pick_friend() for other files.
 //
-// Reimplemented from the behaviour description u2mp/docs/spec/remaining.md.
+// Reimplemented from the behaviour descriptions u2mp/docs/spec/remaining.md and u2mp/docs/spec/parity-n-remaining.md
+// (N2).
 #include "cinema.h"
 #include "online.h"
+#include "overlay_rules.h"
 #include "progression.h"
 #include "session_api.h"
 #include "texts.h"
@@ -580,6 +583,48 @@ U2MP_GUEST void mute_member(void *, void *, void *) {
     voice::toggle_mute(g_selected_member);
 }
 
+// ---- N2: the Mute Players lists (parity-n-remaining.md N2, PS3 0x443248) ------------------------------------------
+// PAGE_MULTIPLAYER_MUTE_PLAYERS (pause menu) holds two team lists, LIST_MUTEPLAYERS0 (own team) and 1 (other team).
+// Selecting a row sends the list's id with the row. PS4's catch-all callback 0x5ecb80 still finds the row's NetStatGame
+// entry (0x5ed076 / 0x5ed0ca) and does nothing; our callbacks for the two ids, appended to the table, do the toggle.
+constexpr uint64_t kStatCurrent = 0x1147bd8;    // NetStatGame copy of the current game (u32 count first)
+constexpr uint64_t kStatPrevious = 0x114d2ec;   // ... of the previous game
+constexpr uint64_t kStatRecords = 0x38e4;       // entry i at +0x80 i: u32 net id at +0, u8 team at +7
+constexpr uint64_t kStatPositions = 0x3e4c;     // u16 in-team position (1-based) of entry i at +0x34 i
+constexpr uint32_t kStatEntries = 10;
+bool g_mute_lists_ok = false;       // install found the PS4 search this follows
+bool g_mute_lists_logged = false;   // registration result logged
+bool g_mute_toggle_logged = false;
+
+U2MP_GUEST void mute_players_row(void *arg, void *, void *) {
+    const uint8_t *local = image_load<const uint8_t *>(kNetGameManager);
+    if (!local) return;   // no local tracker
+    bool known = false;
+    const int32_t team = overlay::mute_action_team(arg_word(arg, 0), load_at<int32_t>(local, 0x134), known);
+    if (!known) return;
+    const bool previous = overlay::mute_action_previous_game(image_load<int32_t>(kNetGameManager + 0x1e80));
+    const uint8_t *table = image_ptr(previous ? kStatPrevious : kStatCurrent);
+    uint32_t count = load<uint32_t>(table);
+    if (count > kStatEntries) count = kStatEntries;
+    overlay::TeamEntry entries[kStatEntries] = {};
+    for (uint32_t i = 0; i < count; ++i) {
+        entries[i].team = table[kStatRecords + 0x80 * uint64_t(i) + 7];
+        entries[i].position = load_at<uint16_t>(table, kStatPositions + 0x34 * uint64_t(i));
+    }
+    const int found = overlay::team_row_entry(entries, count, team, int32_t(arg_word(arg, 4)));
+    if (found < 0) return;
+    const uint32_t id = load_at<uint32_t>(table, kStatRecords + 0x80 * uint64_t(found));
+    uint32_t trackers[kTrackers];
+    for (int i = 0; i < kTrackers; ++i)
+        trackers[i] = image_load<uint32_t>(kNetGameManager + 0x10 + 0x2c0 * uint64_t(i) + 0x120);
+    if (!overlay::mute_list_target(id, session::local_id(), trackers, kTrackers)) return;   // gone, or ourselves
+    const bool now = voice::toggle_mute(id);
+    if (!g_mute_toggle_logged) {
+        g_mute_toggle_logged = true;
+        log("mute players page: net id %u %s (PS3 0x443248)", id, now ? "muted" : "unmuted");
+    }
+}
+
 // PS3 0x439c7c: hand the party to the member, then PAGE_LOBBY. Our failure box is a PC addition (LAN has no
 // promote, or the member is not in the room).
 U2MP_GUEST void promote_leader(void *, void *, void *) {
@@ -630,7 +675,7 @@ U2MP_GUEST void invites_query(void *query) {
     }
 }
 
-// ---- B22 .. B27: clan tag, player options page, store, matchmaking box, Twitter -----------------------
+// ---- B22 .. B25: clan tag, player options page, store, matchmaking box ---------------------------------
 
 U2MP_GUEST void clan_tag_button(void *, void *, void *) {
     if (!edit_clan_tag()) message_box(kTextClanTag);
@@ -651,14 +696,6 @@ U2MP_GUEST void matchmaking_box(void *arg, void *, void *) {
     if (answer) g_matchmaking_answered = true;
     log("matchmaking message box answered (%u)", answer);
 }
-
-U2MP_GUEST void twitter_page(void *arg, void *, void *) {
-    if (arg_word(arg, 0) != 6) return;
-    pop_page();
-    message_box(kTextTwitter);
-}
-
-U2MP_GUEST void twitter_button(void *, void *, void *) { message_box(kTextTwitter); }
 
 // ---- B28 / B29: cinema files to and from friends --------------------------------------------------------
 
@@ -825,6 +862,21 @@ void friend_party_arrived(const std::string &npid, const std::vector<std::string
     text_set_player(g_profile_text.c_str());
 }
 
+// N2: the game never registers the two list ids, and its table is filled at run time: the callbacks are put in (found
+// or appended, F-register) on every frame of a session, so they are there whenever the page can be open.
+void mute_players_frame() {
+    if (!g_mute_lists_ok || !image.base) return;
+    const bool ok = register_callback(overlay::kMutePlayersOwnList, mute_players_row) &&
+                    register_callback(overlay::kMutePlayersOtherList, mute_players_row);
+    if (g_mute_lists_logged) return;
+    g_mute_lists_logged = true;
+    if (ok)
+        log("mute players page: LIST_MUTEPLAYERS0 / 1 (b04c828b / b48d9f3c) toggle a player's voice mute "
+            "(PS3 0x443248)");
+    else
+        log("mute players page: menu callback table full, selecting a row changes nothing");
+}
+
 void install_remaining(int &installed) {
     // 1. level record package
     static const unsigned char level_pkg[] = {0x55, 0x48, 0x89, 0xe5, 0x41, 0x56, 0x53,
@@ -933,8 +985,6 @@ void install_remaining(int &installed) {
         {0x5ed8b0, "PAGE_MULTIPLAYER_PLAYER_OPTIONS", reinterpret_cast<void *>(&player_options_page), false},
         {0x5ed8c0, "store browse", reinterpret_cast<void *>(&store_browse), false},
         {0x64e900, "matchmaking box (24df6961)", reinterpret_cast<void *>(&matchmaking_box), false},
-        {0x6769d0, "PAGE_TWITTER", reinterpret_cast<void *>(&twitter_page), false},
-        {0x6769e0, "BUTTON_TWITTER_*", reinterpret_cast<void *>(&twitter_button), false},
         {0x5e4510, "cinema send to friend (fe0e7de7)", reinterpret_cast<void *>(&cinema_send), false},
         {0x5e4520, "cinema receive from friend (6b2970e2)", reinterpret_cast<void *>(&cinema_receive), false},
     };
@@ -952,6 +1002,28 @@ void install_remaining(int &installed) {
         if (replace_function(s.address, 5, s.fn, s.name)) ++done;
     }
     installed += done;
+
+    // 12. Mute Players lists (N2): the PS4 row search in 0x5ecb80 reads the fields mute_players_row reads (list ids,
+    //     own team +0x134, NGM state +0x1e80, the two NetStatGame copies, row + 1, positions, team bytes).
+    static const unsigned char own_list[] = {0x81, 0xfe, 0x8b, 0x82, 0x4c, 0xb0};      // cmp esi, 0xb04c828b
+    static const unsigned char other_list[] = {0x81, 0xfe, 0x3c, 0x9f, 0x8d, 0xb4};    // cmp esi, 0xb48d9f3c
+    static const unsigned char own_team[] = {0x8b, 0x90, 0x34, 0x01, 0x00, 0x00};      // mov edx, [rax+0x134]
+    static const unsigned char state[] = {0x8b, 0x91, 0x80, 0x1e, 0x00, 0x00, 0xff, 0xca};   // [rcx+0x1e80] - 1
+    static const unsigned char copies[] = {0x48, 0x8d, 0xb1, 0x1c, 0x57, 0x00, 0x00, 0x48, 0x83, 0xc1, 0x08};
+    static const unsigned char fields[] = {0x44, 0x8b, 0x47, 0x04, 0x41, 0xff, 0xc0,     // row + 1
+                                           0x48, 0x8d, 0xb9, 0x4c, 0x3e, 0x00, 0x00,     // positions
+                                           0x48, 0x81, 0xc1, 0xeb, 0x38, 0x00, 0x00};    // team bytes
+    const int32_t stat_rel = image_load<int32_t>(0x5ed10a + 3);   // lea rcx, [rip + NetStatGame]
+    g_mute_lists_ok = bytes_at(0x5ed0ca, own_list) && bytes_at(0x5ed076, other_list) && bytes_at(0x5ed0e9, own_team) &&
+                      bytes_at(0x5ed102, state) && bytes_at(0x5ed111, copies) && bytes_at(0x5ed12d, fields) &&
+                      0x5ed10a + 7 + int64_t(stat_rel) + 8 == int64_t(kStatCurrent);
+    static_assert(kStatPrevious - kStatCurrent == 0x571c - 8, "copies: base + 8 and base + 0x571c");
+    if (g_mute_lists_ok) {
+        ++installed;
+        log("mute players page: row search 0x5ed076 / 0x5ed0ca as expected, mute callbacks follow it");
+    } else {
+        log("mute players page: row search in 0x5ecb80 not as expected: selecting a row changes nothing");
+    }
 }
 
 }  // namespace u2mp

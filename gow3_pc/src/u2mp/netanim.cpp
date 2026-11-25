@@ -6,20 +6,23 @@
 //  1. The snapshot stream no longer carries a clip's phase, so the visitor that builds a remote
 //     character's clip command is never reached. Two call-outs put the phase back: one after the
 //     writer stores a clip's anim index (appends the phase bits), one in the reader's anim case
-//     (reads them and hands them to visitor slot 3). This changes the wire format, so both PCs
-//     need this build.
-//  2. NetAnimCmdGenerator slot 4 is an empty function. It should fire the frame-keyed events
-//     (sounds, effects) of what a remote character played between two snapshots. The host
-//     version keeps a small animation list per generator and calls the game's event firing
-//     function, which PS4 still has but never calls.
+//     (reads them; read_leaf resolves the clip through the anim index table and hands it to the
+//     pose generator's slot 3, or its bind pose to slot 5). This changes the wire format, so both
+//     PCs need this build. The bit counts are padded to whole words (UNCHARTED_U2MP_NETANIM_PAD=0
+//     turns that off).
+//  2. NetAnimCmdGenerator slot 4 (0x5f48d0) is an empty function. It should fire the frame-keyed
+//     events (sounds, effects) of what a remote character played between two snapshots.
+//     generator_slot4 below does that, but it is NOT installed: e05a7d9 (PR #110) replaced the
+//     reader call-out with read_leaf, which feeds only the pose generator, so the slot's own
+//     visitor would never receive a clip. Installing it again needs the reader to pass clips to
+//     other visitors as well (u2mp/docs/spec/netanim.md 1.1).
 // UNCHARTED_U2MP_NETANIM=0 turns all of it off.
 
 // Every float result must be rounded on its own, exactly as the description orders the steps.
 #pragma clang fp contract(off)
 
+#include "host_memory.h"
 #include "u2mp_internal.h"
-
-#include <windows.h>
 
 #include <atomic>
 #include <cmath>
@@ -65,9 +68,7 @@ const uint8_t *peek_ptr(const void *p) { return peek<const uint8_t *>(p); }
 bool guest_pointer(const void *p) {
     const uintptr_t v = uintptr_t(p);
     if (v < 0x10000 || v >= 0x0000800000000000ull) return false;
-    MEMORY_BASIC_INFORMATION m{};
-    if (VirtualQuery(p, &m, sizeof m) != sizeof m) return false;
-    return m.State == MEM_COMMIT && !(m.Protect & (PAGE_NOACCESS | PAGE_GUARD));
+    return host_readable(p);
 }
 
 // At most 8 log lines from the two stream call-outs together; the rest is silent.
@@ -676,8 +677,8 @@ void advance_same(AnimList &list, const AnimList &older, const AnimList &newer, 
 
 std::atomic<int> g_slot_calls{0};
 
-// NetAnimCmdGenerator slot 4: (generator, events list or NULL).
-U2MP_GUEST void generator_slot4(const uint8_t *gen, void *events) {
+// NetAnimCmdGenerator slot 4: (generator, events list or NULL). Not installed since e05a7d9 (file header, item 2).
+[[maybe_unused]] U2MP_GUEST void generator_slot4(const uint8_t *gen, void *events) {
     if (g_slot_calls.load() < 3 && g_slot_calls.fetch_add(1) < 3)
         log("netanim: generator slot called (generator %p)", static_cast<const void *>(gen));
 
@@ -862,12 +863,14 @@ void install_netanim(int &installed) {
                 installed += 1;
                 log("netanim: snapshot bit counts padded to whole words");
             }
+        } else {
+            log("netanim: no stub memory near the image, no bit count padding");
         }
-    } else {
+    } else if (pad && std::strcmp(pad, "0") == 0) {
         log("netanim: bit count padding off (UNCHARTED_U2MP_NETANIM_PAD=0)");
+    } else {
+        log("netanim: snapshot bit count sites differ from 1.02, no bit count padding");
     }
-
-
 }
 
 }  // namespace u2mp

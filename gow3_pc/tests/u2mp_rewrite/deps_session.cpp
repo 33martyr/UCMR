@@ -177,7 +177,14 @@ uint64_t match_room() {
     hx::rec("online::match_room");
     return st.match_room;
 }
+#if !defined(u2mp)   // new build: follow_match_room reports whether it followed (online.h after the rewrite)
+bool follow_match_room(uint64_t room) {
+    hx::rec("online::follow_match_room %llx", (unsigned long long)room);
+    return true;
+}
+#else
 void follow_match_room(uint64_t room) { hx::rec("online::follow_match_room %llx", (unsigned long long)room); }
+#endif
 void on_host_reached(uint32_t id) { hx::rec("online::on_host_reached %u", id); }
 bool host_change_expected() {
     hx::rec("online::host_change_expected");
@@ -309,7 +316,59 @@ int mm_slots() {
 }
 // parity group D: Start Match room hide
 void hide_for_start(bool on) { hx::rec("online::hide_for_start %d", on ? 1 : 0); }
+// parity groups E / F (party up, slot manager, matchmaking host gone, leave matchmaking) and C (link state): the
+// answers of a player alone and offline, the case the old code knew (no party room, nobody led, host is ours)
+bool drop_out_of_party(const char *why) {
+    hx::rec("online::drop_out_of_party [%s]", why ? why : "(NULL)");
+    return false;
+}
+int32_t peer_link_state(const std::string &npid) {
+    hx::rec("online::peer_link_state [%s]", npid.c_str());
+    return -1;
+}
+uint64_t party_room_id() {
+    hx::rec("online::party_room_id");
+    return 0;
+}
+int party_size() {
+    hx::rec("online::party_size");
+    return 1;
+}
+bool party_up_join(uint64_t room) {
+    hx::rec("online::party_up_join %llx", (unsigned long long)room);
+    return false;
+}
+bool host_in_party() {
+    hx::rec("online::host_in_party");
+    return true;
+}
+void mm_host_gone(const char *why, bool bad_room) {
+    hx::rec("online::mm_host_gone [%s] %d", why ? why : "(NULL)", bad_room ? 1 : 0);
+}
+std::vector<std::string> take_led_party() {
+    hx::rec("online::take_led_party");
+    return {};
+}
+void reservation_refused() { hx::rec("online::reservation_refused"); }
 }  // namespace online
+namespace voice {
+void reset_volume() { hx::rec("voice::reset_volume"); }   // parity J6
+}  // namespace voice
+// parity group E: matchmaking playlist game types (menus.cpp), menu version text (hud.cpp), stats ticker
+// (ticker.cpp), Players Met at match start (progression.cpp)
+bool playlist_game_types(std::vector<int32_t> &types) {
+    hx::rec("playlist_game_types");
+    return false;
+}
+void hud_menu_text(float x, float y, float scale, const char *text) {
+    hx::rec("hud_menu_text %.1f %.1f %.2f [%s]", x, y, scale, text ? text : "(NULL)");
+}
+void ticker_refresh() { hx::rec("ticker_refresh"); }
+void progression_note_met(const std::vector<std::string> &names) {
+    std::string s;
+    for (const auto &n : names) s += (s.empty() ? "" : ",") + n;
+    hx::rec("progression_note_met [%s]", s.c_str());
+}
 // parity group D: Start Match checks, teardown releases, cinema mode, start failure box
 void game_message_box(uint32_t body, uint32_t second) { hx::rec("game_message_box 0x%x 0x%x", body, second); }
 uint32_t dlc_packs() {

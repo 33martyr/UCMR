@@ -56,6 +56,7 @@ static_assert(sid("BUTTON_MULTIPLAYER") == 0xed9d8ae1u, "string id function");
 void install_frontend(int &installed);
 void install_natives(int &installed);   // natives.cpp: the co-op / net script natives
 void install_remaining(int &installed); // remaining.cpp: the last stubbed callbacks and Applies
+void mute_players_frame();              // remaining.cpp: Mute Players list callbacks in the table (per session frame)
 void install_menus(int &installed);     // menus.cpp: the multiplayer menu queries (u2mp/docs/MENUS.md)
 void install_menuimages(int &installed); // menuimages.cpp: net image ids, lost menu image types (MENUS.md 7)
 void install_unlocks(int &installed); // unlocks.cpp: every MP item unlocked, GOTY skin/booster tables (UNLOCKS.md)
@@ -65,6 +66,9 @@ void loading_hide(const char *why);
 // `xform` (10 floats), text centred in (x, y, w, h) of the 1280x720 canvas. False, nothing drawn, when the
 // function's start is not as expected or there is no text.
 bool menu_text_in_rect(const float *xform, const char *text, float x, float y, float w, float h);
+// loading.cpp: a menu is up: the menu manager's state word s32 [0x1136640 + 0x1014] is not 0 (PS3 +0x5b4,
+// parity-m-features.md 10.2). False when the PS4 users of the word are not as expected (logged once).
+bool menu_up();
 void install_dlc(int &installed);       // dlc.cpp: DLC maps offered only when imported (u2mp/docs/DLC.md)
 void install_menudraw(int &installed);  // menudraw.cpp: 2D command arena 192 KiB -> 2 MiB (PORT-MENUDRAW.md)
 void install_frontend2(int &installed); // frontend2.cpp: partial menu functions vs PS3 (PORT-FRONTEND2.md)
@@ -84,7 +88,6 @@ void hud_weapon_tick();                 // hud.cpp: weapon panel trigger, from t
 void hud_menu_text(float x, float y, float scale, const char *text);
 void install_scoreboard(int &installed); // scoreboard.cpp: in-match scoreboard, PS3 0x4cbf00 / 0x4cbc10
 void sync_netstat_ranks();               // session.cpp: copy current NetStatGame levels from the trackers
-void show_round_results();               // scoreboard.cpp: round/end results page from the session state
 void install_ticker(int &installed);     // ticker.cpp: PAGE_MULTIPLAYER stats ticker refresh (parity-ticker-respawn.md 1)
 void ticker_refresh();                   // ticker.cpp: from the multiplayer page's per-frame update (main thread)
 void install_rosternames(int &installed); // rosternames.cpp: player display names in the team lists (NetStatGame +0x3918)

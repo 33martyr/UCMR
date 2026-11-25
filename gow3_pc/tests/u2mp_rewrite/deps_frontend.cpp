@@ -10,6 +10,9 @@
 #include "online.h"
 #include "session_api.h"
 #include "u2mp_internal.h"
+#if !defined(u2mp)
+#include "voice.h"   // new build only (the 62fc26b headers have no voice.h)
+#endif
 
 namespace u2mp {
 
@@ -77,6 +80,37 @@ void mm_reset() { hx::rec("mm_reset"); }
 void mm_research() { hx::rec("mm_research"); }
 void mm_leave() { hx::rec("mm_leave"); }
 
+#if !defined(u2mp)
+// Only the new headers declare these (parity groups D/E/F: search passes, party leave, host gone; D start hide).
+// The pure queries are not recorded: the old code has no such calls, and their effects are in the record.
+bool active() { return hx::fe::s.active || hx::fe::s.mm_online; }
+bool host_in_party() { return hx::fe::s.host_in_party; }
+bool party_member() { return hx::fe::s.party_member; }
+uint64_t own_party_id() { return hx::fe::s.own_party_id; }
+uint64_t match_room() { return hx::fe::s.match_room; }
+int party_missing() { return hx::fe::s.party_missing; }
+int mm_pending_members() { return hx::fe::s.mm_pending; }
+void mm_begin(uint32_t playlist, uint32_t index, const MmCriteria &c) {
+    hx::rec("mm_begin 0x%x index %u pass %d ping %u rank_only %d", playlist, index, c.pass, c.ping_limit_ms, c.rank_only);
+}
+void mm_create() { hx::rec("mm_create"); }
+void mm_host_gone(const char *why, bool bad_room) { hx::rec("mm_host_gone '%s' bad %d", why ? why : "(null)", bad_room); }
+void mm_leave_to_leader() { hx::rec("mm_leave_to_leader"); }
+void hide_for_start(bool on) { hx::rec("hide_for_start %d", on); }
+#endif
+
 }  // namespace online
+
+#if !defined(u2mp)
+// New-only (475fba8 / parity F): menus.cpp's playlist index, the session's party leave and team balance, voice J3.
+int32_t playlist_index(uint32_t) { return hx::fe::s.playlist_index; }
+namespace session {
+void leave_party() { hx::rec("session::leave_party"); }
+int mm_balance_slot() { return hx::fe::s.balance_slot; }
+}  // namespace session
+namespace voice {
+void unmute_strangers() { hx::rec("voice::unmute_strangers"); }
+}  // namespace voice
+#endif
 
 }  // namespace u2mp

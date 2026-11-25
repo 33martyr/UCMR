@@ -14,8 +14,17 @@
 
 namespace u2mp::online_link {
 
+// A program path in the OS's own form: UTF-16 on Windows (as CreateProcessW takes it), bytes elsewhere.
+#ifdef _WIN32
+using Path = std::wstring;
+#else
+using Path = std::string;
+#endif
+// The value of the environment variable `name` (ASCII) as a path. False when it is unset, empty, or 1024
+// characters or longer.
+bool env_path(const char *name, Path &path);
 // Starts the program at `exe` (once per process) and checks its ABI. False: `why` says what failed.
-bool start(const wchar_t *exe, std::string &why);
+bool start(const Path &exe, std::string &why);
 // The program runs and answers (false after it ended).
 bool alive();
 

@@ -21,6 +21,7 @@
 
 namespace u2mp {
 void install_hud(int &installed);
+void hud_weapon_tick();   // new only: the weapon panel trigger, called from the frame (see draw)
 }
 namespace u2mp_old {
 void install_hud(int &installed);
@@ -889,6 +890,11 @@ void draw(int which, int frames = 1, const std::function<void(int)> &per_frame =
         if (per_frame) per_frame(f);
         hx::rec("-- frame %d", f);
         g_draw[which](reinterpret_cast<void *>(P(W.element)), reinterpret_cast<void *>(ctx));
+        // Since 934a6ca the weapon panel trigger runs from the frame, not from the Draw (u2mp_internal.h:
+        // hud_weapon_tick "from the frame (not the HUD draw)"; session.cpp calls it every frame). The old Draw ran
+        // it after its periodic logs and gates, before the panels: only the weapon worlds have a local player, and
+        // there (HUD flags 0) nothing is drawn after it, so the new side runs it right after the Draw.
+        if (which == 1) u2mp::hud_weapon_tick();
     }
 }
 void draw_scn(const std::string &name, const std::function<void()> &setup, int frames = 1,
@@ -1442,12 +1448,20 @@ int main() {
         put<int32_t>(el(E_MK), count);
     };
     for (int c : {0, -1, 3}) draw_scn("markers/count " + std::to_string(c), [=] { mk(c); });
-    draw_scn("markers/count 9 all types", [=] {
+    // The markers no longer skip a type whose mask bit is clear (the gate went in 934a6ca; fa52c63 and spec hud.md
+    // "Parity group E changes" keep only the read: "the markers do not use it"). So the old code with every mask bit
+    // set is the expected result of the new code with bit 1 clear; the mask word is put back before the image
+    // comparison. Everything else of the scenario is compared as before.
+    g_post = [](int) { put<uint32_t>(MASK, ~(1u << 1)); };
+    run("markers/count 9 all types", [=] {
         mk(9);
         const uint32_t tys[] = {32, 1, 11, 4, 5, 7, 10, 2, 0};
         for (int i = 0; i < 9; i++) marker(i, tys[i], 0.1f * i, i % 2 ? 1.0f : 0.0f, i % 3 ? 0.5f : 0.0f, 12345 - 10 * i);
         put<uint32_t>(MASK, ~(1u << 1));
-    }, 5, [](int f) { put<int32_t>(C1F, 12345 + 20 * f), put<int32_t>(C1D, 3 + f * 10); });
+    }, [](int w) {
+        if (w == 0) put<uint32_t>(MASK, 0xffffffff);   // the old side: type 1 not gated, as the new code does
+        draw(w, 5, [](int f) { put<int32_t>(C1F, 12345 + 20 * f), put<int32_t>(C1D, 3 + f * 10); });
+    });
     draw_scn("markers/stale entry", [=] {
         mk(2);
         marker(0, 4, 0.7f, 1.0f, 0.5f, 12345 - 301);

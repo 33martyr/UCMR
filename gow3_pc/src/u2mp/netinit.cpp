@@ -11,8 +11,8 @@
 // Reimplemented from the behaviour description u2mp/docs/spec/progression.md.
 #include <cstdint>
 #include <cstring>
-#include <windows.h>
 
+#include "host_memory.h"
 #include "u2mp_internal.h"
 
 namespace u2mp {
@@ -88,16 +88,12 @@ template <typename T> void put(uint8_t *p, T v) { std::memcpy(p, &v, sizeof v); 
 // bit-writer site) was an access violation and the game froze entering the multiplayer menu.
 bool write_code(uint64_t offset, const void *bytes, size_t length) {
     void *const p = image.base + offset;
-    DWORD old = 0;
-    if (!VirtualProtect(p, length, PAGE_EXECUTE_READWRITE, &old)) {
-        log("netinit: code at 0x%llx cannot be made writable (%lu)", (unsigned long long)offset,
-            (unsigned long)GetLastError());
+    const HostCodeWrite writable(p, length);
+    if (!writable.ok()) {
+        log("netinit: code at 0x%llx cannot be made writable (%lu)", (unsigned long long)offset, writable.error());
         return false;
     }
     std::memcpy(p, bytes, length);
-    FlushInstructionCache(GetCurrentProcess(), p, length);
-    DWORD ignored = 0;
-    VirtualProtect(p, length, old, &ignored);
     return true;
 }
 
@@ -295,28 +291,26 @@ int fix_bit_writers() {
         return 0;
     }
     // The whole range is one executable segment; make it writable once instead of per site.
-    DWORD old = 0;
-    if (!VirtualProtect(image.base + kFrom, kTo - kFrom, PAGE_EXECUTE_READWRITE, &old)) {
-        log("netinit: the net bit writer range cannot be made writable (%lu); masks left alone",
-            (unsigned long)GetLastError());
-        return 0;
-    }
     unsigned patched = 0;
-    for (uint64_t at = kFrom; at + 16 <= kTo;) {
-        const unsigned len = mask_site(at, patch);
-        if (!len) {
-            ++at;
-            continue;
+    {
+        const HostCodeWrite writable(image.base + kFrom, kTo - kFrom);   // flushed and put back at the block end
+        if (!writable.ok()) {
+            log("netinit: the net bit writer range cannot be made writable (%lu); masks left alone", writable.error());
+            return 0;
         }
-        if (std::memcmp(image.base + at, patch, len) != 0) {
-            std::memcpy(image.base + at, patch, len);
-            ++patched;
+        for (uint64_t at = kFrom; at + 16 <= kTo;) {
+            const unsigned len = mask_site(at, patch);
+            if (!len) {
+                ++at;
+                continue;
+            }
+            if (std::memcmp(image.base + at, patch, len) != 0) {
+                std::memcpy(image.base + at, patch, len);
+                ++patched;
+            }
+            at += len;
         }
-        at += len;
     }
-    FlushInstructionCache(GetCurrentProcess(), image.base + kFrom, kTo - kFrom);
-    DWORD ignored = 0;
-    VirtualProtect(image.base + kFrom, kTo - kFrom, old, &ignored);
     log("netinit: net bit writer word masks fixed (%u of %u)", patched, kSites);
     return int(patched);
 }
