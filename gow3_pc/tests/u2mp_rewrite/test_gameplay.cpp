@@ -272,16 +272,73 @@ U2MP_GUEST void h_render(uint8_t *page, void *arg, uint8_t *desc) { render_commo
 U2MP_GUEST void h_render2(uint8_t *page, void *arg, uint8_t *desc) { render_common("render2", page, arg, desc); }
 U2MP_GUEST void h_render3(uint8_t *page, void *arg, uint8_t *desc) { render_common("render3", page, arg, desc); }
 
+// The code bytes the new install verifies (scoreboard.cpp `check` / `check_facts`: gameplay.md 1.5 steps 2, 4a, 4b;
+// parity-m-features.md section 10), as the PS4 1.02 eboot holds them (file offset = address + 0x4000; each one
+// compared with the eboot). With them the install sees the real image: every optional part is on.
+struct SbFact {
+    uint64_t at;
+    const char *hex;
+};
+const SbFact kSbFacts[] = {
+    {0x64a7c7, "89b7841e0000"},
+    {0x5e53f0, "8988881e0000"},
+    {0x5e5409, "83f903750bc780801e000004000000"},
+    {0x647a82, "48c783801e000002000000c783881e000000000000"},
+    {0x648c65, "41c787801e000003000000"},
+    {0x641f63, "41c78424801e000005000000"},
+    {0x5e8907, "41c786801e000000000000"},
+    {0x577f9f, "80b89c20000000"},
+    {0x9766f0, "554889e5534881ec88000000"},
+    {0x9767c9, "beee88961ae8bdd8b4ffb001837de8027212"},
+    {0x9767e4, "8a403c2401"},
+    {0x65b902, "488b07ff90880000008a483d80e101"},
+    {0x6626b5, "48c783800100000000000048c7837801000000000000"},
+    {0x664b90, "488b87680100004885c074198b8f7001000085c97412488b004885c0740d3948440f94c0"},
+    {0x555550, "488b8f10030000488b91380100004885d27407b001833a007515488b89400100004885c97407b001833900750231c0c3"},
+    {0x5d06a4, "41c68538100000"},
+    {0x5d0704, "c4c17a108d30100000c4c17a108534100000"},
+    {0x5d1afd, "80bb3810000000750fc5fa118330100000c6833810000001"},
+    {0x555cd1, "488d053490af00c4e2791830"},
+    {0x3faf57, "49ff4728c5f857c0c4c1782e474c7404"},
+    {0x3dd780, "4889f8"},
+    {0x3dd7f7, "8990d8000000"},
+    {0x3dd8a6, "897070"},
+    {0x9b5c20, "554889e5"},
+    {0x9b5c34, "4989f54889fe"},
+    {0x666b8b, "85f6752f80f101752a84dbb8e165b4d9be318f112f"},
+    {0xa5c7f6, "488b4338488b4808488b4010488d15777870004889420848890a"},
+    {0x4c4310, "554889e54157415641554154534883ec"},
+    {0x4c4386, "41837810000f84c5000000"},
+    {0x4c4470, "0fb74f34f6c1047472"},
+    {0x57803f, "488d8558ffffff4889442408488d8570ffffff48890424be01e08ae6488d7db84c8d45a04c8d4d884d89dee8a1c2f4ff"},
+    {0x5e9336, "3d01e08ae6757a488d054c16b50083b87806000001"},
+    {0x5e91d8, "3ddad1878a0f85b5000000498b46088b8068010000"},
+    {0x5e9206, "41c7453002000000"},
+    {0x5e9180, "3db5c298f40f850d010000498b46088a80"},
+    {0x5e91c4, "41c7453001000000"},
+    {0x9be070, "488b47504885c07413488b004885c0740e488b40103970180f94c0c3"},
+    {0x5e3eab, "4c8d3534408a00"},
+    {0x5eaefb, "4c8d35e4cf8900"},
+    {0xe87ee6, "4c6561766500"},   // "Leave"
+    {0x5cf51d, "41f6856c08000002"},
+    {0x5d0c03, "89d683e60ab80700000083fe08"},
+    {0x5e8e99, "488d053807a70048837818000f85ed030000"},
+    {0x5d05a4, "488d052d90a8004883781800740d41c78520100000"},
+    {0x5a2670, "554889e5"},
+    {0x554340, "554889e5"},
+    {0x5a3c74, "488d050525b700c5fa2a8810010000"},
+};
+constexpr uint64_t kSbClock = 0x1116180, kSbFrameStep = kSbClock + 0x110, kSbPauseScale = kSbClock + 0x4c;
+constexpr uint64_t kSbHudAlpha = 0x104ed0c;
+
 void sb_setup(uint64_t target = kSbDraw) {
     put_bytes(kSbLayout, {0x55, 0x48, 0x89, 0xe5});
     put_bytes(kSbDraw, {0x55, 0x48, 0x89, 0xe5});
     put<uint32_t>(kSbTracker + 0x18, 0xf650325d);
     put<float>(kSbTracker + 0x10, 1.0f);
     put_call(kSbCall, target);
-    // What the new install also checks, as the real PS4 1.02 image has it (boot-linked.bin): tracker entries 1-3
-    // (speed 1.0, dim 1, page ids 5dad5a68 / 3d437466 / 5dad5a68), the cond 44 query 0x65b830 / 0x65b855 and the
-    // one-shot sound pair 0x3dd780 / 0x9b5c20 (only their first bytes; the rest of the sound check, 0x3dd7f7,
-    // 0x3dd8a6, 0x9b5c34 and 0x666b8b, is not put, so the sounds stay off).
+    // Tracker entries 1-3 as the real PS4 1.02 image has them (boot-linked.bin): speed 1.0, dim 1, page ids
+    // 5dad5a68 / 3d437466 / 5dad5a68; the cond 44 query 0x65b830 / 0x65b855.
     for (int k = 1; k < 4; k++) {
         put<float>(kSbTracker + 0x10 + 0x14 * k, 1.0f);
         put<uint32_t>(kSbTracker + 0x14 + 0x14 * k, 1);
@@ -290,67 +347,127 @@ void sb_setup(uint64_t target = kSbDraw) {
     put_bytes(0x65b830, {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54,
                          0x53, 0x48, 0x81, 0xec, 0x88, 0x00, 0x00, 0x00, 0x48, 0x89, 0xfb, 0x4c});
     put_bytes(0x65b855, {0x83, 0x3b, 0x01, 0x0f, 0x85, 0xf1, 0x02, 0x00, 0x00});
-    put_bytes(0x3dd780, {0x48, 0x89, 0xf8, 0x48});
-    put_bytes(0x9b5c20, {0x55, 0x48, 0x89, 0xe5});
-    // The frame step read the new install requires (parity-m-features.md 10.1; without it: not installed).
-    put_bytes(0x5a3c74, {0x48, 0x8d, 0x05, 0x05, 0x25, 0xb7, 0x00, 0xc5, 0xfa, 0x2a, 0x88, 0x10, 0x01, 0x00, 0x00});
+    for (const SbFact &f : kSbFacts)
+        for (size_t i = 0; f.hex[2 * i]; i++) {
+            unsigned v = 0;
+            std::sscanf(f.hex + 2 * i, "%2x", &v);
+            hx::mem[f.at + i] = uint8_t(v);
+        }
+    // A running, unpaused match as the new frame reads it (gameplay.md 1.4): the game is not paused (f32
+    // [0x1116180+0x4c] != 0, step 10), the HUD alpha is 1.0 (A of step 10), and tracker 0 is in use and alive (so
+    // "every player out", step 5, does not hold: spawn time == died time, no state record). The frame step
+    // (s32 [0x1116180+0x110]) is put by sb_frame.
+    put<float>(kSbPauseScale, 1.0f);
+    put<float>(kSbHudAlpha, 1.0f);
+    hx::mem[kTracker0 + 0x20] = 1;
 }
 
 // ---- the documented scoreboard changes since the old version, applied to the old record before the comparison ----
-// The new scoreboard (u2mp/docs/spec/gameplay.md 1.4 / 1.5 after 514bcfe: parity-m-features.md M1 / M2,
-// parity-ticker-respawn.md 2; a93b2a8: parity-j-voice-medals.md J4 / J5) does more than the old one. In these
-// scenarios its additions stay idle: no local tracker (no automatic board, no hint line), no round end, no J4 / J5
-// bytes, sounds off as on the real image, no match-state pages. What they still change in the record is put into the
-// old record here, line by line, from the spec; everything else is compared as it is.
+// The new scoreboard (u2mp/docs/spec/gameplay.md 1.4 / 1.5; parity-m-features.md M1, M2 and section 10: 514bcfe,
+// 3aa05e9, 6d52c86, b168664e, ab11f85c; parity-j-voice-medals.md J4 / J5: a93b2a8, 50a6b699) does more than the old
+// one. sb_setup gives it the real PS4 1.02 bytes, so every optional part is on; the scenarios keep its additions
+// idle where they can (alive local tracker, no film, no HUD notification, no task process, no end reason 3 / 8, no
+// menu up, not paused, HUD alpha 1.0) and the rest is put into the old record here, line by line, from the spec.
 
-// Install (gameplay.md 1.5, parity-j-voice-medals.md J4 / J5 "Done"): the voice column and the dispatcher are checked
-// first, also when the overlay is off; the sounds are logged off (step 4a); the install line names the optional parts.
+// Install (gameplay.md 1.5): the voice column is checked first, also when the overlay is off (J4; its bytes are not
+// in the fixture, so it stays off); the dispatcher wrapper of the first J5 is gone (50a6b699, J5 "Done ... replaces
+// the first version"); every optional part of step 4b passes, so none logs; the install line names them (step 7).
 void sb_install_expected(size_t at) {
     auto &r = hx::calls;
     r.insert(r.begin() + long(at),
-             {"log scoreboard: team list cell image query not as expected: no muted icon in the voice column",
-              "log scoreboard: mode dispatcher / its team list row search not as expected: no mute from the scoreboard"});
+             "log scoreboard: team list cell image query not as expected: no muted icon in the voice column");
     const std::string installed = "log scoreboard: PAGE_MULTIPLAYER_SCOREBOARD port installed (button mask 0x";
-    for (size_t i = at + 2; i < r.size(); i++) {
-        if (r[i].rfind("retarget_call 0x3fc52d 0x", 0) == 0)   // the call itself, not its "failed (test)" line
-            r.insert(r.begin() + long(i++), "log scoreboard: one-shot sound calls not as expected, no open / close sounds");
+    for (size_t i = at + 1; i < r.size(); i++)
         if (r[i].rfind(installed, 0) == 0 && r[i].back() == ')')
-            r[i].insert(r[i].size() - 1, "; auto open on, sounds off, state result pages off");
-    }
+            r[i].insert(r[i].size() - 1, "; auto open on, hint on, every-player-out on, dim on, sounds on, result states on");
 }
+
+// The new module's process-wide state as gameplay.md 1.4 describes it (both builds keep their statics for the whole
+// process, so this model does too); kept on the old side, where the expected record is made.
+struct SbNew {
+    int32_t last_state = -1;          // step 3: the NGM state logged last (-1 outside multiplayer)
+    bool shown[4] = {};               // entries 0..3 (M2)
+    float fade[4] = {};
+    float speed0 = 1.0f;              // entry 0's speed (entries 1..3 keep 1.0)
+    bool by_button = false;           // the mark (rule 7)
+    int32_t prev_state = 0;           // rule 6's state-5 test
+    uint32_t mask = 0x100000;         // 1.5 step 1
+    uint32_t prev_buttons = 0;        // step 4
+    bool page_log_pending = true;     // step 6
+    bool dim_logged = false;          // step 10
+    bool sound_logged[2] = {};        // M2 rule 5 (one line per sound per process)
+    std::string entered;              // the page the "entered" log named last (cleared when an entry hides)
+} sb_new;
+// 1.5 step 1: hex, saturated to 32 bits; 0 turns the overlay off (and stays the mask).
+void sb_new_mask(const char *env) {
+    if (!env) return;
+    const unsigned long long v = std::strtoull(env, nullptr, 16);
+    sb_new.mask = v > 0xffffffffull ? 0xffffffffu : uint32_t(v);
+}
+
+// Stand-ins of the guest functions the new frame calls (gameplay.md 1.4 steps 5, 6, 9, 11). Each is recorded; the
+// answers keep the additions idle: no automatic board, no notification, no task answer (reply type 0), not leaving.
+U2MP_GUEST bool h_auto_test() {
+    rec("guest automatic test 0x9766f0");
+    return false;
+}
+U2MP_GUEST bool h_notice(void *hud) {
+    rec("guest notification test 0x555550 %s", where(hud).c_str());
+    return false;
+}
+U2MP_GUEST void *h_task_query(void *reply, uint32_t event, uint64_t slot, uint64_t id, void *, void *, void *, void *) {
+    rec("guest task query 0x4c4310 %08x slot %llx id %llx", event, (unsigned long long)slot, (unsigned long long)id);
+    return reply;
+}
+U2MP_GUEST bool h_in_state(const void *process, uint32_t state) {
+    rec("guest in state 0x9be070 %s %08x", where(process).c_str(), state);
+    return false;
+}
+U2MP_GUEST void h_sound_init(void *, uint32_t id, uint32_t third) { rec("guest sound init 0x3dd780 %08x %u", id, third); }
+U2MP_GUEST void h_sound_play(void *, uint32_t second) { rec("guest sound play 0x9b5c20 %u", second); }
+U2MP_GUEST bool h_death_camera(const void *tracker) {
+    rec("guest death camera 0x664b90 %s", where(tracker).c_str());
+    return false;
+}
+U2MP_GUEST const char *h_text_find(void *db, uint32_t id) {
+    rec("guest text find 0xcddc00 %s %08x", where(db).c_str(), id);
+    return nullptr;
+}
+
 void sb_inst(const Side &s) {
     const size_t at = hx::calls.size();
     inst(s.sb, "scoreboard");
     if (g_side == 0) sb_install_expected(at);
 }
 // after the install: the guest functions become stubs (LookupPointer too: the new frame reads the game type from
-// *net-games* while in match, gameplay.md 1.4 step 3; no table here, so type -1)
+// *net-games* while NET_SM > 1, gameplay.md 1.4 step 3; no table here, so type -1)
 H3 sb_after(uint64_t target = kSbDraw) {
     hx::stub(kSbDraw, (void *)h_draw2d);
     if (target != kSbDraw) hx::stub(target, (void *)h_draw2d_chained);
     hx::stub(kSbLayout, (void *)h_layout);
     hx::stub(kLookup, (void *)h_lookup);
+    hx::stub(0x9766f0, (void *)h_auto_test);
+    hx::stub(0x555550, (void *)h_notice);
+    hx::stub(0x4c4310, (void *)h_task_query);
+    hx::stub(0x9be070, (void *)h_in_state);
+    hx::stub(0x3dd780, (void *)h_sound_init);
+    hx::stub(0x9b5c20, (void *)h_sound_play);
+    hx::stub(0x664b90, (void *)h_death_camera);
+    hx::stub(0xcddc00, (void *)h_text_find);
     return (H3)hx::retarget_host(kSbCall);
 }
 H3 sb_install(const Side &s, const char *env, uint64_t target = kSbDraw) {
     sb_setup(target);
     if (env) setenv_("UNCHARTED_U2MP_SCOREBOARD_BUTTON", env);
+    if (g_side == 0) sb_new_mask(env);
     sb_inst(s);
     return sb_after(target);
 }
 
-// Frames (gameplay.md 1.4). The new module's statics that decide these lines, kept from the old side's inputs
-// (both sides get the same ones; statics carry over between scenarios alike).
-struct SbNew {
-    int32_t last_state = -1;   // step 3: the NGM state of the last frame (-1 when not in the net)
-    bool in_match = false;     // step 3
-    std::string entered;       // the page the "entered" log names last (reset when an entry hides)
-    bool shown = false;        // entry 0 shown (old: its `shown`), from the shown / hidden logs; the tracker byte
-                               // is not it after hx::clear
-} sb_new;
 // M2 rule 3 (parity-m-features.md): in: ease = 1 - (1 - f)^2, y = -20 (1 - ease); out: ease = f^2, y = +20 (1 - ease).
+float sb_new_ease(bool shown, float f) { return shown ? 1.0f - (1.0f - f) * (1.0f - f) : f * f; }
 float sb_new_y(bool shown, float f) {
-    const float ease = shown ? 1.0f - (1.0f - f) * (1.0f - f) : f * f;
+    const float ease = sb_new_ease(shown, f);
     return shown ? -(20.0f * (1.0f - ease)) : 20.0f * (1.0f - ease);
 }
 float sb_old_y(bool shown, float f) {
@@ -362,70 +479,232 @@ int sb_page_count() {
     while (n < 200 && get<uint64_t>(kPages + 8ull * n)) ++n;
     return n;
 }
-void sb_frame_expected(size_t at) {
+uint64_t sb_find_page(uint32_t id) {   // gameplay.md 1.4 "Page lookup"
+    for (int i = 0; i < 200; i++) {
+        const uint64_t p = get<uint64_t>(kPages + 8ull * i);
+        if (!p) break;
+        const uint64_t off = p - A(0);
+        if (get<uint32_t>(off + 0x10) == id) return off;
+    }
+    return 0;
+}
+
+// The frame step: the old build took its dt from the host clock (seconds, capped at 0.1), the new one from the
+// game's frame step T (gameplay.md 1.4 step 2, parity-m-features.md 10.1: fade += speed x T / 75, M2 rule 1). A frame
+// advances the host clock by the nanoseconds whose old dt is exactly the float T x (1/75), and the frame step is T,
+// so both builds move a fade by the same float every frame (T = 0..7; above 7 the old cap of 0.1 cuts in, which the
+// new build no longer has). The very first frame of the process has old dt 0, so it uses T = 0.
+constexpr float kSbPerTick = 1.0f / 75.0f;
+long long sb_ns_for(int ticks) {
+    const float want = float(ticks) * kSbPerTick;
+    const long long centre = (long long)(double(ticks) * 1e9 / 75.0);
+    for (long long ns = centre - 400; ns <= centre + 400; ns++) {
+        const float dt = std::chrono::duration<float>(std::chrono::nanoseconds(ns)).count();
+        if (dt <= 0.1f && std::memcmp(&dt, &want, 4) == 0) return ns;
+    }
+    std::printf("sb_ns_for: no nanosecond count gives %d ticks exactly\n", ticks);
+    std::abort();
+}
+
+// One frame of the new build (gameplay.md 1.4) for the inputs the scenario put into the image, made from the old
+// frame's record:
+// - kept from the old record: the previous target's call (step 1) and the page draw (update / layout / render), with
+//   the documented edits: dt = T / 300 (step 10) and the slide y of M2 rule 3; the alpha is A x fade with A = the HUD
+//   alpha 1.0 (step 10) and the same fade (see sb_ns_for);
+// - put in from the rules: the NGM state log and the game type read (step 3), the automatic and notification tests in
+//   state 2 (step 5), the e68ae001 query while NET_SM > 1 (step 5), the page log at the first flag that rises in the
+//   process (step 6, the old build logged it at the first show of entry 0), the button's sounds (M2 rule 5), the
+//   shown / hidden logs of all four entries with their reasons (step 8), the rank copy (step 8), the dim request and
+//   its log (step 10), the "entered" log, and the entries 1..3 memory (step 8) and dim request bytes (step 10) in the
+//   old image;
+// - dropped: the old draw of entry 0 while a higher entry has a fade above 0 (M2 rule 2: only the top entry draws).
+// Entry 0's shown / hidden changes must be the old build's own (the scenarios stay inside rules the two share: state
+// 2 with the button, any other state hides it); a frame where they differ is not mapped (a MAPPING line makes it
+// fail).
+void sb_frame_expected(size_t at, int ticks, float speed_before) {
     auto &r = hx::calls;
-    const int32_t net_sm = get<int32_t>(kNetSm), state = get<int32_t>(kNgmState);
-    const bool net_in = net_sm > 1, playing = net_in && state == 2;
-    const float fade = get<float>(kSbTracker + 0xc);   // written every frame: the fade the page was drawn with
-    // step 3: the NGM state log and the game type read (LookupPointer *net-games*) while in match
-    std::vector<std::string> head;
-    if (net_in && state != sb_new.last_state && (sb_new.in_match || playing)) {
-        char b[200];
-        std::snprintf(b, sizeof b, "log scoreboard: NGM state %d -> %d (NET_SM %d)%s", sb_new.last_state, state, net_sm,
-                      state >= 3 && state <= 5 ? "; state result pages off (UNCHARTED_U2MP_SCOREBOARD_STATES=1 turns them on)"
-                                               : "");
-        head.push_back(b);
+    std::vector<std::string> old(r.begin() + long(at), r.end());
+    r.resize(at);
+    std::vector<std::string> head, draw, old_entry0;
+    for (const std::string &l : old) {
+        if (l.rfind("guest draw2d", 0) == 0) head.push_back(l);
+        else if (l == "log scoreboard: page f650325d found" || l == "log scoreboard: page f650325d NOT FOUND") continue;
+        else if (l.rfind("log scoreboard: shown (", 0) == 0 || l.rfind("log scoreboard: hidden (", 0) == 0)
+            old_entry0.push_back(l);
+        else draw.push_back(l);
+    }
+    char b[220];
+    std::vector<std::string> out = head;
+    // step 3
+    const int32_t net_sm = get<int32_t>(kNetSm);
+    const bool net_in = net_sm > 1;
+    const int32_t state = net_in ? get<int32_t>(kNgmState) : 0;
+    if (net_in && state != sb_new.last_state) {
+        std::snprintf(b, sizeof b, "log scoreboard: NGM state %d -> %d (NET_SM %d)", sb_new.last_state, state, net_sm);
+        out.push_back(b);
     }
     sb_new.last_state = net_in ? state : -1;
-    if (playing) sb_new.in_match = true;
-    else if (!net_in || state < 2 || state > 5) sb_new.in_match = false;
-    if (sb_new.in_match) head.push_back("guest LookupPointer 3b9a067d");
-    size_t i = at;
-    if (i < r.size() && r[i].rfind("guest draw2d", 0) == 0) ++i;   // step 1: the previous target first
-    r.insert(r.begin() + long(i), head.begin(), head.end());
-    i += head.size();
-    // the NetStatGame rank copy while playing or an entry is wanted (b8b141c "fix scoreboard levels of players"),
-    // before the draw; the shown logs come first
-    bool synced = false;
-    for (; i < r.size(); i++) {
-        std::string &l = r[i];
-        for (const char *what : {"shown", "hidden"}) {   // "Request shown state": the entry's name
-            const std::string from = std::string("log scoreboard: ") + what + " (";
-            if (l.rfind(from, 0) == 0) l = "log scoreboard: scoreboard " + l.substr(16);
+    if (net_in) out.push_back("guest LookupPointer 3b9a067d");
+    // step 4
+    const uint32_t buttons = get<uint32_t>(kButtons);
+    const bool pressed = (buttons & ~sb_new.prev_buttons & sb_new.mask) != 0;
+    sb_new.prev_buttons = buttons;
+    // step 5 (tracker 0 alive: not out; film flag 0; nothing blocks; end reason 0: no "Leave" test)
+    if (state == 2) {
+        out.push_back("guest automatic test 0x9766f0");
+        out.push_back("guest notification test 0x555550 " + where(hx::mem + 0x1130008));
+    }
+    if (net_in) {
+        std::snprintf(b, sizeof b, "guest task query 0x4c4310 e68ae001 slot %llx id %llx",
+                      (unsigned long long)get<uint64_t>(0x1164080), (unsigned long long)get<uint64_t>(0x1164088));
+        out.push_back(b);
+    }
+    // step 6 (M2 rules 6 - 8 with no automatic flag, not out, not leaving, no film clear)
+    const float speed0_before = sb_new.speed0;
+    bool was[4];
+    std::memcpy(was, sb_new.shown, sizeof was);
+    bool relayout[4] = {};
+    auto set = [&](int k, bool on) {
+        if (on && !sb_new.shown[k]) relayout[k] = true;
+        sb_new.shown[k] = on;
+    };
+    bool toggled = false;
+    int sound = 0;   // 1 open, 2 close
+    if (state == 2) {
+        if (sb_new.prev_state == 5) {
+            set(3, false);
+            set(0, false);
+            sb_new.by_button = false;
         }
-        if (l.rfind("log scoreboard: scoreboard shown (", 0) == 0) sb_new.shown = true;
-        if (l.rfind("log scoreboard: scoreboard hidden (", 0) == 0) sb_new.shown = false, sb_new.entered.clear();
-        const bool shown = sb_new.shown, sync = playing || shown;
-        if (l == "log scoreboard: page f650325d found" || l == "log scoreboard: page f650325d NOT FOUND") {
-            char b[64];
-            std::snprintf(b, sizeof b, "log scoreboard: %d menu pages loaded", sb_page_count());
-            r.insert(r.begin() + long(++i), b);
-            continue;
+        set(2, false);
+        set(3, false);
+        if (pressed) {
+            const bool on = !sb_new.shown[0];
+            sb_new.speed0 = 2.0f;
+            set(0, on);
+            sb_new.by_button = on;
+            sound = on ? 1 : 2;
+            toggled = true;
         }
-        if (l.rfind("guest page.update ", 0) == 0) {
-            if (sync && !synced) {
-                r.insert(r.begin() + long(i++), "sync_netstat_ranks");
-                synced = true;
-            }
-            std::string &u = r[i];
-            const std::string page = u.substr(18, u.find(' ', 18) - 18);
-            if (page != sb_new.entered) {
-                sb_new.entered = page;
-                char b[64];
-                std::snprintf(b, sizeof b, "log scoreboard: page %08x entered",
-                              get<uint32_t>(std::stoull(page.substr(4), nullptr, 16) + 0x10));
-                r.insert(r.begin() + long(i++), b);
-            }
-            continue;
-        }
-        const size_t d = l.find(" desc{ctx=");
-        if (d != std::string::npos && (l.rfind("guest layout ", 0) == 0 || l.rfind("guest render", 0) == 0)) {
-            const size_t y = l.find(' ', d + 10) + 1 + 2 * (0x2c - 8);   // desc+0x2c in the hex dump from +8
-            const float yo = sb_old_y(shown, fade), yn = sb_new_y(shown, fade);
-            if (l.compare(y, 8, hexd(&yo, 4)) == 0) l.replace(y, 8, hexd(&yn, 4));
+    } else if (state == 5) {
+        if (get<int32_t>(kNgm + 0x1e88) == 3) set(3, true);
+        else set(0, true);
+        set(2, false);
+        set(3, false);
+    } else {
+        set(0, false);
+        if (state == 3 || state == 4) {
+            for (int k = 0; k < 4; k++) set(k, false);
+            set(state == 3 ? 2 : 3, true);
+        } else {
+            set(2, false);
+            set(3, false);
         }
     }
-    if ((playing || sb_new.shown) && !synced) r.push_back("sync_netstat_ranks");
+    sb_new.prev_state = state;
+    // step 7: entry 0's speed is written only when it changed (the old build wrote 2.0 at every press)
+    put<float>(kSbTracker + 0x10, sb_new.speed0 != speed0_before ? sb_new.speed0 : speed_before);
+    static const uint32_t kPage[4] = {0xf650325d, 0x5dad5a68, 0x3d437466, 0x5dad5a68};
+    for (int k = 0; k < 4; k++) {
+        if (!relayout[k]) continue;
+        if (k > 0)   // entry 0's page: the old build makes the same request when it shows the board
+            if (const uint64_t p = sb_find_page(kPage[k])) put<int32_t>(p + 0xf8, 2);
+        if (!sb_new.page_log_pending) continue;
+        sb_new.page_log_pending = false;
+        std::snprintf(b, sizeof b, "log scoreboard: page f650325d %s", sb_find_page(0xf650325d) ? "found" : "NOT FOUND");
+        out.push_back(b);
+        for (int i = 0; i < sb_page_count(); i++) {
+            const uint32_t id = get<uint32_t>(get<uint64_t>(kPages + 8ull * i) - A(0) + 0x10);
+            const char *name = id == 0x5dad5a68 ? "ROUND_RESULTS" : id == 0x3d437466 ? "RESULTS" : id == 0x6b7378ea ? "POSTGAME" : nullptr;
+            if (!name) continue;
+            std::snprintf(b, sizeof b, "log scoreboard: PAGE_MULTIPLAYER_%s loaded (slot %d)", name, i);
+            out.push_back(b);
+        }
+        std::snprintf(b, sizeof b, "log scoreboard: %d menu pages loaded", sb_page_count());
+        out.push_back(b);
+    }
+    if (sound) {   // M2 rule 5, parity-m-features.md 10.9: init(buffer, id, 0), play(buffer, 0)
+        const uint32_t id = sound == 1 ? 0xd9b465e1u : 0x2f118f31u;
+        std::snprintf(b, sizeof b, "guest sound init 0x3dd780 %08x 0", id);
+        out.push_back(b);
+        out.push_back("guest sound play 0x9b5c20 0");
+        if (!sb_new.sound_logged[sound - 1]) {
+            sb_new.sound_logged[sound - 1] = true;
+            std::snprintf(b, sizeof b, "log scoreboard: %s sound %08x played", sound == 1 ? "scoreboard-open" : "scoreboard-close", id);
+            out.push_back(b);
+        }
+    }
+    // step 8
+    static const char *const kName[4] = {"scoreboard", "round results", "results", "round results (entry 3)"};
+    char reason[64];
+    if (state == 2) std::snprintf(reason, sizeof reason, "%s", toggled ? "button" : "automatic");
+    else std::snprintf(reason, sizeof reason, "NGM state %d", state);
+    if ((sb_new.shown[0] != was[0]) != !old_entry0.empty() ||
+        (!old_entry0.empty() && (old_entry0[0].rfind("log scoreboard: shown (", 0) == 0) != sb_new.shown[0]))
+        for (const std::string &l : old_entry0) out.push_back("MAPPING: entry 0 differs from the old record: " + l);
+    bool any = false;
+    for (int k = 0; k < 4; k++) {
+        const bool on = sb_new.shown[k];
+        any = any || on;
+        if (on != was[k]) {
+            if (!on) sb_new.entered.clear();
+            if (k > 0) hx::mem[kSbTracker + 8 + 0x14 * k] = on ? 1 : 0;
+            std::snprintf(b, sizeof b, "log scoreboard: %s %s (%s)", kName[k], on ? "shown" : "hidden", reason);
+            out.push_back(b);
+        }
+        const float speed = k == 0 ? sb_new.speed0 : 1.0f;
+        const float step = speed * (float(ticks) * kSbPerTick);
+        float f = on ? sb_new.fade[k] + step : sb_new.fade[k] - step;
+        sb_new.fade[k] = f < 0.0f ? 0.0f : (f > 1.0f ? 1.0f : f);
+        if (k > 0) put<float>(kSbTracker + 0xc + 0x14 * k, sb_new.fade[k]);
+    }
+    if (state == 2 || any) out.push_back("sync_netstat_ranks");
+    // step 10 (not paused; no menu up)
+    int top = -1;
+    for (int k = 3; k >= 0 && top < 0; k--)
+        if (sb_new.fade[k] > 0.0f) top = k;
+    bool drawn = false;
+    if (top > 0) {
+        const float ease = sb_new_ease(sb_new.shown[top], sb_new.fade[top]);
+        if (hx::mem[kMenu + 0x1038] == 0) {
+            put<float>(kMenu + 0x1030, ease);
+            hx::mem[kMenu + 0x1038] = 1;
+        }
+        if (!sb_new.dim_logged) {
+            sb_new.dim_logged = true;
+            std::snprintf(b, sizeof b, "log scoreboard: %s dims the menu background (menu +0x1030 / +0x1038)", kName[top]);
+            out.push_back(b);
+        }
+        drawn = sb_find_page(kPage[top]) != 0;   // no scenario loads a result page: nothing drawn
+    } else if (top == 0 && sb_find_page(0xf650325d)) {
+        drawn = true;
+        if (draw.empty()) out.push_back("MAPPING: the old build did not draw the scoreboard");
+        const float yo = sb_old_y(sb_new.shown[0], sb_new.fade[0]), yn = sb_new_y(sb_new.shown[0], sb_new.fade[0]);
+        const float dt_old = float(ticks) * kSbPerTick, dt_new = float(ticks) * std::bit_cast<float>(0x3B5A740Eu);
+        for (std::string l : draw) {
+            if (l.rfind("guest page.update ", 0) == 0) {
+                const std::string page = l.substr(18, l.find(' ', 18) - 18);
+                if (page != sb_new.entered) {
+                    sb_new.entered = page;
+                    std::snprintf(b, sizeof b, "log scoreboard: page %08x entered",
+                                  get<uint32_t>(std::stoull(page.substr(4), nullptr, 16) + 0x10));
+                    out.push_back(b);
+                }
+                const size_t d = l.find(" dt=");
+                if (d != std::string::npos && l.compare(d + 4, std::string::npos, fb(dt_old)) == 0)
+                    l = l.substr(0, d + 4) + fb(dt_new);
+            }
+            const size_t d = l.find(" desc{ctx=");
+            if (d != std::string::npos && (l.rfind("guest layout ", 0) == 0 || l.rfind("guest render", 0) == 0)) {
+                const size_t y = l.find(' ', d + 10) + 1 + 2 * (0x2c - 8);   // desc+0x2c in the hex dump from +8
+                if (l.compare(y, 8, hexd(&yo, 4)) == 0) l.replace(y, 8, hexd(&yn, 4));
+            }
+            out.push_back(l);
+        }
+    }
+    if (!drawn && top <= 0)   // the old build drew where the new one draws nothing: not mapped
+        for (const std::string &l : draw) out.push_back("MAPPING: not drawn by the new rules: " + l);
+    r.insert(r.end(), out.begin(), out.end());
 }
 uint64_t sb_vtable(void *update, void *render) {
     const uint64_t vt = salloc(0x20, 8);
@@ -453,18 +732,21 @@ void sb_state(int netsm, int ngmstate) {
     put<float>(kFadeScale, 0.8f);
     put<float>(kItemFade, 0.3f);
 }
-void sb_frame(H3 h, long long dns, uint32_t buttons, uint64_t page_for_snap = 0) {
-    tick(dns);
+// One frame of `ticks` game ticks (0..7, see sb_ns_for): the host clock and the frame step move together.
+void sb_frame(H3 h, int ticks, uint32_t buttons, uint64_t page_for_snap = 0) {
+    tick(sb_ns_for(ticks));
+    put<int32_t>(kSbFrameStep, ticks);
     put<uint32_t>(kButtons, buttons);
     sb.layout_desc = nullptr;
     const size_t at = hx::calls.size();
+    const float speed_before = get<float>(kSbTracker + 0x10);
     const uint64_t r = h(0x1111, 0x2222, 0x3333);
-    if (g_side == 0) sb_frame_expected(at);
+    if (g_side == 0) sb_frame_expected(at, ticks, speed_before);
     rec("H -> %llx; tracker shown=%u fade=%s speed=%s itemfade=%s snap=%d", (unsigned long long)r,
         get<uint8_t>(kSbTracker + 8), fb(get<float>(kSbTracker + 0xc)).c_str(), fb(get<float>(kSbTracker + 0x10)).c_str(),
         fb(get<float>(kItemFade)).c_str(), page_for_snap ? get<int32_t>(page_for_snap + 0xf8) : -999);
 }
-constexpr long long ms50 = 50000000LL;
+constexpr int kStep = 4;   // game ticks of an ordinary frame in these scenarios (sb_frame)
 constexpr uint32_t kSbId = 0xf650325d, kTouch = 0x100000;
 
 void scoreboard_tests() {
@@ -527,66 +809,66 @@ void scoreboard_tests() {
     scenario("scoreboard frames: not playing (NET_SM 1, NGM state 3), press ignored", [](const Side &s) {
         H3 h = sb_install(s, "100000");
         sb_state(1, 2);
-        sb_frame(h, ms50, kTouch);
+        sb_frame(h, kStep, kTouch);
         sb_state(5, 3);
-        sb_frame(h, ms50, 0);
-        sb_frame(h, ms50, kTouch);
+        sb_frame(h, kStep, 0);
+        sb_frame(h, kStep, kTouch);
     });
     scenario("scoreboard frames: playing, no press; press with page absent (first show: NOT FOUND log)",
              [](const Side &s) {
                  H3 h = sb_install(s, "100000");
                  sb_state(2, 2);
-                 sb_frame(h, ms50, 0);
-                 sb_frame(h, ms50, 0x20);           // bit outside the mask
-                 sb_frame(h, ms50, 0x20 | kTouch);  // rising edge
-                 sb_frame(h, ms50, kTouch);         // held
-                 sb_frame(h, ms50, kTouch | 0x8);   // held + other bit
+                 sb_frame(h, kStep, 0);
+                 sb_frame(h, kStep, 0x20);           // bit outside the mask
+                 sb_frame(h, kStep, 0x20 | kTouch);  // rising edge
+                 sb_frame(h, kStep, kTouch);         // held
+                 sb_frame(h, kStep, kTouch | 0x8);   // held + other bit
              });
     scenario("scoreboard frames: page behind a NULL, then present (flags 0)", [](const Side &s) {
         H3 h = sb_install(s, "100000");
         sb_state(2, 2);
         const uint64_t other = sb_page(0x1234), p = sb_page(kSbId, 0);
         sb_pages({other, 0, p});
-        sb_frame(h, ms50, kTouch, p);
+        sb_frame(h, kStep, kTouch, p);
         sb_pages({other, sb_page(0x99), sb_page(0x98), p});
-        sb_frame(h, ms50, kTouch, p);
-        sb_frame(h, 20000000LL, kTouch, p);
+        sb_frame(h, kStep, kTouch, p);
+        sb_frame(h, 2, kTouch, p);
     });
     scenario("scoreboard frames: flags 0x80000 / 0x800 / both, fade reaches 1", [](const Side &s) {
         H3 h = sb_install(s, "100000");
         sb_state(2, 2);
         const uint64_t p1 = sb_page(kSbId, 0x80000, 0.5f);
         sb_pages({p1});
-        sb_frame(h, ms50, kTouch, p1);
+        sb_frame(h, kStep, kTouch, p1);
         put<uint32_t>(p1 + 0xb0, 0x800);
-        sb_frame(h, ms50, kTouch, p1);
+        sb_frame(h, kStep, kTouch, p1);
         put<uint32_t>(p1 + 0xb0, 0x80800);
         put<float>(p1 + 0xf4, -1.5f);
-        sb_frame(h, 400000000LL, kTouch, p1);   // capped at 0.1
-        sb_frame(h, 400000000LL, kTouch, p1);
-        sb_frame(h, 400000000LL, kTouch, p1);   // fade clamps at 1
+        sb_frame(h, 7, kTouch, p1);   // 7 ticks (the old build's 0.1 s cap is not reached)
+        sb_frame(h, 7, kTouch, p1);
+        sb_frame(h, 7, kTouch, p1);   // fade clamps at 1
     });
     scenario("scoreboard frames: press again hides, fade out draws with y < 0, until 0", [](const Side &s) {
         H3 h = sb_install(s, "100000");
         sb_state(3, 2);
         const uint64_t p = sb_page(kSbId);
         sb_pages({p});
-        sb_frame(h, ms50, 0, p);
-        sb_frame(h, ms50, kTouch, p);   // hide
-        for (int i = 0; i < 8; i++) sb_frame(h, 25000000LL, kTouch, p);
-        sb_frame(h, ms50, 0, p);
+        sb_frame(h, kStep, 0, p);
+        sb_frame(h, kStep, kTouch, p);   // hide
+        for (int i = 0; i < 8; i++) sb_frame(h, 2, kTouch, p);
+        sb_frame(h, kStep, 0, p);
     });
     scenario("scoreboard frames: show, then leave playing while shown (hidden, fade keeps drawing)", [](const Side &s) {
         H3 h = sb_install(s, "100000");
         sb_state(2, 2);
         const uint64_t p = sb_page(kSbId);
         sb_pages({p});
-        sb_frame(h, ms50, kTouch, p);   // show (second show: no page log)
-        for (int i = 0; i < 3; i++) sb_frame(h, ms50, 0, p);
+        sb_frame(h, kStep, kTouch, p);   // show (second show: no page log)
+        for (int i = 0; i < 3; i++) sb_frame(h, kStep, 0, p);
         sb_state(2, 4);
-        for (int i = 0; i < 4; i++) sb_frame(h, ms50, kTouch, p);
+        for (int i = 0; i < 4; i++) sb_frame(h, kStep, kTouch, p);
         sb_state(1, 2);
-        for (int i = 0; i < 6; i++) sb_frame(h, ms50, 0, p);
+        for (int i = 0; i < 6; i++) sb_frame(h, kStep, 0, p);
     });
     scenario("scoreboard frames: 200-entry list (found at 199; at 200 not found)", [](const Side &s) {
         H3 h = sb_install(s, "100000");
@@ -597,15 +879,15 @@ void scoreboard_tests() {
         const uint64_t p = sb_page(kSbId);
         list[199] = p;
         sb_pages(list);
-        sb_frame(h, ms50, kTouch, p);
-        sb_frame(h, ms50, 0, p);
+        sb_frame(h, kStep, kTouch, p);
+        sb_frame(h, kStep, 0, p);
         list[199] = filler;
         list.push_back(p);   // index 200: past the list
         sb_pages(list);
-        sb_frame(h, ms50, 0, p);
-        sb_frame(h, ms50, kTouch, p);   // hide
-        sb_frame(h, 400000000LL, 0, p);
-        sb_frame(h, 400000000LL, 0, p);
+        sb_frame(h, kStep, 0, p);
+        sb_frame(h, kStep, kTouch, p);   // hide
+        sb_frame(h, 7, 0, p);
+        sb_frame(h, 7, 0, p);
     });
     scenario("scoreboard frames: vptr and slot 3 changed during the update", [](const Side &s) {
         H3 h = sb_install(s, "100000");
@@ -615,8 +897,8 @@ void scoreboard_tests() {
         sb.alt_render = gstub((void *)h_render2);
         sb_pages({p});
         sb.mutate_in_update = true;
-        sb_frame(h, ms50, kTouch, p);
-        sb_frame(h, ms50, 0, p);
+        sb_frame(h, kStep, kTouch, p);
+        sb_frame(h, kStep, 0, p);
         sb.mutate_in_update = false;
     });
     scenario("scoreboard frames: env 0x200 mask, touchpad ignored, 0x200 toggles", [](const Side &s) {
@@ -624,33 +906,26 @@ void scoreboard_tests() {
         sb_state(2, 2);
         const uint64_t p = sb_page(kSbId);
         sb_pages({p});
-        sb_frame(h, ms50, kTouch, p);
-        sb_frame(h, ms50, kTouch | 0x200, p);
-        sb_frame(h, ms50, 0, p);
-        sb_frame(h, ms50, 0x200, p);
-        sb_frame(h, 400000000LL, 0, p);
-        sb_frame(h, 400000000LL, 0, p);
-    });
-    scenario("scoreboard frames: equal timing in ns not exact in float (33333333 ns, 0.0999999 s)", [](const Side &s) {
-        H3 h = sb_install(s, "100000");
-        sb_state(2, 2);
-        const uint64_t p = sb_page(kSbId);
-        sb_pages({p});
-        sb_frame(h, 33333333LL, kTouch, p);
-        sb_frame(h, 16666667LL, 0, p);
-        sb_frame(h, 99999999LL, 0, p);
-        sb_frame(h, 123456789LL, kTouch, p);
+        sb_frame(h, kStep, kTouch, p);
+        sb_frame(h, kStep, kTouch | 0x200, p);
+        sb_frame(h, kStep, 0, p);
+        sb_frame(h, kStep, 0x200, p);
         sb_frame(h, 7, 0, p);
-        for (int i = 0; i < 8; i++) sb_frame(h, 33333333LL, 0, p);
+        sb_frame(h, 7, 0, p);
     });
-    // last on purpose: when dt differs in its last bit the fade statics differ afterwards
-    scenario("scoreboard frames: dt rounding for 16777223 ns and 40000001 ns (> 2^24 ns)", [](const Side &s) {
+    // The frame step of every size 0..7 ticks (parity-m-features.md 10.1; the old build's host-clock rounding
+    // scenarios went with its host clock: the new build reads no clock of its own).
+    scenario("scoreboard frames: frame steps 0 to 7 ticks, in and out", [](const Side &s) {
         H3 h = sb_install(s, "100000");
         sb_state(2, 2);
         const uint64_t p = sb_page(kSbId);
         sb_pages({p});
-        sb_frame(h, 16777223LL, kTouch, p);
-        sb_frame(h, 40000001LL, 0, p);
+        sb_frame(h, 1, kTouch, p);
+        sb_frame(h, 3, 0, p);
+        sb_frame(h, 0, 0, p);
+        sb_frame(h, 5, kTouch, p);
+        sb_frame(h, 6, 0, p);
+        for (int i = 0; i < 8; i++) sb_frame(h, 1, 0, p);
     });
 }
 

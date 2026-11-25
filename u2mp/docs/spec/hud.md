@@ -826,11 +826,11 @@ Tick (step 9 of 4.2):
   work (session.cpp, every frame, after the weapon damage patch and before `voice::frame`), also on frames with no
   HUD Draw.
 - Weapon switch: one ShowWeaponHud. Step 7 is gone; step 6 becomes: when weapon != last weapon: when both are
-  non-zero, switch count += 1; last weapon = weapon; when weapon != 0: show-until = now + 900, own count += 1 and
-  guest call 0x954740(ctrl, -100.0) directly. So the panel is asked for once per change to a non-zero weapon (the
-  game's own callers, e.g. RunNGun 0x8fe50a, also call it once per event) and not on every frame of the 3 s window.
-  Show-until is still written but read by nothing; the install line still says `shown for 3 s after a weapon
-  switch`.
+  non-zero, switch count += 1; last weapon = weapon; when weapon != 0: own count += 1 and guest call
+  0x954740(ctrl, -100.0) directly. So the panel is asked for once per change to a non-zero weapon (the game's own
+  callers, e.g. RunNGun 0x8fe50a, also call it once per event) and not on every frame of the 3 s window; how long it
+  stays up is the game's. There is no show-until frame any more (934a6ca still wrote it and read it nowhere; removed
+  2026-11-25 with step 5's `now`), and the install line names the one call per switch (5 step 9).
 
 ## 5. Install
 
@@ -912,8 +912,10 @@ Tick (step 9 of 4.2):
    - when the u64 at 0x1027030 is B + 0x954740, replace it with the ShowWeaponHud probe; when the
      u64 at 0x103f768 is B + 0x563a20, replace it with the panel draw probe (each independent; a
      different value is left alone without a log);
-   - trigger on; log `hud: weapon panel: shown for 3 s after a weapon switch (ShowWeaponHud
-     0x954740 from the multiplayer draw), probes on` (the 3 comes from `%.0f` of 3.0).
+   - trigger on; log `hud: weapon panel: ShowWeaponHud 0x954740 once per weapon switch (from the
+     frame work), probes on` (since 2026-11-25; before, `hud: weapon panel: shown for 3 s after a
+     weapon switch (ShowWeaponHud 0x954740 from the multiplayer draw), probes on`, which described
+     the window 934a6ca removed; the differential test maps the old line to the new one).
 
 ## 6. Test scenarios
 
@@ -1014,6 +1016,7 @@ compared unchanged.
 | --- | --- | --- | --- |
 | Weapon trigger from the frame, not the Draw | squash 934a6ca (no message; u2mp_internal.h comment "from the frame (not the HUD draw)") | 4.12 "Since 934a6ca" | the new side runs `hud_weapon_tick()` right after each Draw (22bc129) |
 | One ShowWeaponHud per weapon change instead of one per frame of the 900-frame window | squash 934a6ca (no comment; the call moved into the weapon-change branch, show-until kept) | 4.12 "Since 934a6ca" | the old record keeps its own ShowWeaponHud only on a tick whose weapon differs from the last one and is non-zero; the periodic log's own count drops by the calls removed |
+| Install line names one ShowWeaponHud per switch; the unread show-until frame is gone | 2026-11-25 (cleanup of the 934a6ca leftovers) | 4.12 "Since 934a6ca", 5 step 9 | the old install line `... shown for 3 s after a weapon switch (... from the multiplayer draw), probes on` -> `... ShowWeaponHud 0x954740 once per weapon switch (from the frame work), probes on` |
 | Image widget log: name pointers below 4 GiB printed in hex (`widget 0` for NULL) | squash 934a6ca (no comment; the same 4 GiB test guards the message weapon icon) | 4.1 image widget draw step 5 | `(widget (no name))` -> `(widget 0)` |
 | Message weapon icon: pointers below 4 GiB count as absent | squash 934a6ca | 4.8b step 5 | none needed: the scenarios use image or NULL pointers |
 | Film boosters in cinema mode 0 (follow camera) instead of != 0 | 50a6b69, parity-n-remaining.md N1 | 4.7 step 1 | the old side gets the input with the same film-site decision: mode != 0 -> local tracker booster indices +0x2a0 / +0x2a4 = -1 (its only reader; nothing drawn); mode 0 -> mode 1 when the theater HUD (the other reader) returns before reading it; the bytes are put back after each frame |

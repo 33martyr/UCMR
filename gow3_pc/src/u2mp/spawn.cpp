@@ -487,30 +487,103 @@ constexpr uint64_t kSpawnNpcSites[] = {0x13b9,   0x3b8c,   0x2e5780, 0x2e597a, 0
                                        0x61e7be, 0x62378a, 0x647c62, 0x647dc6, 0x6484e8, 0x9fc1e4,
                                        0xa0962d, 0xa644ad, 0xa64d9a, 0xa69907};
 
+// ---- Siege npc-soldier workaround (a gameplay fix, not a diagnostic) ------------------------------
+// The converted Siege levels ship their npc-soldier-* spawners disabled (bit 1 of the u16 flags at
+// +0x50, which the NPC batch gate 0x4bdb20 rejects); the online mode never enables them here, so
+// Siege would have no attackers. Until the level converter writes them enabled (owner rule: map fixes
+// belong in the PS3 -> PS4 conversion), each time the zone's handle count changes 4 of them are
+// enabled and moved next to the roof / vault entry point nearest the active zone. Runs at the batch
+// gate (0x4bf925) when install_siege_spawner_fix succeeded.
+bool g_siege_fix = false;
 float g_active_zone[3] = {0, 0, 0};
 bool g_have_active_zone = false;
+
+// A spawned net-territory spawner in Siege is the active zone.
+void siege_note_zone(const uint8_t *spawner, const char *name) {
+    g_active_zone[0] = peek<float>(spawner);
+    g_active_zone[1] = peek<float>(spawner + 4);
+    g_active_zone[2] = peek<float>(spawner + 8);
+    g_have_active_zone = true;
+    log("spawn: active zone marker %s at %d %d %d", name, int(g_active_zone[0] * 10.0f),
+        int(g_active_zone[1] * 10.0f), int(g_active_zone[2] * 10.0f));
+}
+
+// One Siege batch candidate (readable for 0x80 bytes, in a live match): remembers the roof / vault
+// entry points and enables npc-soldier spawners as described above.
+void siege_npc_soldier_fix(uint64_t cand, const char *name) {
+    auto at = [](uint64_t addr) {
+        return reinterpret_cast<const unsigned char *>(uintptr_t(addr));
+    };
+    static float entries[8][3];
+    static int entries_count = 0;
+    if (std::strstr(name, "roof-spawner") || std::strstr(name, "vault-spawner")) {
+        bool known = false;
+        for (int i = 0; i < entries_count; ++i)
+            if (entries[i][0] == peek<float>(at(cand)) && entries[i][2] == peek<float>(at(cand + 8)))
+                known = true;
+        if (!known && entries_count < 8) {
+            entries[entries_count][0] = peek<float>(at(cand));
+            entries[entries_count][1] = peek<float>(at(cand + 4));
+            entries[entries_count][2] = peek<float>(at(cand + 8));
+            entries_count += 1;
+            const char *art = reinterpret_cast<const char *>(pointer_at(at(cand + 0x48)));
+            char a0 = art && runtime_memory_is_mapped(uintptr_t(art), 1) ? art[0] : 0;
+            char a1 = art && runtime_memory_is_mapped(uintptr_t(art), 2) ? art[1] : 0;
+            log("spawn: entry point %s at %d %d %d (total %d) type %d art1 %c%c", name,
+                int(entries[entries_count - 1][0] * 10.0f), int(entries[entries_count - 1][1] * 10.0f),
+                int(entries[entries_count - 1][2] * 10.0f), entries_count, peek<int32_t>(at(cand + 0x40)), a0, a1);
+        }
+    }
+    if (std::strncmp(name, "npc-soldier", 11) != 0) return;
+    const auto handles = peek<int32_t>(at(image_va(0x113b760 + 0x1dd0)));
+    static int last_handles = 0;
+    static int allowed = handles > 0 ? 4 : 0;
+    static int ring = 0;
+    if (handles != last_handles) {
+        last_handles = handles;
+        allowed = handles > 0 ? 4 : 0;
+        ring = 0;
+        log("spawn: zone wave: handles %d, releasing %d attackers", handles, allowed);
+    }
+    auto *flagsp = reinterpret_cast<volatile uint16_t *>(uintptr_t(cand + 0x50));
+    if (allowed > 0 && entries_count && (*flagsp & 2u)) {
+        allowed -= 1;
+        auto *pos = reinterpret_cast<volatile float *>(uintptr_t(cand));
+        int best = 0;
+        if (g_have_active_zone)
+            for (int i = 1; i < entries_count; ++i) {
+                const float bx = entries[best][0] - g_active_zone[0];
+                const float bz = entries[best][2] - g_active_zone[2];
+                const float cx = entries[i][0] - g_active_zone[0];
+                const float cz = entries[i][2] - g_active_zone[2];
+                if (cx * cx + cz * cz < bx * bx + bz * bz) best = i;
+            }
+        static const float off[4][2] = {{0.0f, 0.0f}, {1.6f, 0.0f}, {-1.6f, 0.0f}, {0.0f, 1.6f}};
+        const int k = ring++ & 3;
+        pos[0] = entries[best][0] + off[k][0];
+        pos[1] = entries[best][1];
+        pos[2] = entries[best][2] + off[k][1];
+        const unsigned was = *flagsp;
+        *flagsp = uint16_t(was & ~2u);
+        log("spawn: released npc spawner %s at ring %d flags %04x->%04x", name, ring, was, unsigned(*flagsp));
+    }
+}
 
 U2MP_GUEST uint8_t *spawn_npc_probe(uint8_t *spawner, void *params, void *locator, uint64_t zero) {
     using SpawnFn = uint8_t *(U2MP_GUEST *)(uint8_t *, void *, void *, uint64_t);
     uint8_t *const npc = reinterpret_cast<SpawnFn>(image.base + kSpawnNpc)(spawner, params, locator, zero);
     if (npc && spawner && game_type() == 12) {
         const char *sn = spawner_name(spawner);
-        if (std::strncmp(sn, "net-territory", 13) == 0) {
-            g_active_zone[0] = peek<float>(spawner);
-            g_active_zone[1] = peek<float>(spawner + 4);
-            g_active_zone[2] = peek<float>(spawner + 8);
-            g_have_active_zone = true;
-            log("spawn: active zone marker %s at %d %d %d", sn, int(g_active_zone[0] * 10.0f),
-                int(g_active_zone[1] * 10.0f), int(g_active_zone[2] * 10.0f));
-        }
+        if (std::strncmp(sn, "net-territory", 13) == 0) siege_note_zone(spawner, sn);
     }
     static std::atomic<int> logged{0};
     if (logged.fetch_add(1) < 300) {
         const uint64_t site = uint64_t(reinterpret_cast<uintptr_t>(__builtin_return_address(0))) -
                               uint64_t(reinterpret_cast<uintptr_t>(image.base));
         const uint32_t cls = spawner ? peek<uint32_t>(spawner + 0x40) : 0;
-        log("spawn: SpawnNpc type %d from 0x%llx spawner %s class %08x -> %p", game_type(),
-            (unsigned long long)site, spawner ? spawner_name(spawner) : "?", cls, static_cast<void *>(npc));
+        log("spawn: SpawnNpc type %d from 0x%llx spawner %s class %08x -> 0x%llx", game_type(),
+            (unsigned long long)site, spawner ? spawner_name(spawner) : "?", cls,
+            (unsigned long long)reinterpret_cast<uintptr_t>(npc));
     }
     return npc;
 }
@@ -900,9 +973,8 @@ bool install_result_probe(uint64_t at_entry, int &installed) {
     bytes({0x59, 0x5A, 0x5E, 0x5F});            // pop rcx, rdx, rsi, rdi
     bytes({0x49, 0x8B, 0x04, 0x24});            // mov rax, [r12]
     bytes({0x48, 0x3B, 0x45, 0xD8});            // cmp rax, [rbp-0x28]
-    bytes({0x48, 0xB8});                        // mov rax, resume
+    bytes({0xFF, 0x25, 0x00, 0x00, 0x00, 0x00});  // jmp [rip+0]: resume, rax and flags as the game left them
     quad(uint64_t(uintptr_t(image.base + at_entry + 8)));
-    bytes({0xFF, 0xE0});                        // jmp rax
     unsigned char *code = image.base + at_entry;
     code[0] = 0xE9;
     const int32_t rel = int32_t(distance);
@@ -912,18 +984,12 @@ bool install_result_probe(uint64_t at_entry, int &installed) {
     return true;
 }
 
-U2MP_GUEST void batch_candidate_probe(uint64_t result, uint64_t cand, uint64_t list) {
-    const int32_t type = game_type();
-    if (type != 9 && type != 12) return;
-    if (!in_live_match()) return;
-    if (!runtime_memory_is_mapped(cand, 0x80)) return;
+// Diagnostic, observation only (it never changes the game): territory spots, spawners near them and
+// the gate line with each candidate's flags (bit 1 = disabled, see the Siege workaround above).
+void batch_candidate_probe(int32_t type, uint64_t result, uint64_t cand, uint64_t list, const char *name) {
     auto at = [](uint64_t addr) {
         return reinterpret_cast<const unsigned char *>(uintptr_t(addr));
     };
-    const char *name = spawner_name(reinterpret_cast<const uint8_t *>(uintptr_t(cand)));
-    // The converted level ships its NPC spawners disabled (bit 1 of the flags at +0x50, which
-    // blocks them in 0x4bdb20). The online mode enables them when a territory starts; nothing does
-    // here, so the batch skips every npc-soldier-* spawner and the mode has no attackers.
     static float spots[64][3];
     static int spots_count = 0;
     if (type == 12 && std::strncmp(name, "net-territory", 13) == 0 && spots_count < 64) {
@@ -956,66 +1022,25 @@ U2MP_GUEST void batch_candidate_probe(uint64_t result, uint64_t cand, uint64_t l
                 int(peek<float>(at(cand + 8)) * 10.0f));
         }
     }
-    static float entries[8][3];
-    static int entries_count = 0;
-    if (type == 12 && (std::strstr(name, "roof-spawner") || std::strstr(name, "vault-spawner"))) {
-        bool known = false;
-        for (int i = 0; i < entries_count; ++i)
-            if (entries[i][0] == peek<float>(at(cand)) && entries[i][2] == peek<float>(at(cand + 8)))
-                known = true;
-        if (!known && entries_count < 8) {
-            entries[entries_count][0] = peek<float>(at(cand));
-            entries[entries_count][1] = peek<float>(at(cand + 4));
-            entries[entries_count][2] = peek<float>(at(cand + 8));
-            entries_count += 1;
-            const char *art = reinterpret_cast<const char *>(pointer_at(at(cand + 0x48)));
-            char a0 = art && runtime_memory_is_mapped(uintptr_t(art), 1) ? art[0] : 0;
-            char a1 = art && runtime_memory_is_mapped(uintptr_t(art), 2) ? art[1] : 0;
-            log("spawn: entry point %s at %d %d %d (total %d) type %d art1 %c%c", name,
-                int(entries[entries_count - 1][0] * 10.0f), int(entries[entries_count - 1][1] * 10.0f),
-                int(entries[entries_count - 1][2] * 10.0f), entries_count, peek<int32_t>(at(cand + 0x40)), a0, a1);
-        }
-    }
-    if (type == 12 && std::strncmp(name, "npc-soldier", 11) == 0) {
-        const auto handles = peek<int32_t>(at(image_va(0x113b760 + 0x1dd0)));
-        static int last_handles = 0;
-        static int allowed = handles > 0 ? 4 : 0;
-        static int ring = 0;
-        if (handles != last_handles) {
-            last_handles = handles;
-            allowed = handles > 0 ? 4 : 0;
-            ring = 0;
-            log("spawn: zone wave: handles %d, releasing %d attackers", handles, allowed);
-        }
-        auto *flagsp = reinterpret_cast<volatile uint16_t *>(uintptr_t(cand + 0x50));
-        if (allowed > 0 && entries_count && (*flagsp & 2u)) {
-            allowed -= 1;
-            auto *pos = reinterpret_cast<volatile float *>(uintptr_t(cand));
-            int best = 0;
-            if (g_have_active_zone)
-                for (int i = 1; i < entries_count; ++i) {
-                    const float bx = entries[best][0] - g_active_zone[0];
-                    const float bz = entries[best][2] - g_active_zone[2];
-                    const float cx = entries[i][0] - g_active_zone[0];
-                    const float cz = entries[i][2] - g_active_zone[2];
-                    if (cx * cx + cz * cz < bx * bx + bz * bz) best = i;
-                }
-            static const float off[4][2] = {{0.0f, 0.0f}, {1.6f, 0.0f}, {-1.6f, 0.0f}, {0.0f, 1.6f}};
-            const int k = ring++ & 3;
-            pos[0] = entries[best][0] + off[k][0];
-            pos[1] = entries[best][1];
-            pos[2] = entries[best][2] + off[k][1];
-            const unsigned was = *flagsp;
-            *flagsp = uint16_t(was & ~2u);
-            log("spawn: released npc spawner %s at ring %d flags %04x->%04x", name, ring, was, unsigned(*flagsp));
-        }
-    }
     static int lines[2] = {0, 0};
     const int slot = type == 12 ? 1 : 0;
     if (lines[slot]++ >= 300) return;
     unsigned flags = unsigned(peek<uint16_t>(at(cand + 0x50))) | (unsigned(peek<uint8_t>(at(cand + 0x52))) << 16);
     log("spawn: gate type %d %llu flags 0x%06x name %s list 0x%llx", type, (unsigned long long)result, flags,
         name, (unsigned long long)list);
+}
+
+// The NPC batch gate (0x4bf925, after 0x4bdb20 answered al for candidate r14): Gold Rush (9) and Siege
+// (12) candidates of a live match that are readable go to the Siege workaround (type 12, when it is
+// installed) and then to the probe.
+U2MP_GUEST void batch_gate(uint64_t result, uint64_t cand, uint64_t list) {
+    const int32_t type = game_type();
+    if (type != 9 && type != 12) return;
+    if (!in_live_match()) return;
+    if (!runtime_memory_is_mapped(cand, 0x80)) return;
+    const char *name = spawner_name(reinterpret_cast<const uint8_t *>(uintptr_t(cand)));
+    if (type == 12 && g_siege_fix) siege_npc_soldier_fix(cand, name);
+    batch_candidate_probe(type, result, cand, list, name);
 }
 
 bool install_batch_result_probe(uint64_t at_entry, int &installed) {
@@ -1041,12 +1066,14 @@ bool install_batch_result_probe(uint64_t at_entry, int &installed) {
     bytes({0x50});                              // push rax
     bytes({0x57, 0x56, 0x52, 0x51});            // push rdi/rsi/rdx/rcx
     bytes({0x41, 0x50, 0x41, 0x51});            // push r8/r9
+    bytes({0x48, 0x83, 0xEC, 0x08});            // sub rsp, 8: 16-byte aligned call (7 pushes)
     bytes({0x0F, 0xB6, 0xF8});                  // movzx edi, al
     bytes({0x4C, 0x89, 0xF6});                  // mov rsi, r14
     bytes({0x4C, 0x89, 0xE2});                  // mov rdx, r12
     bytes({0x48, 0xB8});                        // mov rax, probe
-    quad(uint64_t(uintptr_t(&batch_candidate_probe)));
+    quad(uint64_t(uintptr_t(&batch_gate)));
     bytes({0xFF, 0xD0});                        // call rax
+    bytes({0x48, 0x83, 0xC4, 0x08});            // add rsp, 8
     bytes({0x41, 0x59, 0x41, 0x58});            // pop r9, r8
     bytes({0x59, 0x5A, 0x5E, 0x5F});            // pop rcx, rdx, rsi, rdi
     bytes({0x58});                              // pop rax
@@ -1055,9 +1082,8 @@ bool install_batch_result_probe(uint64_t at_entry, int &installed) {
     int32_t je = int32_t(uintptr_t(image.base + 0x4bf9f4) - uintptr_t(stub + n + 4));
     std::memcpy(stub + n, &je, 4);
     n += 4;
-    bytes({0x48, 0xB8});                        // mov rax, 0x4bf92d
+    bytes({0xFF, 0x25, 0x00, 0x00, 0x00, 0x00});  // jmp [rip+0]: 0x4bf92d, rax as the game left it
     quad(uint64_t(uintptr_t(image.base + 0x4bf92d)));
-    bytes({0xFF, 0xE0});                        // jmp rax
     unsigned char *code = image.base + at_entry;
     code[0] = 0xE9;
     const int32_t rel = int32_t(distance);
@@ -1067,12 +1093,19 @@ bool install_batch_result_probe(uint64_t at_entry, int &installed) {
     return true;
 }
 
+// The Siege workaround rides on the batch gate stub; it is installed only when that stub is.
+void install_siege_spawner_fix() {
+    g_siege_fix = true;
+    log("spawn: siege npc-soldier spawners enabled at the NPC batch gate 0x4bf925 (runtime workaround for the "
+        "disabled spawners of the converted levels; to move into the level converter)");
+}
+
 void install_spawn(int &installed) {
     // Off while the boot crash is tracked: both patch the image at startup.
     // install_update_slot_probes();
     // install_factory_probe(installed);
     install_result_probe(0x4bdfad, installed);
-    install_batch_result_probe(0x4bf925, installed);
+    if (install_batch_result_probe(0x4bf925, installed)) install_siege_spawner_fix();
     // GetSpawnLocator must pass the NetGameManager to the call and read the group at result+0x9a0.
     static const unsigned char lea_rdi[] = {0x48, 0x8D, 0x3D};
     static const unsigned char reads_group[] = {0x4C, 0x8B, 0x88, 0xA0, 0x09, 0x00, 0x00};

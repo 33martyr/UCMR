@@ -610,9 +610,9 @@ client's Info resend while the roster is not synced and the host's roster rebroa
 (934a6ca), `mute_players_frame` (parity N2, 50a6b69), the clock sync, slot manager and Party Up frames (parity E,
 fa52c63); after the fade skip: tracker and stats team sync and the team preference (u32 NPD+0x114: co-op = the
 host's team, else 1 + (local slot & 1); log `party: team preference %d for slot %u (%s, mode %d)`) (934a6ca). The page
-handler (5.3) also calls `ticker_refresh` while the Multiplayer page is open (parity M, 514bcfe). Suspected bug in the team preference: a co-op client reads the team of
-`members[host_id]`, the host's net id (1) used as a slot index, so slot 1 (another client) instead of slot 0 (the
-host, 3.3); the new-only scenario "5.8 co-op client" shows it.
+handler (5.3) also calls `ticker_refresh` while the Multiplayer page is open (parity M, 514bcfe). The host's team of
+a co-op client is the team of member slot 0 (the host is always slot 0, 3.3; 934a6ca read `members[host_id]`, the
+host's net id used as a slot index, i.e. another client: fixed 2026-11-25, new-only scenario "5.8 co-op client").
 
 ### 5.9 Wrapped state Update (state index I, state pointer)
 
@@ -687,15 +687,17 @@ Create match (5.14) sets match+0xc8 = 0 before its `Start Match: creating the ma
 
 #### 5.9.2 WaitReady (state 2): diagnostics after the rewrite (934a6ca)
 
-With the online state line of step 1 (state changed or 10 s), at most once per 2 s (steady clock): log
-`wait ready: all ready %u, deadline %d, timer %d, end 0x%llx` (u8 ngm+0x151, s32 ngm+0x154, s32 at image 0x113a04c,
-u64 ngm+0 minus 0x10), then for i = 0..9, with p = ngm + i*0x2c0 and stopping when p equals that end value:
-`wait ready: slot %d id %d in game %u, %02x %02x, state %d` (i, s32 p+8, u8 p+0x30, u8 p+0x27c, u8 p+0x284,
-s32 p+0x2c). This is what the code reads. Suspected wrong reads (not mapped in the differential test): the
-"timer" is read beside the net clock pointer 0x113a040 instead of from the clock object's +0xc (3.1, as 5.12 and the
-reset watch read it); p is the tracker minus 0x10 (5.1: trackers start at ngm+0x10), so "id" (p+8) is the last 8
-bytes of the previous tracker (for i = 0 the host tracker pointer at ngm+8), not the net id (+0x120), and the list
-stops at the local tracker rather than after the last one.
+What WaitReady's update (`0x5f26d0`) reads: the match task (u64 at state+8) +0x151 (u8, all ready) and +0x154 (s32
+deadline in net clock ticks), the net clock object's +0xc (3.1), and the trackers: when no used (name byte non-zero),
+not excluded (+0x26c = 0), +0x274 = 0 tracker other than the local one is left, it asks for a start at ticks + 900.
+With the online state line of step 1 (state changed or 10 s), at most once per 2 s (steady clock): task = u64 at
+state+8, clock = u64 at 0x113a040; log `wait ready: all ready %u, deadline %d, timer %d, local tracker 0x%llx`
+(u8 task+0x151 and s32 task+0x154, 0 each when task is NULL; s32 clock+0xc, 0 when clock is NULL; u64 ngm+0), then
+for each tracker i = 0..9 (t = ngm + 0x10 + i*0x2c0) whose name byte (+0x20) is non-zero:
+`wait ready: slot %d net id %u%s, %02x %02x` (i, u32 t+0x120, ` (local)` when t is the local tracker else empty,
+u8 t+0x26c, u8 t+0x274). (934a6ca read the ready byte and deadline at ngm+0x151 / +0x154, the timer at image
+0x113a04c beside the clock pointer, an "id" 8 bytes before each tracker and stopped at the local tracker: corrected
+2026-11-25 to the reads above.)
 
 #### 5.9.3 Other match-state additions after the rewrite (934a6ca), active only
 
@@ -944,11 +946,11 @@ page 0x471007a1: the first entry with that page id, else (count < 32) a new entr
    `%s at 0x%llx: not the stripped function this port expects, left alone` (name, address) and go on.
    Else `replace_function(address, 5, our function, name)`; +1 to `installed` when it returns true.
 5. Check all ten state slots: each u64 must equal base + its original update. If any differs: log
-   `match state vtables differ: no per-frame network during matches` and return (no abort hook, no idle limit).
+   `match state vtables differ: no per-frame network during matches` and return (no abort hook).
 6. Remember the ten originals, write the ten wrapper addresses into the slots, log
    `match state updates wrapped (%zu states)` (10), +1 to `installed`.
 7. If u64 at 0x103fa70 == base + 0x5e9f10: write the abort wrapper's address there (no log, no count).
-8. * The idle-kick limit (6.1.4).
+8. The idle-kick limit is left as the game has it (6.1.4).
 
 The page handler is not registered at install; Multiplayer entry and host create register it.
 
@@ -996,10 +998,10 @@ originals).
 
 #### 6.1.4 Idle-kick limit (`0xe622a8`)
 
-After step 7 (so only when the states were wrapped): if the 4 bytes at 0xe622a8 are `00 00 f0 42` (f32 120.0), write
-f32 300.0, log `idle kick: limit 120 s -> 300 s`, +1; else log `idle kick limit at 0x%llx differs: left alone`
-(0xe622a8). Open point (not decided here): parity-e-flow2.md 1 checked the 120 s idle limit as the PS3 1.19 value,
-and the netcode is to behave as PS3 1.19; 300 s makes ours kick idle players later than PS3 (owner decision needed).
+Not patched (since 2026-11-25). Playing's update (`0x5f16df`) compares the idle timer (f32 `0x14cec0c`) with the
+f32 at `0xe622a8`, 120.0 in the PS4 1.02 image; parity-e-flow2.md 1 checked the same 120 s limit in PS3 1.10's
+Playing::Update (`0x442558`), the version U2 parity follows. 934a6ca had raised it to 300 s (log
+`idle kick: limit 120 s -> 300 s`, +1 to `installed`); that is removed so idle players are kicked as on PS3.
 
 The file also contains an unused helper for the network heap context 0x14; it is never called and is
 not part of the behaviour.
@@ -1010,8 +1012,8 @@ not part of the behaviour.
 
 Install
 1. All bytes as expected: five `-> C++` lines, wrapped line, installed += 6, ten slots point to
-   wrappers, abort slot replaced. (Since 6.1: plus voice::install, three traces and the idle-limit line, installed
-   += 9 in an image without the 6.1 bytes; with them installed += 12.)
+   wrappers, abort slot replaced. (Since 6.1: plus voice::install and three traces, installed += 9 in an image
+   without the 6.1 bytes; with them installed += 11.)
 2. One stub differs (e.g. 0x659bc0 not a ret stub): its "left alone" line, installed += 5.
 3. gamenet::install false: nothing at all.
 4. One state slot differs: "vtables differ" line, no slot written, abort slot untouched.
@@ -1140,13 +1142,13 @@ Teardown and public calls
 
 `gow3_pc/tests/u2mp_rewrite/test_session.cpp` compares the rewrite's base (62fc26b) with today's session.cpp.
 `expected_new` turns the old record and image into what the new build must give, by these documented changes only:
-6 / 6.1 (voice::install, the three traces, the 6.1.1 / 6.1.2 / 6.1.4 results for the bytes the image holds, the
+6 / 6.1 (voice::install, the three traces, the 6.1.1 / 6.1.2 results for the bytes the image holds, the
 installed count), 5.4 (J6 `voice::reset_volume` before the transport start), 5.6 (present preload packages get bit
 0x40), 5.9.1 (Playing entry lines, match +0xc8, the match-over bytes). Everything else must match unchanged. The
 post-rewrite parity behaviour is not rebuilt in the comparison: new-only scenarios (`N ...`) check 6.1 with the PS4
-bytes in place, the traces, J6, D 2.1 (no network), the D teardown releases, 5.9.1 with Players Met, H1, H5, H8 and
-the E 2.2 / I6 timeout line. Two new-only scenarios fail on purpose (suspected bugs, 5.9.2 timer and the 5.8 co-op
-team preference). Old scenarios still differing: the three that run WaitReady (5.9.2 lines, not mapped), the four
+bytes in place (the idle limit stays 120 s, 6.1.4), the traces, J6, D 2.1 (no network), the D teardown releases,
+5.9.1 with Players Met, 5.9.2 (task, clock and tracker reads), the 5.8 co-op team preference (slot 0), H1, H5, H8 and
+the E 2.2 / I6 timeout line. Old scenarios still differing: the three that run WaitReady (5.9.2 lines, not mapped), the four
 without a network (D 2.1, new-only), LEAVE_MULTIPLAYER without entering (D releases, new-only), Start Match with a
 full table (D checks), and every scenario with an active session (the frame work additions of 5.8).
 

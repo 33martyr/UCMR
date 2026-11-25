@@ -1317,8 +1317,7 @@ void define_worlds() {
 // later step that reads it (store copy, labels, fingerprint, skin choice and random pick logs). Those changes cannot
 // be written as an edit of the old record without building the new table again in the test, so the old-vs-new
 // worlds above still show them. These worlds run the new build alone and check the spec's rules (5.6, 5.8, 5.9,
-// 6.3, 9.1b, 9.1c) directly. A check named "B1".."B3" is a suspected bug (spec 12): it checks the rule the spec
-// keeps and fails while the code differs.
+// 6.3, 9.1b, 9.1c) directly. A check named "B1".."B3" covers a bug fixed on 2026-11-25 (spec 12).
 std::map<std::string, World> new_only;
 int g_checks = 0, g_bad = 0;
 void reset_side(const std::string &world, int s);

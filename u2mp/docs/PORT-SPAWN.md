@@ -50,10 +50,11 @@ by team) - only a safety net.
 
 ## Diagnostics (squash 934a6ca; exact rules in spec/gameplay.md 6.4 "Diagnostics" and 6.5 steps 0 and 3)
 
-Added for the Siege (type 12) and Gold Rush hunts, on top of the search above (which is unchanged):
+Added for the Siege (type 12) and Gold Rush hunts, on top of the search above (which is unchanged). Every
+diagnostic only observes: it never changes the game's memory or registers.
 - two image probes, installed before the GetSpawnLocator check: 0x4bdfad (does nothing) and 0x4bf925 (the NPC
-  batch gate; in Siege it also lets 4 `npc-soldier*` spawners through per handle-count change, by clearing their
-  disabled bit and moving them to the nearest roof / vault entry point - a workaround, not only a log);
+  batch gate: logs each candidate's flags, the territory spots and the spawners near them). Both stubs resume with
+  `jmp [rip+0]`, so rax is what the game left (before, it held the resume address; dead at both sites);
 - 31 call-site probes after a successful install: NetNpc name (0x23bb22, only when its call bytes match), 16
   SpawnNpc sites, 12 spawner update sites, the 2 get-spawner-locator name lookups; each forwards to the game and
   logs its first calls;
@@ -61,6 +62,18 @@ Added for the Siege (type 12) and Gold Rush hunts, on top of the search above (w
   search and after the level lines; in type 12 the spawner, candidate, level spawner list and wave spawner lines;
   once per process the net-game dump (each net game's type, level name, task list).
 - `spawner_name` treats an unreadable name pointer as `?` (c5a5d89, Gold Rush).
+
+## Runtime workaround: Siege npc-soldier spawners (spec/gameplay.md 6.5 step 0a)
+
+The converted Siege levels ship their `npc-soldier*` spawners disabled (u16 flags +0x50 bit 1, rejected by the
+batch gate 0x4bdb20) and nothing enables them, so Siege would have no attackers. `install_siege_spawner_fix`
+(only when the 0x4bf925 gate stub is installed; log `spawn: siege npc-soldier spawners enabled at the NPC batch
+gate 0x4bf925 ...`) makes the gate enable 4 of them per change of the zone's handle count (0x113d530), each moved
+next to the roof / vault entry point nearest the active zone (the last spawned `net-territory*` spawner); logs
+`spawn: zone wave: handles %d, releasing %d attackers` and `spawn: released npc spawner ...`. Origin: inside the
+batch probe since 934a6ca; its own named step since 2026-11-25. **To do:** the owner rule puts map fixes into the
+PS3 -> PS4 conversion: the level converter should write these spawners enabled (and placed), then this runtime
+workaround goes.
 
 Off: the per-type update slot probes, the factory probe (boot crash) and the type-vtable scan (session.cpp, PR 21).
 The rewrite test (`tests/u2mp_rewrite/test_gameplay.cpp`, `sp_install_expected` / `sp_call_expected`) puts these

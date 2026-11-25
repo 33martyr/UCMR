@@ -648,19 +648,15 @@ Natives (fake `0xa15e70`, `0x64b960`, `0x60eb90`, converter pointer and virtual 
 Origin: the clean-room netanim.cpp / natives.cpp of 4c88d7a (2026-11-14) passed this spec with no difference. Every
 change below appears first in the squash 934a6ca (2026-11-24, no message; the U3 repository's history reset) and is
 unchanged in 8e7965b, 9fd6134 and the current branch. `git log -S` finds no other commit. The reasons below come
-from the comments in the current netanim.cpp; nothing here was checked against the game.
+from the comments in the current netanim.cpp. Checked against the PS4 1.02 image (2026-11-25): the reader's rax is
+the art group (3.3) and the index count is a 5-bit field (3.4); 3.1 steps 2-3 / 9, 3.3 and 3.4 carry the
+corrections of that day.
 
 ### 3.1 Install (replaces 1.5 for the current code)
 
 1. Switch: unchanged (1.5 step 1).
-2. Assert skip, before any check: for `at` = `0x66b430` upward while `at + 7 <= 0x66c380` and fewer than 32 sites
-   were patched: when the bytes at `at` are `48 8b 05` (mov rax, [rip+d]) and `at + 7 + d` (d = the signed 32-bit
-   value at `at + 3`) is `0x156df78` (the assertion hook global), write `e9 rel32` jumping to `0x66c380` (the
-   snapshot reader's epilogue; rel32 = `0x66c380 - (at + 5)`) followed by `90 90`, count the site and continue at
-   `at + 7`. A displacement that does not fit ends the scan. When at least one site was patched, log
-   `netanim: snapshot parse aborts on asserts (%d sites)`. Not counted in `installed`. Purpose (code comment): a
-   garbled snapshot ends the parse instead of taking the game down.
-3. Stream checks: the six of 1.5 step 2, plus (all must match, same log and return on a mismatch):
+2. Stream checks: the six of 1.5 step 2, plus (all must match, same log and return on a mismatch: nothing is
+   patched):
 
    | Address | Bytes | Meaning |
    |---|---|---|
@@ -670,6 +666,15 @@ from the comments in the current netanim.cpp; nothing here was checked against t
    | `0x6367cb` | `8d 42 04` | writer constant (step 7) |
    | `0x6368a0` | `83 f9 03` | writer constant (step 7) |
    | `0x6368b7` | `83 c0 04` | writer constant (step 7) |
+
+3. Assert skip, after the checks passed (934a6ca ran it before them, so a non-1.02 image got it too; moved
+   2026-11-25): for `at` = `0x66b430` upward while `at + 7 <= 0x66c380` and fewer than 32 sites
+   were patched: when the bytes at `at` are `48 8b 05` (mov rax, [rip+d]) and `at + 7 + d` (d = the signed 32-bit
+   value at `at + 3`) is `0x156df78` (the assertion hook global), write `e9 rel32` jumping to `0x66c380` (the
+   snapshot reader's epilogue; rel32 = `0x66c380 - (at + 5)`) followed by `90 90`, count the site and continue at
+   `at + 7`. A displacement that does not fit ends the scan. When at least one site was patched, log
+   `netanim: snapshot parse aborts on asserts (%d sites)`. Not counted in `installed`. Purpose (code comment): a
+   garbled snapshot ends the parse instead of taking the game down.
 
 4. Five `near_stub(512)` requests, always all five, in this order: writer, reader, index, prefill, depth. Any NULL:
    log `netanim: no stub memory near the image`; return.
@@ -687,9 +692,11 @@ from the comments in the current netanim.cpp; nothing here was checked against t
    `41 89 84 24 bc 00 00 00` and at `0x60e9f3` are `89 83 bc 00 00 00`: two `near_stub(384)` requests (player, then
    other). With both non-NULL, build both stubs (3.7), jump the player site (8 bytes) and then the other site
    (6 bytes) as in step 6; when both jumps succeed, `installed += 1` and log
-   `netanim: snapshot bit counts padded to whole words`. A NULL stub or a failed jump is silent (a failed second
-   jump leaves the first site patched). Otherwise (switch `"0"` or either byte check failing) log
-   `netanim: bit count padding off (UNCHARTED_U2MP_NETANIM_PAD=0)`.
+   `netanim: snapshot bit counts padded to whole words` (a failed jump is silent; a failed second jump leaves the
+   first site patched). A NULL stub logs `netanim: no stub memory near the image, no bit count padding`. The switch
+   `"0"` logs `netanim: bit count padding off (UNCHARTED_U2MP_NETANIM_PAD=0)`; a byte check failing (switch not
+   `"0"`) logs `netanim: snapshot bit count sites differ from 1.02, no bit count padding` (ab11f85c; 934a6ca gave
+   the switch line for both and was silent on a NULL stub).
 10. Generator slot 4: the slot checks and the `replace_function` of 1.5 steps 6-7 are gone. The slot host function
     and the host visitor (1.4.3, 1.4.4) are still in the source but nothing installs them. See 3.10.
 
@@ -715,11 +722,14 @@ The phase bit widths of 1.3 (4 / 8 / 16 bits by frame count) are no longer used 
 ### 3.3 Reader call-out (replaces 1.4.2)
 
 Stub: the r14 store to rbp-0x188, the save, the host call with (rdi = the 8 bytes at [rbp], i.e. the reader's
-frame; rsi = rax on entry, which the new code treats as the anim's art group; rdx = r14, the anim index + 1), the
-restore, the counter increment and the jump to `0x66c250`, as in 1.4.2.
+frame; rsi = rax on entry, the anim art group; rdx = r14, the anim index + 1), the restore, the counter increment and
+the jump to `0x66c250`, as in 1.4.2. rax is the art group: the reader (`0x66bf30`..`0x66bff4`) finds it by id in the
+art group table (`0x1241418` +0x38, 350 entries of 0x2c0, each a {key, value} hash at +0x18) and asserts it non-NULL
+at `0x66c000` with the expression text `pAnimArtGroup` (`0xe8ab2b`, net-snapshot.cpp, Parse) before `0x66c035`.
 
-"Readable" below: the address is at least 0x10000, below 2^47 and in committed memory that is neither no-access nor
-a guard page (the code asks Windows `VirtualQuery`).
+"Readable n bytes at p" below: p is at least 0x10000 and below 2^47, and `host_readable(p, n)` (host_memory.h: every
+byte of the range is committed and readable; `VirtualQuery` on Windows, a pipe write on POSIX). "Readable" alone is
+n = 1.
 
 Host action with frame, group, next:
 
@@ -739,14 +749,16 @@ Host action with frame, group, next:
    `netanim: leaves %d, clips %d, poses %d, misses %d, deep drops %d, index reads %d` (process-wide counters). The
    returns of steps 3 and 4 skip this line.
 
-Lookup (group, idx): none when group is NULL or not readable or idx >= 0x800. An 8-entry per-thread cache of
-{group, idx, anim} is checked first. Otherwise: P = pointer at group+0x30 (not checked), tab = pointer at P+0x10;
-none when tab is NULL or not readable or idx >= the u32 at tab+0. entry = (pointer at tab+8) + idx * 16; none when
-not readable. want = u32 at entry+0, x = pointer at entry+8. Candidates: a = x, then (when not yet found and x is
-non-NULL) a = pointer at x (x itself is not checked). A candidate is the anim when a is readable, its name pointer
-(a+0) is readable, the name (read in 16-byte pieces) ends within 128 bytes, `sid(name)` == want, the clip pointer
-a+0x28 is readable and the u16 at clip+0x22 is non-zero. Found: stored in the cache (round robin). Not found: count
-a miss.
+Lookup (group, idx): none when group is not readable for 0x38 bytes or idx >= 0x800. An 8-entry per-thread cache of
+{group, idx, anim} is checked first. Otherwise: P = pointer at group+0x30; none when P is not readable for 0x18
+bytes. tab = pointer at P+0x10; none when tab is not readable for 0x10 bytes or idx >= the u32 at tab+0. entry =
+(pointer at tab+8) + idx * 16; none when not readable for 0x10 bytes. want = u32 at entry+0, x = pointer at entry+8.
+Candidates (while x is non-NULL): a = x, then (when not yet found) a = pointer at x when x is readable for 8 bytes,
+else none. A candidate is the anim when a is readable for 0x30 bytes, the name at its name pointer (a+0), read in
+16-byte pieces each readable, ends within 128 bytes, `sid(name)` == want, the clip pointer a+0x28 is readable for
+0x24 bytes and the u16 at clip+0x22 is non-zero. Found: stored in the cache (round robin). Not found (after the
+table entry was reached): count a miss. (934a6ca followed P and the pointer at x unchecked and read a+0 / a+0x28
+before testing a: every pointer is now checked before it is followed, 2026-11-25.)
 
 ### 3.4 Index call-out (`0x66b637`, new)
 
@@ -754,9 +766,11 @@ The 7 bytes at `0x66b637` jump to a stub: save, host(rdi = [rbp], esi = r14d), r
 replaced `lea r14, [rip+...]` and the game code up to `0x66b6a5` (its own anim index reads) are skipped.
 
 Host (frame, count): count the call (index reads); for the first 4 calls log `netanim: %u anim indices`. Stream =
-frame-0x150. The stored count becomes min(count, 32). For i = 0 .. count-1: the index is the 11 bits at
-position + 11 * i when position + 11 * (i + 1) <= limit, else `0xffff`; it is stored at entry min(i, 31). Then the
-stream position becomes position + 11 * count (not limited). Indices and count are per thread.
+frame-0x150. The stored count becomes min(count, 32). For i = 0 .. min(count, 32)-1: the index is the 11 bits at
+position + 11 * i when position + 11 * (i + 1) <= limit, else `0xffff`; it is stored at entry i. Then the stream
+position becomes position + 11 * count (not limited). Indices and count are per thread. count is the snapshot's
+5-bit index count (`0x66b549`: the top 5 bits), so at most 31 and every index is stored; 934a6ca wrote an index past
+31 into entry 31 (unreachable, removed 2026-11-25).
 
 ### 3.5 Bind-pose prefill (`0x5f3d63`, new)
 
@@ -813,6 +827,6 @@ keeps that difference visible (3.11).
 
 `gow3_pc/tests/u2mp_rewrite/test_netanim.cpp` turns the old record and image into the expected new ones by the rules
 above (3.1 log lines, request count, installed count, the new patch bytes, 3.2 / 3.3 stream results, 3.9 lines),
-prints the 3.1 step 5 pointers as stub pool offsets, and checks 3.1 step 2-3 / 9, 3.2 step 1 and 3.3-3.7 with
-new-only scenarios. The slot 4 lines, the slot's +1 and the slot's 16 image bytes are compared on their own: a
+prints the 3.1 step 5 pointers as stub pool offsets, and checks 3.1 steps 2-3 / 9, 3.2 step 1 and 3.3-3.7 (an
+unreadable art group +0x30 included) with new-only scenarios. The slot 4 lines, the slot's +1 and the slot's 16 image bytes are compared on their own: a
 scenario whose only difference is that part is reported as `OPEN-SLOT4`, not as passed.

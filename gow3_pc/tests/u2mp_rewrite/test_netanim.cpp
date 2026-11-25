@@ -381,6 +381,8 @@ static const char *const kOutOfRange = "log netanim: stub out of jump range";
 static const char *const kGuardLine = "log netanim: anim indices, bind-pose prefill and tree depth guard installed";
 static const char *const kPadded = "log netanim: snapshot bit counts padded to whole words";
 static const char *const kPadOff = "log netanim: bit count padding off (UNCHARTED_U2MP_NETANIM_PAD=0)";
+static const char *const kPadDiffer = "log netanim: snapshot bit count sites differ from 1.02, no bit count padding";
+static const char *const kPadNoStub = "log netanim: no stub memory near the image, no bit count padding";
 static const char *const kStubsLine = "log netanim: stubs writer=pool+0x0 reader=pool+0x200 index=pool+0x400 "
                                       "prefill=pool+0x600 depth=pool+0x800";
 static const uint8_t kPadPlayer[] = {0x41, 0x89, 0x84, 0x24, 0xbc, 0x00, 0x00, 0x00};
@@ -388,9 +390,12 @@ static const uint8_t kPadOther[] = {0x89, 0x83, 0xbc, 0x00, 0x00, 0x00};
 
 // spec 3.1 step 9: padding is installed when the switch is not "0" and both sites hold the 1.02 bytes (the old code
 // never writes them, so the old image shows what the install saw)
-static bool pad_expected(const std::vector<uint8_t> &img) {
+static bool pad_switch_off() {
     const char *e = std::getenv("UNCHARTED_U2MP_NETANIM_PAD");
-    return !(e && std::strcmp(e, "0") == 0) && std::memcmp(img.data() + 0x60e296, kPadPlayer, 8) == 0 &&
+    return e && std::strcmp(e, "0") == 0;
+}
+static bool pad_expected(const std::vector<uint8_t> &img) {
+    return !pad_switch_off() && std::memcmp(img.data() + 0x60e296, kPadPlayer, 8) == 0 &&
            std::memcmp(img.data() + 0x60e9f3, kPadOther, 6) == 0;
 }
 
@@ -438,7 +443,7 @@ static void map_old(std::vector<std::string> &r, std::vector<uint8_t> &img) {
             out.push_back(kStubsLine);
             out.push_back(l);
             out.push_back(kGuardLine);
-            out.push_back(pad ? kPadded : kPadOff);
+            out.push_back(pad ? kPadded : pad_switch_off() ? kPadOff : kPadDiffer);
             restored = true;
         } else if (l == kOutOfRange) {   // step 5 comes before the jumps
             out.push_back(kStubsLine);
@@ -1086,10 +1091,10 @@ static bool regs_only(const std::string &line, std::initializer_list<std::pair<i
 
 static void current_only_scenarios() {
     const char *differ = "log netanim: snapshot writer / reader bytes differ from 1.02, left alone (no clip phases)";
-    // 3.1 step 3: the six added stream checks
+    // 3.1 step 2: the six added stream checks
     for (int i = 0; i < 6; i++) {
         char name[96];
-        std::snprintf(name, sizeof name, "P1 3.1 step 3: added stream check 0x%llx broken",
+        std::snprintf(name, sizeof name, "P1 3.1 step 2: added stream check 0x%llx broken",
                       (unsigned long long)kNetanimNewChecks[i].off);
         only_new(name, [&] {
             netanim_bytes(mem);
@@ -1100,8 +1105,8 @@ static void current_only_scenarios() {
             CHECK(mem[0x6364b5] == 0x41 && mem[0x66c035] == 0x4c && mem[0x66b637] == 0x4c && mem[0x5f3d63] == 0x48);
         });
     }
-    // 3.1 step 2: assert sites inside the snapshot reader jump to its epilogue
-    only_new("P2 3.1 step 2: assert sites end the parse (last one ends at the epilogue)", [&] {
+    // 3.1 step 3: assert sites inside the snapshot reader jump to its epilogue
+    only_new("P2 3.1 step 3: assert sites end the parse (last one ends at the epilogue)", [&] {
         netanim_bytes(mem);
         const uint64_t sites[] = {0x66b500, 0x66b600, 0x66c300, 0x66c379};
         for (uint64_t s : sites) assert_site(s, 0x156df78);
@@ -1113,26 +1118,26 @@ static void current_only_scenarios() {
               starts(calls[1], "log netanim: stubs writer="));
         CHECK(count_of("netanim installed 6, near_stub requests 7") == 1);
     });
-    only_new("P2 3.1 step 2: a site ending past the epilogue is not scanned", [&] {
+    only_new("P2 3.1 step 3: a site ending past the epilogue is not scanned", [&] {
         netanim_bytes(mem);
         assert_site(0x66c37a, 0x156df78);
         install_netanim();
         CHECK(mem[0x66c37a] == 0x48 && count_of("log netanim: snapshot parse aborts on asserts (1 sites)") == 0);
         CHECK(!starts(calls[0], "log netanim: snapshot parse aborts"));
     });
-    only_new("P2 3.1 step 2: at most 32 sites", [&] {
+    only_new("P2 3.1 step 3: at most 32 sites", [&] {
         netanim_bytes(mem);
         for (int i = 0; i < 40; i++) assert_site(0x66b700 + 16 * uint64_t(i), 0x156df78);
         install_netanim();
         CHECK(count_of("log netanim: snapshot parse aborts on asserts (32 sites)") == 1);
         for (int i = 0; i < 40; i++) CHECK((mem[0x66b700 + 16 * uint64_t(i)] == 0xe9) == (i < 32));
     });
-    only_new("P2 3.1 step 2: done before the 1.02 checks (a non-1.02 image is patched too)", [&] {
+    only_new("P2 3.1 step 3: done after the 1.02 checks (a non-1.02 image is left alone)", [&] {
         netanim_bytes(mem);
         mem[0x66b430] ^= 0x01;
         assert_site(0x66b500, 0x156df78);
         install_netanim();
-        CHECK(mem[0x66b500] == 0xe9 && count_of(differ) == 1 && count_of("log netanim: snapshot parse aborts on asserts (1 sites)") == 1);
+        CHECK(mem[0x66b500] == 0x48 && count_of(differ) == 1 && count_of("log netanim: snapshot parse aborts on asserts (1 sites)") == 0);
     });
     // 3.1 step 9: padding switch, bytes, stub memory
     only_new("P3 3.1 step 9: UNCHARTED_U2MP_NETANIM_PAD=0", [&] {
@@ -1144,18 +1149,18 @@ static void current_only_scenarios() {
         CHECK(count_of("netanim installed 5, near_stub requests 5") == 1);
         CHECK(std::memcmp(mem + 0x60e296, kPadPlayer, 8) == 0 && std::memcmp(mem + 0x60e9f3, kPadOther, 6) == 0);
     });
-    only_new("P3 3.1 step 9: a pad site differs (same log line as the switch)", [&] {
+    only_new("P3 3.1 step 9: a pad site differs (its own line, not the switch's)", [&] {
         netanim_bytes(mem);
         mem[0x60e9f8] ^= 0x01;
         install_netanim();
-        CHECK(count_of(kPadOff) == 1 && count_of("netanim installed 5, near_stub requests 5") == 1);
+        CHECK(count_of(kPadDiffer) == 1 && count_of(kPadOff) == 0 && count_of("netanim installed 5, near_stub requests 5") == 1);
         CHECK(std::memcmp(mem + 0x60e296, kPadPlayer, 8) == 0);
     });
-    only_new("P3 3.1 step 9: no stub memory for the padding (silent)", [&] {
+    only_new("P3 3.1 step 9: no stub memory for the padding", [&] {
         netanim_bytes(mem);
         exec_fail_mask = 1ull << 6;   // the second pad request
         install_netanim();
-        CHECK(count_of(kPadOff) == 0 && count_of(kPadded) == 0 && count_of(kRestored) == 1);
+        CHECK(count_of(kPadNoStub) == 1 && count_of(kPadOff) == 0 && count_of(kPadded) == 0 && count_of(kRestored) == 1);
         CHECK(count_of("netanim installed 5, near_stub requests 7") == 1);
         CHECK(std::memcmp(mem + 0x60e296, kPadPlayer, 8) == 0 && std::memcmp(mem + 0x60e9f3, kPadOther, 6) == 0);
     });
@@ -1298,6 +1303,9 @@ static void current_only_scenarios() {
         leaf(1, 3, GEN, clip(AN_A, 3, ph[10]), true);
         put<uint32_t>(FRAME - 0x144, pos + 9);   // no room: phase 0, position kept
         leaf(1, 0, GEN, clip(AN_A, 0, 0), true, false);
+        put<uint64_t>(GROUP + 0x30, 0xaaaaaaaaaaaaaaaaull);   // debug fill: not followed (3.3 lookup), no miss
+        leaf(4, 0, GEN, pose(0), true, false);
+        put<uint64_t>(GROUP + 0x30, addr(GP));
         while (g_new_leaves % 64 != 63) leaf(0, 0, GEN, pose(0), true, false);
         leaf(0, 0, GEN, pose(0), true, false);   // this one prints the leaf summary
     });

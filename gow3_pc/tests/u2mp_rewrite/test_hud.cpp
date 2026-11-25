@@ -407,6 +407,7 @@ bool local_player_live() {
 //   tick's CurrentWeapon line) only on such a tick; the last weapon follows spec 4.12 steps 2 and 6 (0 on a tick
 //   without a local player, the weapon read otherwise) and is process-wide like the module's. The own count in the
 //   periodic log ("/ N here") drops by the calls removed so far in the process.
+// - Spec hud.md 5 step 9 (the 3 s window went in 934a6ca): the install line names the one call per weapon switch.
 // - Commit 934a6ca, spec hud.md 4.1 "Image widget draw" step 5: a name pointer below 4 GiB is not read; the log
 //   prints the pointer in hex, so a NULL name logs `widget 0` where the old code logged `widget (no name)`.
 uint64_t g_map_last_weapon = 0, g_map_dropped = 0;
@@ -443,6 +444,9 @@ void hud_expected(std::vector<std::string> &r) {
         after_get = l.rfind("CurrentWeapon ", 0) == 0;
         if (const size_t w = l.find("(widget (no name))"); l.rfind("log hud: image ", 0) == 0 && w != std::string::npos)
             l.replace(w, 18, "(widget 0)");
+        if (l == "log hud: weapon panel: shown for 3 s after a weapon switch (ShowWeaponHud 0x954740 from the multiplayer "
+                 "draw), probes on")
+            l = "log hud: weapon panel: ShowWeaponHud 0x954740 once per weapon switch (from the frame work), probes on";
         if (l.rfind("log hud: weapon panel: ", 0) == 0 && g_map_dropped) {
             const size_t h = l.find(" here, panel draws ");
             const size_t s = h == std::string::npos ? h : l.rfind("/ ", h);

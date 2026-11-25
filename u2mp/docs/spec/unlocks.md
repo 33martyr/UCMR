@@ -6,8 +6,7 @@ game and the tester can see it. It does not say how to structure the code. Backg
 
 This spec was written from the clean-room rewrite (edef8d6). The changes the code got after it
 (the history squash 934a6ca, no message; commit 6b34909, issue #34) are described where they apply
-and listed in section 12 with their origin; two of them are suspected bugs against this spec and
-stay out of the rules (12, B1 and B2).
+and listed in section 12 with their origin; three of them were bugs, fixed on 2026-11-25 (12, B1..B3).
 
 All addresses are image offsets of Uncharted 2 PS4 1.02 (CUSA02320). "Guest" means the game
 image. `B` is `image.base`; an image offset `X` is the absolute address `B + X`. Guest functions
@@ -426,6 +425,9 @@ against the build (the ready flag is published after the list is complete).
 
 ### 5.6 Skin choice, random pick, spawn lookup
 
+"Package ptr" of a skin record in the skin choice, the random pick log and the skin id of a name (5.1): for
+positions 0..9 of the merged table, its kept record package (6.3 step 11), else the ptr at +8 (12, B3).
+
 **Apply the skin choice** (`when` text): only when the skin hooks are installed (section 7, step 7) and
 DcFind(0x5a4731d2) is non-NULL (that lookup is made only when the hooks are installed).
 1. forced = 0. If a forced package name is set: forced = skin id of that name (5.1). If forced is
@@ -542,15 +544,13 @@ them that point into our net-patch9 copy stay valid because that copy is never f
 ### 6.3 Merged skin table
 
 The rules below are the code since 934a6ca and 6b34909 (section 12 says which step came from
-which). Two steps keep the rewrite's rule because the current code differs from it in a way that
-looks accidental (12, B1 and B2).
+which), with the three corrections of 2026-11-25 (12, B1..B3).
 
 1. t = net-patch9 symbol 0x5a4731d2 (may be NULL). n = s32 at t+0 (0 when t is NULL), recs = ptr
    at t+8.
 2. Layout of net-patch9's records:
-   - PS4 layout (stride 0x30) when the skin layout check (recs, n, 0x30, ps4, ours) passes. This is
-     the rewrite's rule and stays the spec; the current code no longer has this branch and reads
-     such a table with the 0x28 stride (12, B1).
+   - PS4 layout (stride 0x30) when the skin layout check (recs, n, 0x30, ps4, ours) passes (the
+     rewrite's rule; 6b34909 had dropped it, restored: 12, B1).
    - Else converted layout (stride 0x28) when recs is non-NULL, 1 <= n <= 512 and
      `in(recs, 0x28 * n)` (no package name check here: step 6 checks each record).
    - Else net-patch9 gives no records.
@@ -576,8 +576,8 @@ looks accidental (12, B1 and B2).
       player data paths use: Drake 0, Eddy Raja 1).
    2. Each net-patch9 record in order. PS4 layout: the record as it is. Converted: a zeroed PS4-form
       record with +4 = its +4, +8 = its +8, +0x10 = its u32 +0x10, +0x18 / +0x1c / +0x20 = its
-      +0x14 / +0x18 / +0x1c, and +0x24 / +0x28 = its +0x20 / +0x24 (the last two are the rewrite's
-      rule and stay the spec; the current code leaves them 0: 12, B2).
+      +0x14 / +0x18 / +0x1c, and +0x24 / +0x28 = its +0x20 / +0x24 (the last two: the rewrite's
+      rule, restored, 12, B2; the game reads +0x24 as the package request flag, `0x641af8`).
 7. Baseball Shirt Drake: if no record has u32 +0x10 == `sid("mp-hero-red")`, append one at
    position c (the current count): +0 = c, +4 = 0, +8 = a `netheap_alloc` copy of `mp-hero-red`
    (NULL when that allocation fails), +0x10 = the id (u64), +0x18 / +0x1c / +0x20 = the values of
@@ -589,9 +589,12 @@ looks accidental (12, B1 and B2).
    step 7, with a new heap copy of its package name each time): +0 = at, +4 side, +8, +0x10 id
    (u64), +0x18 name, +0x1c photo, +0x20 icon; +0x24.. keep what the record had (0 for a new one).
 10. Every record's +0 = its position.
-11. Slot art (934a6ca): for each position i < 10 and < count: copy the record's package text
-    (`mp-hero` when its ptr is NULL) into slot art buffer i (at most 47 characters and a NUL) and
-    point the record's +8 at that buffer. 5.8 rewrites these ten during a match.
+11. Slot art (934a6ca): for each position i < 10 and < count: keep the record's own package (its
+    ptr, `mp-hero` when NULL) as record package i, copy that text into slot art buffer i (at most 47
+    characters and a NUL) and point the record's +8 at that buffer. 5.8 rewrites these ten during a
+    match. Record package i of a position >= count is none. Wherever this module names the package
+    of a record of the merged table (the skin choice 5.6, the package -> id search, the random pick
+    log, the store copy 6.4), position i < 10 gives record package i, not the slot art (12, B3).
 12. Header: s32 count at +0, ptr (block + 0x10) at +8. This table is also the slot table.
 13. Fingerprint: fp = 0; for each record in order: fp = `sid(text, fp)` where text is the u32 at
     +0x10 printed as `%08x` (8 lowercase hex digits). Log `unlocks: skin table order fingerprint
@@ -1019,28 +1022,25 @@ world that builds the table differs from the first refresh on (the table, the st
 fingerprint and skin logs all follow it). That is the documented change, not mapped as an edit of
 the old record; the new rules are checked by scenarios 36..40.
 
-Suspected bugs (the spec keeps the rule; the code differs; not mapped):
+Bugs found by the differential test, fixed 2026-11-25 (new-only checks "B1".."B3" now pass):
 
-- **B1** (6b34909): a net-patch9 skin table in the PS4 layout is no longer recognised. Every table
-  that fits 0x28 * n bytes is read with the 0x28 stride, so PS4-layout records are read at wrong
-  offsets. Evidence: 934a6ca still had a 0x30 branch; 6b34909 replaced it by a bare range test,
-  without comment, while the summary line still prints `PS4` for a 0x30 stride that can no longer
-  occur. The importer writes the converted layout (`u2mp/docs/UNLOCKS.md` 3), so real imports are
-  not hit; the owner may instead drop the PS4 layout from this spec. Scenario 37.
-- **B2** (6b34909): a converted record's fourth and fifth values (+0x20, +0x24) are no longer copied
-  to +0x24 / +0x28 (left 0). The rewrite and 934a6ca copied all five. `u2mp/docs/UNLOCKS.md` 6 step 3:
-  the game requests a skin package with the flag "record +0x24 != 0", so every imported skin now gets
-  flag 0. No comment explains it. Scenario 36.
-- **B3** (934a6ca): slot art aliases records 0..9. 5.8 rewrites their package names per net slot,
-  but the skin choice (5.6) takes the local package from the record of the equipped id. A player
-  whose skin is one of records 0..9 (default Drake is record 0, the host's net id 1 uses record 0)
-  then takes another player's package as its own after the first 5.8 call, and session.cpp sends
-  it as this PC's skin (`unlocks.h`: "the local player's chosen hero and villain actor packages").
-  The same aliasing reaches the random pick log, the Profile lists and the store copy rows of
-  records 0..9 (their +0x40 points at the slot art buffers). Scenario 39.
+- **B1** (6b34909): a net-patch9 skin table in the PS4 layout was no longer recognised: every table
+  that fits 0x28 * n bytes was read with the 0x28 stride (934a6ca still had the 0x30 branch; the
+  summary line kept printing `PS4` for a stride that could no longer occur). The 0x30 branch is back
+  (6.3 step 2, the rewrite's check with the `+0x14 == 0` test). The importer writes the converted
+  layout (`u2mp/docs/UNLOCKS.md` 3), so real imports did not hit it.
+- **B2** (6b34909): a converted record's fourth and fifth values (+0x20, +0x24) were no longer copied
+  to +0x24 / +0x28 (left 0), so every imported skin was requested with flag 0: StartNetGame's request
+  loop (`0x641aa0`..`0x641b1e`) passes "record +0x24 != 0" to `0x56d170` (`0x641af8`). All five values
+  are copied again, as in the rewrite and 934a6ca (6.3 step 6.2).
+- **B3** (934a6ca): slot art aliased records 0..9: 5.8 rewrites their package names per net slot, so
+  the skin choice (5.6) of a player whose skin is one of records 0..9 (default Drake is record 0)
+  took another player's package as its own and session.cpp sent it as this PC's skin; the random pick
+  log and the store copy rows (+0x40) of those records followed the slot art too. Each record's own
+  package is now kept aside when the slot art is made (6.3 step 11) and these readers use it.
 
 Other points (behaviour as described above, no bug claimed): copies made before the duplicate test
 stay allocated, and 9.1b entry 2 is written and then replaced by 9.1c entry 1 (two copies); slot art
 holds 47 characters while 6.3 step 5 accepts names of up to 62; the readable-memory test of 6.3
-step 5 uses a Windows call (`VirtualQuery`), not portable to a Linux build; the spawn B line names
-the first fallback even when a later lookup gave the model.
+step 5 is `host_readable` (host_memory.h: `VirtualQuery` on Windows, a pipe write on POSIX); the
+spawn B line names the first fallback even when a later lookup gave the model.

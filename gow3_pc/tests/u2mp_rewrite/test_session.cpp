@@ -542,13 +542,11 @@ void expected_new(std::vector<std::string> &r, std::vector<uint8_t> &img, uint8_
     static const unsigned char links_orig[6] = {0x0f, 0x8c, 0x13, 0x01, 0x00, 0x00};
     static const unsigned char links_jump[6] = {0x90, 0xe9, 0x13, 0x01, 0x00, 0x00};
     static const unsigned char actor_orig[7] = {0x48, 0x8b, 0x05, 0xd9, 0x90, 0xa0, 0x00};
-    static const unsigned char idle_120[4] = {0x00, 0x00, 0xf0, 0x42};
-    // The old build never writes these three places, so its final image shows what install found there.
+    // The old build never writes these two places, so its final image shows what install found there.
     const bool links_o = std::memcmp(img.data() + 0x5f17ed, links_orig, 6) == 0;
     const bool links_j = std::memcmp(img.data() + 0x5f17ed, links_jump, 6) == 0;
     const bool actor_o = std::memcmp(img.data() + 0x641b20, actor_orig, 7) == 0;
     const bool actor_j = img[0x641b20] == 0xe9;
-    const bool idle = std::memcmp(img.data() + 0xe622a8, idle_120, 4) == 0;
     std::vector<std::string> o;
     int added = 0;            // installed count the new install adds (session.md 6.1)
     uint8_t c8 = c8_before;   // match +0xc8 as the new build keeps it (session.md 5.9.1)
@@ -582,19 +580,6 @@ void expected_new(std::vector<std::string> &r, std::vector<uint8_t> &img, uint8_
                 std::snprintf(f, sizeof f, "retarget_call 0x%llx failed (test)", (unsigned long long)t.off);
                 if (hx::fails_at(t.off)) o.push_back(f);
                 else ++added;
-            }
-            continue;
-        }
-        // session.md 6 step 10 (934a6ca): the idle-kick limit, after the states were wrapped (and the abort slot)
-        if (l == "log match state updates wrapped (10 states)") {
-            o.push_back(l);
-            if (idle) {
-                o.push_back("log idle kick: limit 120 s -> 300 s");
-                ++added;
-                const float v = 300.0f;
-                std::memcpy(img.data() + 0xe622a8, &v, 4);
-            } else {
-                o.push_back("log idle kick limit at 0xe622a8 differs: left alone");
             }
             continue;
         }
@@ -2220,11 +2205,11 @@ void new_only_scenarios() {
                                   "retarget_call 0x664d6a 0x60ded0 tracker state send") &&
                            before("retarget_call 0x60e291 0x634970 tracker state helper",
                                   "replace_function 0x5eb160 5 BUTTON_MULTIPLAYER") &&
-                           before("log match state updates wrapped (10 states)", "log idle kick: limit 120 s -> 300 s"),
-                       "install order: voice, lost links, actor hook, traces, functions, states, idle limit");
+                           !has("log idle kick: limit 120 s -> 300 s"),
+                       "install order: voice, lost links, actor hook, traces, functions; no idle-limit line");
                 expect(bytes_are(0x5f17ed, {0x90, 0xe9, 0x13, 0x01, 0x00, 0x00}), "0x5f17ed = nop; jmp 0x5f1906");
-                expect(get<float>(0xe622a8) == 300.0f, "idle limit 300.0");
-                expect(has("installed 12"), "installed 12 (links, actor, 3 traces, 5 functions, states, idle)");
+                expect(get<float>(0xe622a8) == 120.0f, "idle limit stays 120.0 (PS3 1.10)");
+                expect(has("installed 11"), "installed 11 (links, actor, 3 traces, 5 functions, states)");
                 // 0x641b20: jmp rel32 to a near stub, two NOPs; the stub calls the hook and jumps back to 0x641b27
                 expect(mem[0x641b20] == 0xe9 && mem[0x641b25] == 0x90 && mem[0x641b26] == 0x90, "0x641b20 = jmp; nop; nop");
                 const uint8_t *stub = mem + 0x641b25 + get<int32_t>(0x641b21);
@@ -2251,7 +2236,7 @@ void new_only_scenarios() {
         inst(a);
         expect(!has("log lost links: Playing's PSN record check jumped (0x5f17ed)"), "no lost-links line");
         expect(!has("log skins: actor requests hooked after StartNetGame's package requests (0x641b20)"), "no actor line");
-        expect(has("log idle kick limit at 0xe622a8 differs: left alone"), "idle limit 300 already: left alone");
+        expect(!has("log idle kick limit at 0xe622a8 differs: left alone"), "no idle-limit line");
         expect(has("installed 11"), "installed 11");
         expect(get<float>(0xe622a8) == 300.0f && bytes_are(0x641b20, {0xe9, 0, 0, 0, 0, 0, 0}), "bytes unchanged");
     });
@@ -2381,16 +2366,31 @@ void new_only_scenarios() {
                    before("log playing: update returned", "log playing: frame work returned"),
                "order: joined, players met, original, update returned, frame work, frame work returned");
     });
-    // session.md 5.9.2: the diagnostic reads its "timer" from 0x113a04c, beside the net clock pointer 0x113a040, not
-    // from the clock object's +0xc (session.md 3.1, as reset_watch and net_ticks read it). Left failing: suspected bug.
-    add_new("5.9.2 WaitReady diagnostics: timer = the net clock's ticks (FAILS: reads 0x113a04c, suspected bug)", [] {
+    // session.md 5.9.2: ready byte and deadline of the match task (state +8), timer = the clock object's +0xc
+    // (3.1), every used tracker with its net id, the local one marked.
+    add_new("5.9.2 WaitReady diagnostics: task ready/deadline, net clock ticks, used trackers", [] {
         put<uint64_t>(CLOCKPTR, addr(OTHERCLOCK));
         put<uint32_t>(OTHERCLOCK + 0xc, 1234);
+        put<uint64_t>(STATEOBJ + 8, addr(TASK));
+        mem[TASK + 0x151] = 1;
+        put<int32_t>(TASK + 0x154, 2134);
+        const uint64_t t0 = NGM + 0x10, t2 = NGM + 0x10 + 2 * 0x2c0;
+        put<uint64_t>(NGM, addr(t2));
+        mem[t0 + 0x20] = 'A';
+        put<uint32_t>(t0 + 0x120, 1);
+        mem[t2 + 0x20] = 'B';
+        put<uint32_t>(t2 + 0x120, 3);
+        mem[t2 + 0x26c] = 1;
     }, [](const Api &a) {
         inst(a);
         state(2);
-        expect(has("log wait ready: all ready 0, deadline 0, timer 1234, end 0xfffffffffffffff0"),
-               "timer 1234 from the clock object at 0x113a040");
+        char want[160];
+        std::snprintf(want, sizeof want, "log wait ready: all ready 1, deadline 2134, timer 1234, local tracker 0x%llx",
+                      (unsigned long long)addr(NGM + 0x10 + 2 * 0x2c0));
+        expect(has(want), "task +0x151 / +0x154, timer 1234 from the clock object at 0x113a040");
+        expect(has("log wait ready: slot 0 net id 1, 00 00") && has("log wait ready: slot 2 net id 3 (local), 01 00") &&
+                   !has("log wait ready: slot 1 "),
+               "used trackers only, net id +0x120, local marked, +0x26c / +0x274");
     });
 
     // ---- parity H (parity-h-session.md 7, session.md "Parity group H changes") ----
@@ -2443,9 +2443,8 @@ void new_only_scenarios() {
     });
 
     // ---- frame work team preference (934a6ca; session.md 3.3: slot 0 is the host) ----
-    // A co-op client takes the host's team. The code reads members[host_id] (the host's net id, 1, used as a slot
-    // index: slot 1, another client) instead of slot 0. Left failing: suspected bug.
-    add_new("5.8 co-op client: team preference = the host's team (FAILS: reads slot 1, suspected bug)", [] { client_env(); },
+    // A co-op client takes the team of the host, which is always slot 0.
+    add_new("5.8 co-op client: team preference = the host's team (slot 0)", [] { client_env(); },
             [](const Api &a) {
                 client_party(a);
                 in_sess(0, {2, 0, 4, 3, 'H', 'o', 's', 't', 1, 1, 1, 'M'});
