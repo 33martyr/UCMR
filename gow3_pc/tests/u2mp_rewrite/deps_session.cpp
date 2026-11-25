@@ -374,6 +374,11 @@ void hud_menu_text(float x, float y, float scale, const char *text) {
     hx::rec("hud_menu_text %.1f %.1f %.2f [%s]", x, y, scale, text ? text : "(NULL)");
 }
 void ticker_refresh() { hx::rec("ticker_refresh"); }
+// 2026-11-25: the leaderboard start-over at the Multiplayer button (progression.md 1.5.19) and the help bar
+// shoulder icons of every menu frame (menus.cpp, MENUS.md 3.8.1; not recorded: it only rewrites menu data the
+// session scenarios do not hold)
+void progression_multiplayer_entered() { hx::rec("progression_multiplayer_entered"); }
+void menus_help_bar_frame() {}
 void progression_note_met(const std::vector<std::string> &names) {
     std::string s;
     for (const auto &n : names) s += (s.empty() ? "" : ",") + n;

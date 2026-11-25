@@ -1604,7 +1604,6 @@ void register_handler() {
     }
     const uint32_t count = get<uint32_t>(menu() + 0x24f0);
     if (count != before) log("per-frame page handler registered (%u handlers)", count);
-    progression_register_leaderboard_page();
 }
 
 void unregister_handler() { remove_page_handler(reinterpret_cast<void *>(&page_handler)); }
@@ -1940,6 +1939,7 @@ void draw_version_text() {
 U2MP_GUEST void page_handler(uint32_t *event) {
     if (!event || event[0] != 6) return;   // 6: per-frame update
     draw_version_text();
+    menus_help_bar_frame();   // help bar L1 / R1 pictures (MENUS.md 3.8.1)
     finish_leaving_game();
     leaving_step();
     cleanup_leaving_page();
@@ -2555,6 +2555,7 @@ U2MP_GUEST void button_multiplayer(void *, void *, void *) {
     multiplayer_page_seen = false;
     netheap_install();
     netinit_prepare();
+    progression_multiplayer_entered();   // the PS3 NetInit leaderboard start-over (progression.md 1.5.19)
     netpatch_load();
     if (!active) {
         voice::reset_volume();   // PS3 voice init (NetInit) made the speaker port at full volume each time (J6)

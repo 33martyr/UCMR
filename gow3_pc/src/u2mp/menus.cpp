@@ -5,7 +5,7 @@
 // PSN). This file gives those controls content: the profile panel's name, the party status line,
 // the PS3 playlists of the lobby, the friends list (RPCN online, the party on LAN), the players
 // met, the join game list and the voice volume slider. It also traces a few Profile page queries
-// for diagnostics.
+// for diagnostics, and gives the help bar's Prev / Next entries shoulder button pictures again.
 //
 // A query reaches us either through the query table (we swap the entry's function pointer and may
 // still call the game's function) or through a jump written over a stripped `ret` stub.
@@ -24,6 +24,7 @@
 #include <vector>
 
 #include "frontend3.h"
+#include "host_memory.h"
 #include "online.h"
 #include "progression.h"
 #include "session_api.h"
@@ -739,6 +740,47 @@ template <size_t... N> constexpr auto make_tracers(std::index_sequence<N...>) {
     return std::array<QueryFn, sizeof...(N)>{&tracer<int(N)>...};
 }
 
+// ---- help bar shoulder icons (MENUS.md 3.8.1) ------------------------------------------------------------
+// Four help-bar records (0x18 bytes, read-only data: u64 +0 token string, u32 +8 menu action, ...) carry the tokens
+// "|L1-NOSWAP| " / "|R1-NOSWAP| ", which the PS4 text printer no longer knows, so no picture was drawn. They are
+// pointed at our "|L1| " / "|R1| " instead: action 0xb (previous) gets L1 and 0xa (next) R1, the other way round
+// while the PS4 exchange word is set.
+
+constexpr uint64_t kShoulderSetting = 0x1059640 + 0x4888;    // u32: 0 = L2 / R2 run Prev / Next
+constexpr uint64_t kShoulderExchange = 0x1059640 + 0x4870;   // u32: != 0 exchanges Prev / Next
+constexpr uint8_t kActionPrev = 0xb;   // the other records' action is 0xa (next)
+
+struct HelpRecord {
+    uint64_t offset;
+    uint8_t tail[16];   // bytes +8..+0x17: action, text id, callback id, shown
+};
+const HelpRecord kHelpRecords[] = {
+    {0x1041710, {0x0b, 0, 0, 0, 0xfb, 0xfd, 0xa2, 0x5b, 0x25, 0x35, 0x68, 0xd1, 1, 0, 0, 0}},   // Leaderboard Prev
+    {0x10416f8, {0x0a, 0, 0, 0, 0x31, 0xa0, 0x94, 0x89, 0xef, 0x68, 0x5e, 0x03, 1, 0, 0, 0}},   // Leaderboard Next
+    {0x1041758, {0x0b, 0, 0, 0, 0x9c, 0x52, 0x42, 0x18, 0xe2, 0x70, 0x29, 0x6b, 1, 0, 0, 0}},
+    {0x10417a0, {0x0a, 0, 0, 0, 0x88, 0x4b, 0x35, 0x90, 0x72, 0xcc, 0x0e, 0x13, 1, 0, 0, 0}},   // Multiplayer Store
+};
+const char kTokenL1NoSwap[] = "|L1-NOSWAP| ";   // at 0xe8957b
+const char kTokenR1NoSwap[] = "|R1-NOSWAP| ";   // at 0xe8956e
+const char kIconL1[] = "|L1| ";
+const char kIconR1[] = "|R1| ";
+
+bool help_bar_ok = false;
+bool help_bar_values_logged = false;
+int help_bar_logged = -1;   // the exchange state last logged (-1: none yet)
+
+void check_help_bar() {
+    help_bar_ok = false;
+    bool same = image.matches(0xe8957b, reinterpret_cast<const unsigned char *>(kTokenL1NoSwap), sizeof kTokenL1NoSwap) &&
+                image.matches(0xe8956e, reinterpret_cast<const unsigned char *>(kTokenR1NoSwap), sizeof kTokenR1NoSwap);
+    for (const HelpRecord &r : kHelpRecords) same = same && image.matches(r.offset + 8, r.tail, sizeof r.tail);
+    if (!same) {
+        log("menus: help bar shoulder records differ, Prev / Next icons left alone");
+        return;
+    }
+    help_bar_ok = true;
+}
+
 // ---- install ----------------------------------------------------------------------------------------
 
 uint8_t *entry(int i) { return abs_at(kQueryTable + kEntrySize * uint64_t(i)); }
@@ -806,7 +848,38 @@ int32_t playlist_index(uint32_t id) {
     return -1;
 }
 
+void menus_help_bar_frame() {
+    if (!help_bar_ok) return;
+    const bool exchange = get<uint32_t>(abs_at(kShoulderExchange)) != 0;
+    bool written = false;
+    for (const HelpRecord &r : kHelpRecords) {
+        const bool l1 = (r.tail[0] == kActionPrev) != exchange;
+        const uint64_t wanted = reinterpret_cast<uint64_t>(l1 ? kIconL1 : kIconR1);
+        uint8_t *p = abs_at(r.offset);
+        if (get<uint64_t>(p) == wanted) continue;
+        const HostCodeWrite writable(p, 8);   // read-only data: writable for the write, then put back
+        if (!writable.ok()) {
+            log("menus: help bar record 0x%llx cannot be made writable (%lu), Prev / Next icons left alone",
+                (unsigned long long)r.offset, writable.error());
+            help_bar_ok = false;
+            return;
+        }
+        put<uint64_t>(p, wanted);
+        written = true;
+    }
+    if (!written) return;
+    if (!help_bar_values_logged) {
+        help_bar_values_logged = true;
+        log("menus: shoulder setting %u, exchange %u", get<uint32_t>(abs_at(kShoulderSetting)),
+            get<uint32_t>(abs_at(kShoulderExchange)));
+    }
+    if (int(exchange) == help_bar_logged) return;
+    help_bar_logged = int(exchange);
+    log("menus: help bar shoulder icons %s", exchange ? "exchanged" : "L1 / R1");
+}
+
 void install_menus(int &installed) {
+    check_help_bar();
     if (kQueryTable + kQueryEntries * kEntrySize > image.size || get<uint32_t>(entry(0)) != 50 ||
         get<uint64_t>(entry(0) + 8) != reinterpret_cast<uint64_t>(abs_at(kStartMatchQuery))) {
         log("menus: query table 0x%llx differs, menu queries not installed", (unsigned long long)kQueryTable);

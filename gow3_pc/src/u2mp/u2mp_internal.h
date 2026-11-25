@@ -58,6 +58,7 @@ void install_natives(int &installed);   // natives.cpp: the co-op / net script n
 void install_remaining(int &installed); // remaining.cpp: the last stubbed callbacks and Applies
 void mute_players_frame();              // remaining.cpp: Mute Players list callbacks in the table (per session frame)
 void install_menus(int &installed);     // menus.cpp: the multiplayer menu queries (u2mp/docs/MENUS.md)
+void menus_help_bar_frame();            // menus.cpp: help bar L1 / R1 pictures, per menu frame (MENUS.md 3.8.1)
 void install_menuimages(int &installed); // menuimages.cpp: net image ids, lost menu image types (MENUS.md 7)
 void install_unlocks(int &installed); // unlocks.cpp: every MP item unlocked, GOTY skin/booster tables (UNLOCKS.md)
 void install_loading(int &installed);  // loading.cpp: PS3 match loading screen (PORT-FRONTEND4.md)

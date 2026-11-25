@@ -29,7 +29,7 @@ only as hints; every fact below was checked against the PS3 or PS4 binary or dat
 | Scoreboard / result overlay rules | four overlay entries, priority, PS3 fade and slide, open / close sounds, auto-open rules | four entries, PS3 fade rate / priority / slide, sounds, auto open (`0x9766f0`), result pages from the NGM states, dim, menu gate | CHECK; the film parts, the "Leave" test and the two toggle blocks built 2026-11-25 (10.8, 10.10, 10.11; test scenarios 11-13) | M2, M3, sections 9, 10 |
 | Respawn countdown / co-op tries | in the scoreboard header (query cond 44) | the query is intact; the board now opens by itself on death | CHECK | M4 |
 | Film spectating HUD | score panel and the watched player's name at the top, boosters on the left, compact camera bar | theater bar only | COVERED (N1: boosters only in the follow camera) | M6 |
-| Leaderboard tables | 4 boards, global / friends filter, "my page", 11 rows, Rank / badge / name / score columns, footer Filter / Previous / Next / Go to Top | local + RPCN boards, same list object | COVERED | `progression.md` 1.5.11-1.5.15, `parity-a` |
+| Leaderboard tables | 4 boards, global / friends filter, "my page", 11 rows, Rank / badge / name / score columns, footer Filter / Previous / Next / Go to Top | local + RPCN boards, same list object; start-over as PS3 (1.5.19) | COVERED (footer L1 / R1 pictures built from `MENUS.md` 3.8.1, not yet checked in the game) | `progression.md` 1.5.11-1.5.15, 1.5.19, `parity-a` |
 | MP assets (images, icons, sounds, texts, models) | GOTY net.pak, hud.pak, hud.bnk, music stingers, MP vox, DLC voices | net-u2mp.pak (96 images), stingers, DLC voices, all texts | COVERED (two known holes, M11) | `IMPORT.md` audit, `ASSET-INVENTORY.md` |
 
 Ranked list of the work (section 6 repeats it with files).
@@ -268,13 +268,19 @@ the menu manager word PS3 `+0x5b4` that also gates M1; on PS4 it is s32 `[0x1136
   the rosters only while it is 0 (PS3 skips the in-place page draw `0x423410` entirely while it is not 0). DONE
   2026-11-25 (`loading.cpp` `draw_rosters` through `menu_up()`, `loading.md` 4.7).
 
-### Leaderboard tables - COVERED
+### Leaderboard tables - COVERED (footer L1 / R1 pictures built, not yet checked in the game)
 
 Columns, pages, filter and footer are the game's own list (`0x113d960` object, `progression.md` 1.5.11-1.5.15 and
 `parity-a` 2.2-2.4). The rank badge column is image type 0x27 (`menus.md` 2.9). Nothing more is visible on PS3.
 Correction 2026-11-25 (owner: the page showed nothing): the table was never drawn, because nothing on PS4 asked the
-list update to start over when the page opens (column set 0). Fixed by the page shown handler, `progression.md`
-1.5.19; the English mode button reads "Leaderboards" and the footer "Prev" / "Top of List" as on PS3 (`TEXTS.md`).
+list update to start over when the page opens (column set 0). Settled from PS3 the same day (`progression.md`
+1.5.19): PS3 sets the reset request only in its NetInit leaderboard init `0x4ab854` (board 0, Global, my page, once
+per Multiplayer entry) and keeps board / filter / page across visits; ours does the same from the Multiplayer button,
+plus a start-over for a list object that never fetched (the first page-shown handler is replaced). The English mode
+button reads "Leaderboards" and the footer "Prev" / "Top of List" as on PS3 (`TEXTS.md`). Built 2026-11-25 (not yet
+checked in the game): the footer's L1 / R1 pictures. The menu data asks for `|L1-NOSWAP|` / `|R1-NOSWAP|`, tokens the PS4 text printer lacks;
+the PS4 icon font has the pictures (codes 8 / 6). Fix in `MENUS.md` 3.8.1 (menus.cpp points the four records at
+"|L1| " / "|R1| "; no asset or import change).
 
 ## 5. Assets
 
