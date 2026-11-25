@@ -7,7 +7,9 @@
 // button, the PS4 automatic test that opens the board while the local player is dead), fades and slides them like
 // PS3 at the game's own frame step, asks for the menu background dim behind the result pages, runs the update,
 // layout and render of the highest visible entry's page itself while no menu is up, and draws the
-// "|SELECT| Scoreboard  |D-PAD| Camera" line while the local death camera runs. The page's own respawn countdown
+// "|SELECT| Scoreboard  |D-PAD| Camera" line while the local death camera runs. The current task process is asked
+// what PS3 asked it (film camera queries through 0x4c4310, its "Leave" state through 0x9be070), and the button
+// toggle is blocked while L3 is held or the engine pause owner is set. The page's own respawn countdown
 // row (cond 44) needs nothing from us: it answers whenever the scoreboard is drawn. The call may already be wrapped
 // by another module (loading.cpp), so we chain to whatever it reached before.
 //
@@ -114,6 +116,19 @@ constexpr uint64_t fSoundPlay = 0x9b5c20;
 constexpr uint32_t kOpenSound = 0xd9b465e1u;   // sound record "scoreboard-open" (dc1/ps4/audio.bin, menu.bnk)
 constexpr uint32_t kCloseSound = 0x2f118f31u;  // sound record "scoreboard-close"
 
+// The current task process (10.8): u64 slot pointer, u32 id (the HUD passes the full u64 at +8); the engine's event
+// query (10.11) and the "process is in state" test.
+constexpr uint64_t kTaskSlot = 0x1164080;
+constexpr uint64_t kTaskId = 0x1164088;
+constexpr uint64_t fQuery = 0x4c4310;          // reply *(reply, event, slot, id, a0, a1, a2, a3)
+constexpr uint64_t fInState = 0x9be070;        // bool (process *, u32 state id), PS3 0x70db88
+constexpr uint32_t kLeaveState = sid("Leave");
+static_assert(kLeaveState == 0x9f514949u, "state id of \"Leave\"");
+
+// Rule 7 blocks (10.10): the game's held pad word (pad 0) and the engine pause object's owner pointer.
+constexpr uint64_t kHeldButtons = kClock + 0x86c;
+constexpr uint64_t kPauseOwner = 0x10595d8 + 0x18;
+
 constexpr float kTick = 1.0f / 300.0f;
 static_assert(std::bit_cast<uint32_t>(kTick) == 0x3B5A740Eu, "1/300 as a float");
 
@@ -146,6 +161,12 @@ bool dim_ok = false;           // 10.2: menu +0x1030 / +0x1038
 bool hud_alpha_ok = false;     // 10.3: HUD alpha 0x104ed0c
 bool pause_ok = false;         // 10.3: pause scale +0x4c
 bool sound_ok = false;         // 10.9: the one-shot sound pair and the two ids
+bool query_ok = false;         // 10.11: 0x4c4310 and its use by the HUD; 10.8: the task handle writer
+bool clear_ok = false;         // 10.8: the e68ae001 answer (with query_ok)
+bool watch_ok = false;         // 10.8: the 8a87d1da / f498c2b5 answers (with query_ok, film_ok, times_ok)
+bool leave_ok = false;         // 10.8: 0x9be070, the task handle writer and the "Leave" name of both tasks
+bool held_ok = false;          // 10.10: the game's held word +0x86c and its L3 bit (else our raw pad word)
+bool owner_ok = false;         // 10.10: the pause object's owner pointer
 
 overlay::Entries entries;
 float fade[overlay::kEntries] = {};
@@ -158,6 +179,9 @@ bool sound_logged[2] = {};
 bool auto_logged = false;      // the automatic flag as last logged
 bool out_logged = false;       // "every player out" as last logged
 int32_t logged_state = -1;
+int leave_logged = -1;         // the "Leave" state test as last logged (-1: not yet)
+bool clear_logged = false;     // the e68ae001 answer as last logged
+bool watch_logged = false;     // the first film answer to 8a87d1da logged
 uint32_t previous_buttons = 0;
 bool page_log_pending = true;
 
@@ -218,18 +242,65 @@ bool every_player_out() {
     return overlay::every_player_out(t, kPlayerTrackers, peek_image<int32_t>(kNetClock));
 }
 
-// M2 rule 6: PS4 0x9766f0. In a film the flag comes from the film controller, whose query call is not mapped
-// (parity-m-features.md open question 15): false there.
+// 10.11: sends the current task process `event` with four empty argument records and returns its reply. The call
+// itself checks the handle (slot, id, process +0x44, flags +0x34); when nothing answers the reply stays empty (type 0).
+overlay::QueryRecord ask_task(uint32_t event) {
+    alignas(16) overlay::QueryRecord reply{};
+    if (!query_ok) return reply;
+    alignas(16) overlay::QueryRecord args[4] = {};
+    using QueryFn = overlay::QueryRecord *(U2MP_GUEST *)(overlay::QueryRecord *, uint32_t, uint64_t, uint64_t,
+                                                         overlay::QueryRecord *, overlay::QueryRecord *,
+                                                         overlay::QueryRecord *, overlay::QueryRecord *);
+    reinterpret_cast<QueryFn>(image.base + fQuery)(&reply, event, peek_image<uint64_t>(kTaskSlot),
+                                                   peek_image<uint64_t>(kTaskId), &args[0], &args[1], &args[2],
+                                                   &args[3]);
+    return reply;
+}
+
+// 10.8: the current task process (slot pointer and id not 0, the slot holds a process whose +0x44 is the id) is in
+// its state named "Leave" (PS4 0x9be070). `process` gets the resolved process for the log.
+bool task_leaving(const unsigned char *&process) {
+    process = nullptr;
+    if (!leave_ok) return false;
+    const unsigned char *slot = as_ptr(peek_image<uint64_t>(kTaskSlot));
+    const uint32_t id = peek_image<uint32_t>(kTaskId);
+    if (!slot || !id) return false;
+    const unsigned char *p = as_ptr(peek<uint64_t>(slot));
+    if (!p || peek<uint32_t>(p + 0x44) != id) return false;
+    process = p;
+    return reinterpret_cast<bool(U2MP_GUEST *)(const unsigned char *, uint32_t)>(image.base + fInState)(p, kLeaveState);
+}
+
+// M2 rule 6: PS4 0x9766f0. In a film (10.8) the flag comes from the task process's answers instead: the watched
+// player (8a87d1da) died after its last spawn and the camera follows a player (f498c2b5); PS3 asks both every frame.
 bool automatic_flag(bool film) {
-    if (film) {
+    if (!film) return auto_ok && reinterpret_cast<bool(U2MP_GUEST *)()>(image.base + fAutoTest)();
+    if (!watch_ok) {
         if (!film_logged) {
             film_logged = true;
-            log("scoreboard: film playback: the automatic flag from the film controller (8a87d1da / f498c2b5) is not "
-                "mapped, the board does not open by itself");
+            log("scoreboard: film playback: the film queries (8a87d1da / f498c2b5) were not verified, the board does "
+                "not open by itself");
         }
         return false;
     }
-    return auto_ok && reinterpret_cast<bool(U2MP_GUEST *)()>(image.base + fAutoTest)();
+    const overlay::QueryRecord watched = ask_task(overlay::kWatchedPlayer);
+    const overlay::QueryRecord following = ask_task(overlay::kFollowing);
+    overlay::TrackerTimes t[kPlayerTrackers];
+    for (int i = 0; i < kPlayerTrackers; ++i) {
+        const unsigned char *tracker = image.base + kNgm + 0x10 + kTrackerSize * uint64_t(i);
+        t[i].died = peek<int32_t>(tracker + kDiedTime);
+        t[i].spawn = peek<int32_t>(tracker + kSpawnTime);
+    }
+    if (!film_logged || (!watch_logged && overlay::answered(watched))) {
+        film_logged = true;
+        watch_logged = overlay::answered(watched);
+        int32_t index;
+        std::memcpy(&index, watched.value, sizeof index);
+        log("scoreboard: film playback: watched player %s%d, following %s", watch_logged ? "" : "(no answer) ",
+            watch_logged ? int(index) : -1,
+            overlay::answered(following) ? (overlay::answer_true(following) ? "yes" : "no") : "(no answer)");
+    }
+    return overlay::film_automatic(watched, following, t, kPlayerTrackers);
 }
 
 void play_sound(uint32_t id) {
@@ -377,6 +448,36 @@ U2MP_GUEST uint64_t frame_hook(uint64_t a, uint64_t b, uint64_t c) {
         f.notice = notice_ok &&
                    reinterpret_cast<bool(U2MP_GUEST *)(void *)>(image.base + fNotice)(image.base + kHudManager);
         f.pressed = pressed;
+        // Rule 7 blocks (10.10): L3 held, or the engine pause object's owner pointer set.
+        const uint32_t held = held_ok ? peek_image<uint32_t>(kHeldButtons) : buttons;
+        const uint64_t owner = owner_ok ? peek_image<uint64_t>(kPauseOwner) : 0;
+        f.blocked = overlay::button_blocked(held, owner);
+        if (pressed && f.blocked && !f.out)
+            log("scoreboard: button press ignored (%s)", (held & overlay::kL3) ? "L3 held" : "pause owner set");
+    }
+    // Rule 8 (10.8), states 0, 1, 3, 4: a match that ended with reason 3 or 8 keeps the scoreboard while the current
+    // task process is in its state "Leave". Outside multiplayer only logged (the NET_SM safety net above).
+    if (!f.cinema && state != 2 && state != 5 && (f.end_reason == 3 || f.end_reason == 8)) {
+        const unsigned char *process = nullptr;
+        const bool leaving = task_leaving(process);
+        f.leaving = leaving && net_in;
+        if (int(leaving) != leave_logged) {
+            leave_logged = int(leaving);
+            const uint64_t vtable = process ? peek<uint64_t>(process) : 0;
+            const uint64_t base = uint64_t(uintptr_t(image.base));
+            log("scoreboard: task process %s, state \"Leave\": %s (vtable %s0x%llx, end reason %d, NET_SM %d)",
+                process ? "found" : "none", leaving ? "yes" : "no", vtable - base < image.size ? "image+" : "",
+                (unsigned long long)(vtable - base < image.size ? vtable - base : vtable), int(f.end_reason),
+                int(net_sm));
+        }
+    }
+    // After the state rules (10.11): e68ae001 to the current task every frame; only a film's RePlaying state answers.
+    if (net_in && clear_ok) {
+        f.film_clear = overlay::answer_true(ask_task(overlay::kFilmCameraMode1));
+        if (f.film_clear != clear_logged) {
+            clear_logged = f.film_clear;
+            log("scoreboard: film camera mode 1 (e68ae001): %s", clear_logged ? "on, every entry cleared" : "off");
+        }
     }
 
     // M2 rules 6 - 8, then the entry setter's side effects: relayout, the button's sound, the entries' memory.
@@ -399,11 +500,12 @@ U2MP_GUEST uint64_t frame_hook(uint64_t a, uint64_t b, uint64_t c) {
         log("scoreboard: every player out: %s", out_logged ? "yes" : "no");
     }
 
-    char reason[40];
-    if (f.cinema) std::snprintf(reason, sizeof reason, "cinema, NGM state %d", int(state));
+    char reason[64];
+    if (f.film_clear) std::snprintf(reason, sizeof reason, "film camera mode 1, NGM state %d", int(state));
+    else if (f.cinema) std::snprintf(reason, sizeof reason, "cinema, NGM state %d", int(state));
     else if (state == 2)
         std::snprintf(reason, sizeof reason, "%s", r.toggled ? "button" : f.out ? "every player out" : "automatic");
-    else std::snprintf(reason, sizeof reason, "NGM state %d", int(state));
+    else std::snprintf(reason, sizeof reason, "NGM state %d%s", int(state), f.leaving ? ", task leaving" : "");
 
     bool any = false;
     for (int k = 0; k < overlay::kEntries; ++k) {
@@ -619,6 +721,51 @@ void check_facts() {
                check(0x666b8b, {0x85, 0xf6, 0x75, 0x2f, 0x80, 0xf1, 0x01, 0x75, 0x2a, 0x84, 0xdb, 0xb8, 0xe1, 0x65,
                                 0xb4, 0xd9, 0xbe, 0x31, 0x8f, 0x11, 0x2f});
     if (!sound_ok) log("scoreboard: one-shot sound calls / entry setter not as expected, no open / close sounds");
+
+    // 10.8 / 10.11: the task handle writer (its lea names 0x1164080), the query call (prologue, argument copy stop,
+    // delivery flag test) and the HUD's own e68ae001 call of it; then the answers the overlay reads.
+    const bool handle_ok = check(0xa5c7f6, {0x48, 0x8b, 0x43, 0x38, 0x48, 0x8b, 0x48, 0x08, 0x48, 0x8b, 0x40, 0x10, 0x48,
+                                            0x8d, 0x15, 0x77, 0x78, 0x70, 0x00, 0x48, 0x89, 0x42, 0x08, 0x48, 0x89, 0x0a});
+    query_ok = handle_ok &&
+               check(fQuery, {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54, 0x53, 0x48, 0x83,
+                              0xec}) &&
+               check(0x4c4386, {0x41, 0x83, 0x78, 0x10, 0x00, 0x0f, 0x84, 0xc5, 0x00, 0x00, 0x00}) &&
+               check(0x4c4470, {0x0f, 0xb7, 0x4f, 0x34, 0xf6, 0xc1, 0x04, 0x74, 0x72}) &&
+               check(0x57803f, {0x48, 0x8d, 0x85, 0x58, 0xff, 0xff, 0xff, 0x48, 0x89, 0x44, 0x24, 0x08, 0x48, 0x8d, 0x85,
+                                0x70, 0xff, 0xff, 0xff, 0x48, 0x89, 0x04, 0x24, 0xbe, 0x01, 0xe0, 0x8a, 0xe6, 0x48, 0x8d,
+                                0x7d, 0xb8, 0x4c, 0x8d, 0x45, 0xa0, 0x4c, 0x8d, 0x4d, 0x88, 0x4d, 0x89, 0xde, 0xe8, 0xa1,
+                                0xc2, 0xf4, 0xff});
+    if (!query_ok) log("scoreboard: task query call 0x4c4310 / handle 0x1164080 not as expected: no film queries");
+    clear_ok = query_ok && check(0x5e9336, {0x3d, 0x01, 0xe0, 0x8a, 0xe6, 0x75, 0x7a, 0x48, 0x8d, 0x05, 0x4c, 0x16,
+                                            0xb5, 0x00, 0x83, 0xb8, 0x78, 0x06, 0x00, 0x00, 0x01});
+    if (!clear_ok) log("scoreboard: film answer e68ae001 not as expected: film camera mode 1 does not close the board");
+    watch_ok = query_ok && film_ok && times_ok &&
+               check(0x5e91d8, {0x3d, 0xda, 0xd1, 0x87, 0x8a, 0x0f, 0x85, 0xb5, 0x00, 0x00, 0x00, 0x49, 0x8b, 0x46,
+                                0x08, 0x8b, 0x80, 0x68, 0x01, 0x00, 0x00}) &&
+               check(0x5e9206, {0x41, 0xc7, 0x45, 0x30, 0x02, 0x00, 0x00, 0x00}) &&
+               check(0x5e9180, {0x3d, 0xb5, 0xc2, 0x98, 0xf4, 0x0f, 0x85, 0x0d, 0x01, 0x00, 0x00, 0x49, 0x8b, 0x46,
+                                0x08, 0x8a, 0x80}) &&
+               check(0x5e91c4, {0x41, 0xc7, 0x45, 0x30, 0x01, 0x00, 0x00, 0x00});
+    if (!watch_ok) log("scoreboard: film answers 8a87d1da / f498c2b5 not as expected: no automatic board in films");
+
+    // 10.8: the state test, and the name both tasks give their "Leave" state (GoLeave of replay and online).
+    leave_ok = handle_ok &&
+               check(fInState, {0x48, 0x8b, 0x47, 0x50, 0x48, 0x85, 0xc0, 0x74, 0x13, 0x48, 0x8b, 0x00, 0x48, 0x85,
+                                0xc0, 0x74, 0x0e, 0x48, 0x8b, 0x40, 0x10, 0x39, 0x70, 0x18, 0x0f, 0x94, 0xc0, 0xc3}) &&
+               check(0x5e3eab, {0x4c, 0x8d, 0x35, 0x34, 0x40, 0x8a, 0x00}) &&
+               check(0x5eaefb, {0x4c, 0x8d, 0x35, 0xe4, 0xcf, 0x89, 0x00}) &&
+               check(0xe87ee6, {'L', 'e', 'a', 'v', 'e', 0});
+    if (!leave_ok) log("scoreboard: state test 0x9be070 / \"Leave\" not as expected: no scoreboard while leaving");
+
+    // 10.10: held L3 blocks the menu's own START (game's held word +0x86c, bit 0x2); the pause owner tests.
+    held_ok = check(0x5cf51d, {0x41, 0xf6, 0x85, 0x6c, 0x08, 0x00, 0x00, 0x02}) &&
+              check(0x5d0c03, {0x89, 0xd6, 0x83, 0xe6, 0x0a, 0xb8, 0x07, 0x00, 0x00, 0x00, 0x83, 0xfe, 0x08});
+    if (!held_ok) log("scoreboard: held pad word 0x5cf51d not as expected: L3 read from the raw pad word");
+    owner_ok = check(0x5e8e99, {0x48, 0x8d, 0x05, 0x38, 0x07, 0xa7, 0x00, 0x48, 0x83, 0x78, 0x18, 0x00, 0x0f, 0x85,
+                                0xed, 0x03, 0x00, 0x00}) &&
+               check(0x5d05a4, {0x48, 0x8d, 0x05, 0x2d, 0x90, 0xa8, 0x00, 0x48, 0x83, 0x78, 0x18, 0x00, 0x74, 0x0d,
+                                0x41, 0xc7, 0x85, 0x20, 0x10, 0x00, 0x00});
+    if (!owner_ok) log("scoreboard: pause owner 0x10595d8 +0x18 not as expected: no pause block on the button");
 }
 
 }  // namespace

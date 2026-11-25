@@ -47,8 +47,9 @@ struct Frame {
     bool notice = false;       // the HUD notification queue shows a message (0x555550)
     bool out = false;          // every player is out (section 10.6)
     bool pressed = false;      // the scoreboard button went down this frame
-    bool film_entry0 = false;  // film controller in state 9f514949 (open question 13: false)
-    bool film_clear = false;   // the film controller answered e68ae001 with true
+    bool blocked = false;      // a rule 7 block holds (button_blocked): the press is ignored
+    bool leaving = false;      // the current task process is in its state "Leave" (9f514949, PS4 0x9be070)
+    bool film_clear = false;   // the current task process answered e68ae001 with true (film camera mode 1)
 };
 enum class Sound { None, Open, Close };
 struct FrameResult {
@@ -74,6 +75,29 @@ struct TrackerTimes {
 bool tracker_out(const TrackerTimes &t, int32_t clock);
 // Every tracker is out (true for no tracker in use).
 bool every_player_out(const TrackerTimes *trackers, int count, int32_t clock);
+
+// Section 10.11: an argument / reply record of the engine's event query 0x4c4310: 16 value bytes (a bool is the
+// byte at +0, an s32 the u32 at +0), the type at +0x10 (0 = empty / no answer, 1 = bool, 2 = s32, 10 = pointer).
+struct QueryRecord {
+    unsigned char value[16];
+    uint32_t type;
+    uint32_t pad;
+};
+static_assert(sizeof(QueryRecord) == 0x18, "query record size");
+constexpr uint32_t kWatchedPlayer = 0x8a87d1da;   // s32: the tracker index the film camera watches
+constexpr uint32_t kFollowing = 0xf498c2b5;       // bool: the film camera follows a player
+constexpr uint32_t kFilmCameraMode1 = 0xe68ae001; // bool: the film camera mode is 1
+// The record was answered (type not 0); a bool answer is answered and its byte +0 is not 0.
+bool answered(const QueryRecord &r);
+bool answer_true(const QueryRecord &r);
+// 10.8, M2 rule 6 in a film: the watched player (an answered index below `count`) died after its last spawn (10.6
+// condition 1 without the clock part), and the camera follows a player (answered true).
+bool film_automatic(const QueryRecord &watched, const QueryRecord &following, const TrackerTimes *trackers, int count);
+
+// 10.10, M2 rule 7: the button toggle is blocked while L3 is held (PS4 bit 0x2 of the held word, PS3 held bit 0x4000)
+// or the engine pause object's owner pointer is set.
+constexpr uint32_t kL3 = 0x2;
+bool button_blocked(uint32_t held, uint64_t pause_owner);
 
 // ---- team lists' voice column (parity-j-voice-medals.md J4) and the Mute Players lists (parity-n-remaining.md N2) --
 

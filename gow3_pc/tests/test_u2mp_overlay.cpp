@@ -1,6 +1,7 @@
 // u2mp overlay rules test (no game needed): ninja -C out/gpu u2mp-overlay-test
 // The scoreboard / result entry fade, priority and slide rules, the match-state entries, the automatic flag edges
-// and the hint fade (spec parity-m-features.md M1 / M2), and the ticker placement / finished / visible rules on a
+// the button blocks, the "Leave" entry-0 rule, the film query records and film automatic flag (section 10.8 / 10.10 /
+// 10.11) and the hint fade (spec parity-m-features.md M1 / M2), and the ticker placement / finished / visible rules on a
 // stand-in ticker object (spec parity-ticker-respawn.md 1.2 - 1.6), the team lists' voice column rule (spec
 // parity-j-voice-medals.md J4) and the Mute Players list rules (spec parity-n-remaining.md N2).
 #include <cmath>
@@ -149,6 +150,87 @@ static void test_button() {
     f.pressed = true;
     r = update_entries(e, f);
     CHECK(r.sound == Sound::None && !e.shown[0]);
+
+    // Rule 7 blocks (test 11): a blocked press does nothing (no toggle, no sound, mark and speed unchanged).
+    Entries b;
+    b.speed[0] = 1.0f;
+    f = playing(false, true);
+    f.blocked = true;
+    r = update_entries(b, f);
+    CHECK(!b.shown[0] && !b.by_button && b.speed[0] == 1.0f && r.sound == Sound::None && !r.toggled);
+    update_entries(b, playing(false, true));   // released, pressed again: opens
+    CHECK(b.shown[0] && b.by_button);
+    f = playing(false, true);
+    f.blocked = true;
+    r = update_entries(b, f);
+    CHECK(b.shown[0] && b.by_button && r.sound == Sound::None);   // cannot close it either
+
+    CHECK(!button_blocked(0, 0));
+    CHECK(button_blocked(kL3, 0));                       // L3 held (PS4 bit 0x2)
+    CHECK(button_blocked(0x100002, 0));                  // touchpad with L3
+    CHECK(!button_blocked(0x100000 | 0x4 | 0x1, 0));     // touchpad, R3 and other bits: no block
+    CHECK(button_blocked(0, 0x12345678ull));             // pause owner pointer set
+}
+
+static QueryRecord reply(uint32_t type, uint32_t value) {
+    QueryRecord q{};
+    std::memcpy(q.value, &value, sizeof value);
+    q.type = type;
+    return q;
+}
+
+static void test_film_queries() {
+    // Section 10.11 records: answered = type not 0; a bool is byte +0.
+    const QueryRecord none{};
+    CHECK(!answered(none) && !answer_true(none));
+    CHECK(answered(reply(1, 0)) && !answer_true(reply(1, 0)));
+    CHECK(answer_true(reply(1, 1)));
+    CHECK(!answer_true(reply(0, 1)));   // a value without a type is no answer
+    CHECK(answer_true(reply(1, 0x100)) == false);   // only the byte at +0 counts
+
+    // 10.8 film automatic flag: watched tracker died after its last spawn, and following a player.
+    TrackerTimes t[10];
+    t[3].spawn = 100;
+    t[3].died = 200;    // dead
+    t[4].spawn = 300;
+    t[4].died = 200;    // alive again
+    t[5].spawn = 200;
+    t[5].died = 200;    // died == spawn: not after
+    CHECK(film_automatic(reply(2, 3), reply(1, 1), t, 10));
+    CHECK(!film_automatic(reply(2, 3), reply(1, 0), t, 10));   // not following
+    CHECK(!film_automatic(reply(2, 3), none, t, 10));          // following not answered
+    CHECK(!film_automatic(none, reply(1, 1), t, 10));          // watched not answered (outside films)
+    CHECK(!film_automatic(reply(2, 4), reply(1, 1), t, 10));
+    CHECK(!film_automatic(reply(2, 5), reply(1, 1), t, 10));
+    CHECK(!film_automatic(reply(2, 10), reply(1, 1), t, 10));           // index not below 10
+    CHECK(!film_automatic(reply(2, 0xffffffffu), reply(1, 1), t, 10));  // negative index: not used
+    t[3].in_use = false;   // "in use" plays no part here (10.6 condition 1 only)
+    CHECK(film_automatic(reply(2, 3), reply(1, 1), t, 10));
+    CHECK(kWatchedPlayer == 0x8a87d1da && kFollowing == 0xf498c2b5 && kFilmCameraMode1 == 0xe68ae001);
+
+    // Test 12: following the watched player, its death opens the board, its respawn closes it; e68ae001 true closes
+    // the board and the result pages at once.
+    Entries e;
+    Frame f = playing(film_automatic(reply(2, 3), reply(1, 1), t, 10));
+    update_entries(e, f);
+    CHECK(shown_are(e, true, false, false, false) && e.speed[0] == 1.0f);
+    t[3].spawn = 300;
+    f = playing(film_automatic(reply(2, 3), reply(1, 1), t, 10));
+    update_entries(e, f);
+    CHECK(shown_are(e, false, false, false, false));
+    t[3].spawn = 100;
+    f = playing(film_automatic(reply(2, 3), reply(1, 1), t, 10));
+    f.film_clear = true;
+    FrameResult r = update_entries(e, f);
+    CHECK(shown_are(e, false, false, false, false) && r.relayout[0]);   // set by rule 6, then cleared
+    f.film_clear = false;
+    update_entries(e, f);
+    CHECK(shown_are(e, false, false, false, false));   // no new rising edge: stays closed
+    Frame s;
+    s.state = 4;
+    s.film_clear = true;
+    update_entries(e, s);
+    CHECK(shown_are(e, false, false, false, false));   // ROUND_RESULTS cleared too
 }
 
 static void test_states() {
@@ -164,17 +246,33 @@ static void test_states() {
     f.state = 4;
     r = update_entries(e, f);
     CHECK(shown_are(e, false, false, false, true) && r.relayout[3]);
-    // End reason 3 / 8 shows entry 0 in these states only with the film controller state (false outside films).
+    // End reason 3 / 8 shows entry 0 in these states only while the task process is in its state "Leave" (test 13).
     f.state = 0;
     f.end_reason = 3;
     update_entries(e, f);
     CHECK(shown_are(e, false, false, false, false));
-    f.film_entry0 = true;
-    update_entries(e, f);
-    CHECK(shown_are(e, true, false, false, false));
+    f.leaving = true;
+    r = update_entries(e, f);
+    CHECK(shown_are(e, true, false, false, false) && r.relayout[0] && r.sound == Sound::None);
+    f.end_reason = 8;
+    f.state = 1;
+    r = update_entries(e, f);
+    CHECK(shown_are(e, true, false, false, false) && !r.relayout[0]);
     f.end_reason = 1;
     update_entries(e, f);
     CHECK(shown_are(e, false, false, false, false));
+    // In states 3 / 4 the results page replaces it (all flags cleared after the entry-0 rule).
+    f.end_reason = 3;
+    f.state = 3;
+    update_entries(e, f);
+    CHECK(shown_are(e, false, false, true, false));
+    // Leaving with e68ae001 answered true: everything cleared.
+    f.state = 0;
+    f.film_clear = true;
+    update_entries(e, f);
+    CHECK(shown_are(e, false, false, false, false));
+    f.film_clear = false;
+    f.leaving = false;
 
     // State 5: entry 0 shown (speed unchanged), RESULTS / ROUND_RESULTS hidden.
     Entries s;
@@ -404,6 +502,7 @@ int main() {
     test_auto_notice();
     test_every_player_out_rule();
     test_button();
+    test_film_queries();
     test_states();
     test_alpha();
     test_player_out();

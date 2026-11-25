@@ -26,7 +26,7 @@ only as hints; every fact below was checked against the PS3 or PS4 binary or dat
 | Loading screen | black fill, card table in perspective, fort picture, coins, edges, rosters sliding in, band, map name, description, letter-by-letter tip | all of it, PS3 timings | COVERED (the three PS3 details of M10 settled: bars not needed on PC, `cdf70794` no visible effect, roster gate built) | `loading.md`, `PORT-FRONTEND5.md` |
 | Death camera / watching others | native camera kinds (net death, follow teammate, map spot), D-pad cycles | the PS4 code still has them and runs them | COVERED (CHECK) | M5 |
 | Dead-player hint line | "\|SELECT\| Scoreboard    \|D-PAD\| Camera" at the bottom while the death camera runs | drawn while the local death camera runs, PS4 facts of section 10 (2026-11-25, `scoreboard.cpp`) | CHECK; glyph = PS4 icon font code 0x0e (10.12), its picture needs one capture | M1, sections 9, 10 |
-| Scoreboard / result overlay rules | four overlay entries, priority, PS3 fade and slide, open / close sounds, auto-open rules | four entries, PS3 fade rate / priority / slide, sounds, auto open (`0x9766f0`), result pages from the NGM states, dim, menu gate | CHECK; the film parts, the "Leave" test and the two toggle blocks are now specified (10.8, 10.10, 10.11) and still to build | M2, M3, sections 9, 10 |
+| Scoreboard / result overlay rules | four overlay entries, priority, PS3 fade and slide, open / close sounds, auto-open rules | four entries, PS3 fade rate / priority / slide, sounds, auto open (`0x9766f0`), result pages from the NGM states, dim, menu gate | CHECK; the film parts, the "Leave" test and the two toggle blocks built 2026-11-25 (10.8, 10.10, 10.11; test scenarios 11-13) | M2, M3, sections 9, 10 |
 | Respawn countdown / co-op tries | in the scoreboard header (query cond 44) | the query is intact; the board now opens by itself on death | CHECK | M4 |
 | Film spectating HUD | score panel and the watched player's name at the top, boosters on the left, compact camera bar | theater bar only | COVERED (N1: boosters only in the follow camera) | M6 |
 | Leaderboard tables | 4 boards, global / friends filter, "my page", 11 rows, Rank / badge / name / score columns, footer Filter / Previous / Next / Go to Top | local + RPCN boards, same list object | COVERED | `progression.md` 1.5.11-1.5.15, `parity-a` |
@@ -102,7 +102,7 @@ Behaviour to implement:
    is until that capture.
 5. Log once per process when the hint first becomes visible: `scoreboard: death camera hint shown`.
 
-### M2. Scoreboard and result overlay rules (PS3 `0x4cbf00` / `0x4cbc10` first half) - rules 1-8 DONE with the section 10 facts (CHECK; the film parts, the "Leave" test and the rule 7 blocks are specified in 10.8 / 10.10 / 10.11 and still to build, section 9)
+### M2. Scoreboard and result overlay rules (PS3 `0x4cbf00` / `0x4cbc10` first half) - rules 1-8 DONE with the section 10 facts (CHECK; the film parts, the "Leave" test and the rule 7 blocks of 10.8 / 10.10 / 10.11 built too, section 9)
 
 The overlay has four entries (PS4 data at `0x104f544 + 8 + 0x14 x k`: u8 shown, f32 fade, f32 speed, u8 dim flag,
 u32 page id). PS4 data: entry 0 = PAGE_MULTIPLAYER_SCOREBOARD (`f650325d`, speed 1.0, no dim), entry 1 =
@@ -288,9 +288,9 @@ hud.bnk sounds, MP banks, music cues, MP vox and DLC voices, per-mode actors, dc
 ## 6. Ranked missing features
 
 Items 1-6 are built (2026-11-25, section 9; run checks in section 7); 7-10 are settled too (2026-11-25, `parity-n-remaining.md` N1-N4, section 9 items 9-12).
-New since then (specified 2026-11-25, sections 10.8, 10.10, 10.11; to build in `scoreboard.cpp` / `overlay_rules.cpp`):
-the film automatic flag, the `e68ae001` clear, the "Leave" entry-0 rule (also in net matches) and the two toggle
-blocks.
+New since then (specified 2026-11-25, sections 10.8, 10.10, 10.11; built the same day in `scoreboard.cpp` /
+`overlay_rules.cpp`, run checks: test scenarios 11-13): the film automatic flag, the `e68ae001` clear, the "Leave"
+entry-0 rule (also in net matches) and the two toggle blocks.
 
 1. M2 rule 6 + M4: scoreboard opens by itself while dead (with the respawn countdown / co-op tries header).
 2. M1: dead-player hint line "|SELECT| Scoreboard |D-PAD| Camera".
@@ -379,18 +379,18 @@ loading screen) and `menu_up()` (the menu state word, shared with the loading-sc
 
 | Item | Status | What is built |
 |---|---|---|
-| 1. M2 rule 6 + M4: board opens by itself while dead | DONE (CHECK) | auto = PS4 `0x9766f0()` (10.4); HUD notification override `0x555550(0x1130008)` (10.8); "every player out" with threshold 0 and flags A / B from the state record (10.6); the falling edge also closes a board opened by button; the state-5 rule. The old died / spawn stand-in is gone. Films: auto = false as built; TO BUILD: the film rule of 10.8 with the call form of 10.11. Co-op "down": run check (open question 5). |
+| 1. M2 rule 6 + M4: board opens by itself while dead | DONE (CHECK) | auto = PS4 `0x9766f0()` (10.4); HUD notification override `0x555550(0x1130008)` (10.8); "every player out" with threshold 0 and flags A / B from the state record (10.6); the falling edge also closes a board opened by button; the state-5 rule. The old died / spawn stand-in is gone. Films (built 2026-11-25): the film rule of 10.8, `8a87d1da` / `f498c2b5` asked through `0x4c4310` with the call form of 10.11 every frame in state 2 while the film flag is set; no answer = false (CHECK, test scenario 12). Co-op "down": run check (open question 5). |
 | 2. M1: hint line | DONE (CHECK) | 4/s in, 8/s out from the game's frame step (10.1); menu state word `+0x1014` (10.2); death camera `0x664b90` (10.5); A from the HUD alpha `0x104ed0c` with the 1.0 cases (states 3-5, co-op 4 / 8 / 9 / 12, end reason 3 / 8) (10.3); nothing drawn while paused (10.3). `\|SELECT\|` glyph: open question 3. |
 | 3. M2 rules 1-3 | DONE | speed x T / 75 (4.0 / 8.0 per second); priority; slide; page drawn only while the menu state word is 0 (rule 2a). |
 | 4. M2 rule 5: sounds | DONE (CHECK) | "scoreboard-open" / "scoreboard-close" by id (10.9; the PS4 entry setter's bytes checked). |
 | 5. M2 rule 4: dim | DONE (CHECK) | menu `+0x1030` = ease, `+0x1038` = 1 when the byte is 0 (first request wins), also while a menu is up (10.2). |
-| 6. M2 rule 8: pages from match states | DONE (CHECK) | from NGM state, sub-state `ngm+0x1e88` and end reason `ngm+0x1e84` incl. the state 5 / sub-state 3 quirk and the per-frame relayout in states 3 / 4. The 12 s / 60 s timers, `show_round_results()` and the `UNCHARTED_U2MP_SCOREBOARD_STATES` opt-in are removed; the debug request bytes are not implemented (entry 1 never shows). Built with the entry-0 state test and `e68ae001` as false; TO BUILD: the "Leave" test (10.8, also in net matches) and the `e68ae001` clear (10.11). Safety net kept: outside multiplayer (NET_SM <= 1) the rules run as state 0. |
-| 7. M2 rule 7: button blocks | DONE except two blocks | only in state 2, never while every player is out. TO BUILD: the two blocks of 10.10 (L3 held = PS4 held bit 0x2; pause owner pointer `[0x10595d8 + 0x18]` not 0). |
+| 6. M2 rule 8: pages from match states | DONE (CHECK) | from NGM state, sub-state `ngm+0x1e88` and end reason `ngm+0x1e84` incl. the state 5 / sub-state 3 quirk and the per-frame relayout in states 3 / 4. The 12 s / 60 s timers, `show_round_results()` and the `UNCHARTED_U2MP_SCOREBOARD_STATES` opt-in are removed; the debug request bytes are not implemented (entry 1 never shows). Built 2026-11-25: the "Leave" test (10.8, PS4 `0x9be070` on the resolved task handle, also in net matches; CHECK, test scenario 13 and open question 16) and the `e68ae001` clear (10.11, asked every frame in every state while NET_SM > 1; CHECK, test scenario 12). Safety net kept: outside multiplayer (NET_SM <= 1) the rules run as state 0 (the "Leave" answer is then only logged). |
+| 7. M2 rule 7: button blocks | DONE (CHECK) | only in state 2, never while every player is out; the two blocks of 10.10 (built 2026-11-25): L3 held = PS4 held bit 0x2 of `[0x1116180 + 0x86c]` (our raw pad word when that word's bytes differ), pause owner pointer `[0x10595d8 + 0x18]` not 0 (test scenario 11). |
 | 8. Loading-screen roster gate (M10 c) | DONE (CHECK) | rosters drawn only while `menu_up()` is false (`loading.md` 4.7). |
 | 9-12 (M6, M7, M9, M10 b) | DONE (M6, M7, M9: CHECK in game) | Built 2026-11-25 (`parity-n-remaining.md` 10): M6 = N1 (booster condition fixed), M7 = N2 (Mute Players toggle, remaining.cpp), M9 = N3 (overlay version 6 keeps Multiplayer Medals on the no-save main menus), M10 b = N4 (nothing to do). Resolved by static reading in `parity-n-remaining.md`: M6 = N1 (one inverted booster condition, no separate name element), M7 = N2 (rows covered, toggle missing; same item as J5), M9 = N3 (PS3 button on the no-save main menu; our overlay removes it), M10 b = N4 (not a setting, no visible effect). |
 
-Remaining visible differences from PS3: everything still marked TO BUILD above (all PS4 facts are now in section
-10), the `|SELECT|` glyph picture (3) and the run checks 5 and 16. Owner rules that touch this overlay: minimum 2
+Remaining visible differences from PS3: none known from the code (everything of section 10 is built); left are the
+`|SELECT|` glyph picture (3) and the run checks 5 and 16 (test scenarios 11-14). Owner rules that touch this overlay: minimum 2
 players in every mode, 1 in co-op (the "every player out" test then covers the lone co-op player: when that player is out, entry 0 stays up and the hint fades);
 trophies are out of scope.
 

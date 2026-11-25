@@ -88,8 +88,8 @@ FrameResult update_entries(Entries &e, const Frame &f) {
             e.by_button = false;
         }
         hide_results();
-        // Rule 7: the button toggles entry 0 with its sound; never while every player is out.
-        if (!f.out && f.pressed) {
+        // Rule 7: the button toggles entry 0 with its sound; never while every player is out or a block holds.
+        if (!f.out && f.pressed && !f.blocked) {
             const bool on = !e.shown[0];
             e.speed[0] = 2.0f;
             set(0, on);
@@ -103,7 +103,8 @@ FrameResult update_entries(Entries &e, const Frame &f) {
         else set(0, true);
         hide_results();
     } else {
-        set(0, f.film_entry0 && (f.end_reason == 3 || f.end_reason == 8));
+        // A match that ended with reason 3 or 8 keeps the scoreboard while its task is leaving.
+        set(0, f.leaving && (f.end_reason == 3 || f.end_reason == 8));
         if (f.state == 3) {
             clear_all();
             set(2, true);
@@ -139,6 +140,22 @@ bool every_player_out(const TrackerTimes *trackers, int count, int32_t clock) {
         if (!tracker_out(trackers[i], clock)) return false;
     return true;
 }
+
+bool answered(const QueryRecord &r) { return r.type != 0; }
+
+bool answer_true(const QueryRecord &r) { return answered(r) && r.value[0] != 0; }
+
+bool film_automatic(const QueryRecord &watched, const QueryRecord &following, const TrackerTimes *trackers, int count) {
+    bool on = false;
+    if (answered(watched)) {
+        uint32_t index;
+        std::memcpy(&index, watched.value, sizeof index);
+        on = count > 0 && index < uint32_t(count) && trackers[index].spawn < trackers[index].died;
+    }
+    return on && answer_true(following);
+}
+
+bool button_blocked(uint32_t held, uint64_t pause_owner) { return (held & kL3) != 0 || pause_owner != 0; }
 
 bool voice_cell_muted(int32_t row_kind, uint32_t list_page, uint32_t tracker_index, uint32_t column_id, bool muted) {
     return row_kind == kPlayerRow && list_page != kPreviousGameList && tracker_index < kTrackers &&

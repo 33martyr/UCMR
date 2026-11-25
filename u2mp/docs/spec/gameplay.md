@@ -153,6 +153,12 @@ the entry rules 6-8, overlay alpha, "every player out", hint) are in `overlay_ru
 | `0xe2186a0c` | text "\|SELECT\| Scoreboard    \|D-PAD\| Camera" (TextDb `0xcddc00`) |
 | `0x3dd780` / `0x9b5c20` | one-shot sound init / play; `d9b465e1` "scoreboard-open", `2f118f31` "scoreboard-close" |
 | `0x5b5450` | menu text-in-rect item (loading.cpp `menu_text_in_rect`) |
+| `0x1164080` / `0x1164088` | the current task process handle: u64 slot pointer, u64 id (low 32 bits compared with process +`0x44`); TaskManagerReplay in a film, TaskManagerOnline in a net match |
+| `0x4c4310` | `reply *(reply, u32 event, u64 slot, u64 id, a0, a1, a2 /* stack +0 */, a3 /* stack +8 */)`: sends a process an event; records 0x18 bytes (16 value bytes, u32 type at +0x10: 0 no answer, 1 bool, 2 s32) |
+| `8a87d1da` / `f498c2b5` / `e68ae001` | task queries answered only by the film's RePlaying state: watched tracker index (s32) / following a player (bool) / film camera mode is 1 (bool) |
+| `0x9be070` | `bool (process *, u32 state id)`: the process is in that state; `9f514949` = sid("Leave") |
+| `0x1116180+0x86c` | u32 held pad word of pad 0 (scePad bits; bit 0x2 = L3) |
+| `0x10595d8+0x18` | u64 engine pause object's owner pointer (0 = none) |
 
 ### 1.4 Behaviour
 
@@ -184,20 +190,35 @@ does not resolve or the record is NULL. True when every tracker is out (also wit
    type 11 = cinema. Sub-state ngm+0x1e88 and end reason ngm+0x1e84 (0 when not verified).
 4. "Pressed" = a pad bit set now, not set in the previous frame and in the button mask (previous value stored every
    frame).
-5. Inputs of the entry rules: out = state 2 and every player out. Only in state 2 outside cinema: the automatic
-   flag = guest `0x9766f0()` (false when not verified; false during film playback, u8 ngm+0x209c set, because the
-   film controller's query call is not mapped, logged once); notice = guest `0x555550(image + 0x1130008)`;
-   pressed. The film entry-0 state test and the `e68ae001` answer are false (open questions 13, 15).
+5. Inputs of the entry rules: out = state 2 and every player out. Only in state 2 outside cinema:
+   - the automatic flag = guest `0x9766f0()` (false when not verified). During film playback (u8 ngm+0x209c set)
+     it comes from the task process instead (`parity-m-features.md` 10.8): ask `8a87d1da` and `f498c2b5` (both,
+     every frame) through `0x4c4310` with the handle's two words and four zeroed argument records, reply zeroed
+     first; auto = `8a87d1da` answered (type not 0) and its u32 index below 10 and that tracker's spawn +0x180 <
+     died +0x17c, and `f498c2b5` answered with byte +0 not 0. No answer counts as false. Logged once (and again on
+     the first answer): `scoreboard: film playback: watched player %s%d, following %s`. False when the queries were
+     not verified (logged once);
+   - notice = guest `0x555550(image + 0x1130008)`; pressed;
+   - blocked (M2 rule 7, 10.10) = bit 0x2 (L3) of the held word u32 `[0x1116180+0x86c]` (our raw pad word when
+     that word was not verified), or u64 `[0x10595d8+0x18]` not 0 (never when not verified). A blocked press logs
+     `scoreboard: button press ignored (L3 held / pause owner set)`.
+   Leaving (M2 rule 8, 10.8): outside cinema, in a state other than 2 and 5 and with end reason 3 or 8, resolve the
+   handle (slot pointer and u32 id not 0, the slot holds a process, process +0x44 == id) and call guest
+   `0x9be070(process, 9f514949)`; leaving = that answer while NET_SM > 1 (outside multiplayer only logged, the
+   safety net of 3). Logged on change: `scoreboard: task process found / none, state "Leave": yes / no (vtable ...,
+   end reason N, NET_SM N)` (test scenario 13, open question 16). Film clear (10.11): while NET_SM > 1, every frame
+   in every state, ask `e68ae001` the same way; clear = answered and byte +0 not 0; logged on change
+   (`scoreboard: film camera mode 1 (e68ae001): on, every entry cleared / off`).
 6. The entry rules (`overlay_rules.cpp update_entries`, `parity-m-features.md` M2 rules 6-8), in this order:
    - cinema: all four flags cleared; state 3 -> entry 2 on, state 4 -> entry 3 on, else entries 2, 3 off;
    - state 2: auto = automatic flag, forced off when notice and not by button. If out, or auto rises: entry 0 on,
      speed 1.0. If auto falls: entry 0 off, speed 1.0, mark cleared. Store auto. If the previous state was 5:
-     entries 3 and 0 off, mark cleared. Entries 2 and 3 off. Then, when not out and pressed: speed 2.0, entry 0
-     toggled, mark = its new value, sound `d9b465e1` (on) / `2f118f31` (off);
+     entries 3 and 0 off, mark cleared. Entries 2 and 3 off. Then, when not out, pressed and not blocked: speed 2.0,
+     entry 0 toggled, mark = its new value, sound `d9b465e1` (on) / `2f118f31` (off); a blocked press changes nothing;
    - state 5: sub-state 3 -> entry 3 on, else entry 0 on (speed unchanged); then entries 2 and 3 off;
-   - any other state: entry 0 = film entry-0 test and end reason 3 or 8 (so off); state 3 -> all cleared, entry 2
-     on; state 4 -> all cleared, entry 3 on; else entries 2 and 3 off;
-   - film `e68ae001` true: all four cleared. Previous state = state.
+   - any other state: entry 0 = leaving and end reason 3 or 8; state 3 -> all cleared, entry 2 on; state 4 -> all
+     cleared, entry 3 on; else entries 2 and 3 off;
+   - film clear: all four cleared. Previous state = state.
    Every time a flag goes from 0 to 1 within these steps (also when cleared and set again in the same frame, as in
    states 3 / 4 every frame) the entry's page, when loaded, gets s32 2 at page+0xf8; the first time in the process
    also logs `scoreboard: page %08x %s` (`found` / `NOT FOUND`), which result pages are loaded and the page count.
@@ -269,7 +290,13 @@ In this order:
    "every player out" never holds); death camera (10.5: `0x664b90`; off: no hint); HUD notification (10.8:
    `0x555550`; off: no override); dim (10.2: `0x5d06a4`, `0x5d0704`, `0x5d1afd`; off: no dim); HUD alpha (10.3:
    `0x555cd1`; off: A = 1.0); pause (10.3: `0x3faf57`; off: drawn while paused); sounds (`55 48 89 e5` at
-   `0x3dd780` and `0x9b5c20`, and 10.9 `0x666b8b`; off: silent). The menu state word (`menu_up()`, loading.cpp)
+   `0x3dd780` and `0x9b5c20`, and 10.9 `0x666b8b`; off: silent); task query (10.8 handle writer `0xa5c7f6`, 10.11
+   `0x4c4310`, `0x4c4386`, `0x4c4470`, the HUD call `0x57803f`; off: no film queries) with its answers `e68ae001`
+   (`0x5e9336`; off: no film clear) and `8a87d1da` / `f498c2b5` (`0x5e91d8`, `0x5e9206`, `0x5e9180`, `0x5e91c4`,
+   also needing the film flag and tracker times; off: no automatic board in films); "Leave" test (`0xa5c7f6`,
+   `0x9be070`, the GoLeave name loads `0x5e3eab` / `0x5eaefb` and the string "Leave" at `0xe87ee6`; off: leaving
+   false); held word (10.10 `0x5cf51d`, `0x5d0c03`; off: L3 from the raw pad word); pause owner (`0x5e8e99`,
+   `0x5d05a4`; off: no pause block). The menu state word (`menu_up()`, loading.cpp)
    checks its own bytes on first use (10.2: `0x5e5b82`, `0x665151`, `0x4cbc18`; off: "no menu up", logged once).
 5. The current target = `0x3fc532 + rel32` (as an image offset; it may lie outside the image when another module
    already retargeted the call). Remember its absolute address as the previous target.
@@ -293,11 +320,16 @@ The image is not checked for NULL here.
 - The once-only page log (first show only), with the page absent on the first show.
 - Unit test `u2mp-overlay-test`: fades speed x ticks / 75 (4 / 8 per second), entry priority, slide in from above /
   out below, the entry rules (automatic edges, falling edge after a button open, notification override, every
-  player out, button toggle and sounds, states 3 / 4 / 5 / cinema, state-5 and sub-state-3 quirks, film clear),
-  overlay alpha, "every player out" times and flags, hint 4 / 8 per second and its conditions.
+  player out, button toggle and sounds, blocked presses, states 3 / 4 / 5 / cinema, state-5 and sub-state-3
+  quirks, entry 0 while leaving with end reason 3 / 8, film clear), the query records (answered / bool), the film
+  automatic flag (watched index, died after spawn, following, no answer), the button blocks, overlay alpha, "every
+  player out" times and flags, hint 4 / 8 per second and its conditions.
 - In the game (`parity-m-features.md` 7): death in Team Deathmatch opens the board at 4/s without sound with
   "Respawn in [A]..." and the hint line, both go on respawn (also when opened by button); the button opens / closes
-  it at 8/s with the two sounds; RESULTS / ROUND_RESULTS exactly in NGM states 3 / 4, dimmed background.
+  it at 8/s with the two sounds; RESULTS / ROUND_RESULTS exactly in NGM states 3 / 4, dimmed background; with L3
+  held the button does nothing; in a film the board follows the watched player's death while following, and film
+  camera mode 1 closes everything; a match ending with reason 3 / 8 keeps the board while the task leaves
+  (scenarios 11-13).
 
 ---
 
