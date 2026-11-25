@@ -47,6 +47,7 @@ constexpr uint64_t kBox = 0x1400000, kClockObj = 0x1410000, kEvent = 0x1420000, 
                    kWriteStub = 0x1422000, kTask = 0x1430000, kState = 0x1440000, kArgs = 0x1450000, kSession = 0x1460000,
                    kForeign = 0x1470000, kThunk = 0x700000;
 constexpr uint64_t kSlotWRE = 0x100abd0, kSlotOLE = 0x100a9c8, kSlotRPE = 0x100a7a0, kSlotRLE = 0x100a6d8;
+constexpr uint64_t kSlotRP = 0x100a7d8;   // RePlay::Enter: hooked by the new code only (parity L-C1, E21)
 
 struct TStream {
     uint32_t *data;
@@ -121,6 +122,7 @@ U2MP_GUEST static void *g_findtask(uint32_t set, uint32_t id) {
     return reinterpret_cast<void *>(addr(kTask));
 }
 U2MP_GUEST static void g_playtask(void *t) { rec("play task %s", hx::where(t).c_str()); }
+U2MP_GUEST static void orig_rpenter(void *st);   // the game's RePlay::Enter, below the entry points
 
 // ---- the fake image --------------------------------------------------------------------------------------------
 static const uint8_t kPump[] = {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55, 0x41, 0x54, 0x53, 0x48, 0x81, 0xe4};
@@ -159,6 +161,7 @@ static void build_image() {
     hx::stub_ptr(kSlotOLE, 0x5f00d0, reinterpret_cast<void *>(&orig_ole));
     hx::stub_ptr(kSlotRPE, 0x5e8740, reinterpret_cast<void *>(&orig_rpe));
     hx::stub_ptr(kSlotRLE, 0x5e5520, reinterpret_cast<void *>(&orig_rle));
+    hx::stub_ptr(kSlotRP, 0x5e9630, reinterpret_cast<void *>(&orig_rpenter));
     put_bytes(0x5e3f60, kProgress, sizeof kProgress);
     put_bytes(0x5e4060, kCinemaPage, sizeof kCinemaPage);
     put_bytes(0x5e4080, kList, sizeof kList);
@@ -243,6 +246,22 @@ static void E20(int32_t value, uint64_t rcx) {   // r8d = value, cl = local flag
     at<void(U2MP_GUEST *)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t)>(kThunk)(0, 0, 0, rcx,
                                                                                      0xdead00000000ull | uint32_t(value));
 }
+static void E21() { slotcall(kSlotRP); }
+
+// The game's RePlay::Enter as far as the cinema module sees it: zero the cursor and the byte count, pump until data
+// came (1000 pumps stand for the endless wait), read the first u32 (the stream start tag 5 plays, anything else leaves).
+static int g_spins = -1;
+static uint32_t g_tag = 0;
+U2MP_GUEST static void orig_rpenter(void *st) {
+    TStream *s = gs();
+    s->bits = 0, s->bytes = 0;
+    int spins = 0;
+    while (s->bytes == 0 && spins < 1000) E1(), spins++;
+    g_spins = spins;
+    g_tag = s->bytes && s->data ? s->data[0] : 0xffffffffu;
+    rec("orig RePlay::Enter state=%s spins=%d bytes=0x%x tag=%u -> %s", hx::where(st).c_str(), spins, s->bytes, g_tag,
+        g_tag == 5 ? "play" : "Leave");
+}
 
 // ---- sides -----------------------------------------------------------------------------------------------------
 struct Side {
@@ -252,11 +271,25 @@ struct Side {
     void (*record_event)(void *);
     bool (*read_selected)(std::vector<uint8_t> &, std::string &);
     int (*add_received)(const uint8_t *, size_t, const std::string &);
+    uint64_t play_slot;   // the playback state slot the side hooks: old RePlaying::Exit (E8), new RePlay::Enter (E21)
 };
 static Side OLD{"old", &u2mp_old::install_cinema, &u2mp_old::cinema::recording, &u2mp_old::cinema::record_event,
-                &u2mp_old::cinema::read_selected, &u2mp_old::cinema::add_received};
+                &u2mp_old::cinema::read_selected, &u2mp_old::cinema::add_received, kSlotRPE};
 static Side NEW{"new", &u2mp::install_cinema, &u2mp::cinema::recording, &u2mp::cinema::record_event,
-                &u2mp::cinema::read_selected, &u2mp::cinema::add_received};
+                &u2mp::cinema::read_selected, &u2mp::cinema::add_received, kSlotRP};
+
+// Parity L-C1 replaced E8 by E21 at the same install step: the old record gets the new names before the comparison.
+// Everything else L-C1 changes is checked by the new-only scenarios (run_new).
+static void lc1_expected(std::vector<std::string> &r) {
+    static const std::pair<const char *, const char *> map[] = {
+        {"log cinema: RePlaying::Exit (slot 0x100a7a0) -> C++", "log cinema: RePlay::Enter (slot 0x100a7d8) -> C++"},
+        {"log cinema: RePlaying::Exit slot 0x100a7a0 differs, not hooked",
+         "log cinema: RePlay::Enter slot 0x100a7d8 differs, not hooked"},
+    };
+    for (auto &l : r)
+        for (auto &m : map)
+            if (l == m.first) l = m.second;
+}
 
 // ---- state dumps -----------------------------------------------------------------------------------------------
 static void dump(const char *tag, Side &S) {
@@ -376,7 +409,7 @@ static void mkrec(const std::string &name, uint64_t t, size_t stream = 64, bool 
 static void set_env(const char *v) { _putenv_s("UNCHARTED_U2MP_CINEMA", v ? v : ""); }
 
 // install with optional image changes; records the count and what the patches look like
-static void inspect() {
+static void inspect(const Side &S) {
     for (uint64_t off : {0x644ab0ull, 0x66a3d0ull}) {
         if (hx::mem[off] != 0xe9) {
             rec("detour 0x%llx not patched: %s", (unsigned long long)off, hex(hx::mem + off, 17).c_str());
@@ -397,8 +430,11 @@ static void inspect() {
     } else {
         rec("query not patched");
     }
-    for (uint64_t s : {kSlotWRE, kSlotOLE, kSlotRPE, kSlotRLE})
-        rec("slot 0x%llx %s", (unsigned long long)s, slot_host(s) ? "host" : hx::where(reinterpret_cast<void *>(get<uint64_t>(s))).c_str());
+    for (uint64_t s : {kSlotWRE, kSlotOLE, S.play_slot, kSlotRLE}) {
+        const std::string kind = slot_host(s) ? "host" : hx::where(reinterpret_cast<void *>(get<uint64_t>(s)));
+        if (s == S.play_slot) rec("slot playback %s", kind == "img+0x5e8740" || kind == "img+0x5e9630" ? "game" : kind.c_str());
+        else rec("slot 0x%llx %s", (unsigned long long)s, kind.c_str());
+    }
 }
 static int install(Side &S, const std::function<void()> &tweak = {}) {
     build_image();
@@ -406,7 +442,7 @@ static int install(Side &S, const std::function<void()> &tweak = {}) {
     int n = 100;
     S.install(n);
     rec("installed %d", n - 100);
-    inspect();
+    inspect(S);
     return n - 100;
 }
 
@@ -421,6 +457,9 @@ static std::vector<uint8_t> normalized() {
             std::memcpy(s.data() + off, &v, 8);
         }
     }
+    // the two playback slots: each side hooks a different one (inspect records the hooked one, run_new the rest)
+    std::memset(s.data() + kSlotRPE, 0, 8);
+    std::memset(s.data() + kSlotRP, 0, 8);
     return s;
 }
 static void cleanup(Side &S) {
@@ -466,6 +505,7 @@ static void run(const char *name, const Body &body, const std::function<void()> 
         hx::bind_both();
     }
     scenarios++;
+    lc1_expected(r[0]);
     if (hx::same(name, r[0], r[1], &img[0], &img[1])) {
         passed++;
         std::printf("PASS %s (%zu records)\n", name, r[0].size());
@@ -481,6 +521,97 @@ static void open_list(Side &S) {
     E10(6);
     put<int32_t>(kNetMode, 0);
     dump("list", S);
+}
+
+// ---- new-only scenarios (parity L-C1: behaviour the old code did not have) ------------------------------------------
+static const char *g_scenario = "";
+static int g_failed_checks = 0;
+#define EXPECT(c)                                                                     \
+    do {                                                                              \
+        if (!(c)) {                                                                   \
+            std::printf("FAIL %s (line %d): %s\n", g_scenario, __LINE__, #c);         \
+            ++g_failed_checks;                                                        \
+        }                                                                             \
+    } while (0)
+static void run_new(const char *name, const std::function<void()> &body, const std::function<void()> &fs_setup = {}) {
+    hx::clear();
+    hx::bind_both();
+    g_user = g_root + "/user";
+    g_user_null = false;
+    g_now = 1763100000;
+    set_env(nullptr);
+    wipe();
+    if (fs_setup) fs_setup();
+    hx::calls.clear();
+    hx::recording = true;
+    g_scenario = name;
+    const int before = g_failed_checks;
+    body();
+    if (std::getenv("HX_VERBOSE"))
+        for (auto &l : hx::calls) std::printf("   | %s\n", l.c_str());
+    cleanup(NEW);
+    hx::bind_both();
+    scenarios++;
+    if (g_failed_checks == before) {
+        passed++;
+        std::printf("PASS %s (new only, %zu records)\n", name, hx::calls.size());
+    } else {
+        hx::failures++;
+    }
+}
+// record lines from index `from` on that start with `prefix`
+static int lines(const std::string &prefix, size_t from = 0) {
+    int n = 0;
+    for (size_t i = from; i < hx::calls.size(); i++) n += hx::calls[i].rfind(prefix, 0) == 0;
+    return n;
+}
+static int log_lines(size_t from) { return lines("log ", from); }
+// the lowest unused file descriptor: one more while the module holds the film open (fileno is _fileno in the Windows CRT)
+static int lowest_free_fd() {
+    std::FILE *f = std::fopen((g_root + "/fd-probe").c_str(), "wb");
+    if (!f) return -1;
+#ifdef _WIN32
+    const int fd = _fileno(f);
+#else
+    const int fd = fileno(f);
+#endif
+    std::fclose(f);
+    return fd;
+}
+// a film: header, then `words` stream words: the stream start tag 5, word i = i, the end marker 0 as the last word
+static uint32_t film_word(uint64_t i, uint64_t words) { return i == 0 ? 5u : i + 1 == words ? 0u : uint32_t(i); }
+static void mkfilm(const std::string &name, uint64_t t, uint32_t words) {
+    auto v = header(t);
+    for (uint32_t i = 0; i < words; i++) {
+        const uint32_t w = film_word(i, words);
+        v.insert(v.end(), reinterpret_cast<const uint8_t *>(&w), reinterpret_cast<const uint8_t *>(&w) + 4);
+    }
+    write_raw(store() + "/" + name, v);
+}
+// RePlaying / Resetting as far as the stream goes: read on up to film word `until`, pumping like the game, checking
+// every word read. `base` = words the pump dropped since RePlay::Enter. False when the data stops or is wrong.
+static uint64_t g_base = 0;
+static bool play(uint64_t until, uint32_t words) {
+    TStream *s = gs();
+    for (int step = 0; step < 100000; step++) {
+        const uint32_t before = s->bits;
+        E1();
+        if (s->bits < before) g_base += (before - s->bits) / 32;
+        const uint32_t cur = s->bits / 32, avail = s->bytes / 4;
+        if (cur >= avail || s->data[cur] != film_word(g_base + cur, words)) return false;
+        if (g_base + cur >= until) return true;
+        const uint32_t next = uint32_t(std::min<uint64_t>({uint64_t(cur) + 0x400, uint64_t(avail) - 1, until - g_base}));
+        if (next == cur) return false;   // nothing more came: the reader would wait for ever
+        s->bits = next * 32;
+    }
+    return false;
+}
+static bool play_to_end(uint32_t words) { return play(words - 1, words); }
+static void enter_replay() {   // E21 as the game reaches it; the stream restarts at film word 0
+    g_base = 0;
+    g_spins = -1;
+    g_tag = 0;
+    E21();
 }
 
 // close every CRT file descriptor past stderr (the module's open recording): later writes fail
@@ -592,7 +723,6 @@ int main() {
         {"3 online Leave slot past image end (and WaitReady)", [] { hx::set_image_both(hx::mem, kSlotOLE + 7); }},
         {"3 ShowResults not a ret stub", [] { hx::mem[0x5f0ea0] = 0x90; }},
         {"3 online Leave slot differs", [] { put<uint64_t>(kSlotOLE, 0); }},
-        {"3 RePlaying slot differs", [] { put<uint64_t>(kSlotRPE, addr(0x5e8740) + 0x100000000ull); }},
         {"3 replay Leave slot differs", [] { put<uint64_t>(kSlotRLE, 0x5e5520); }},
         {"3 PAGE_PROGRESS differs", [] { hx::mem[0x5e3f60 + 15] ^= 1; }},
         {"3 PAGE_CINEMA differs (byte 17)", [] { hx::mem[0x5e4060 + 17] ^= 1; }},
@@ -619,7 +749,7 @@ int main() {
                                 0x5e4490ull, 0x5e45d0ull, 0x5e41d0ull, 0x5e41e0ull, 0x5e41f0ull, 0x5e42d0ull, 0x5e45a0ull,
                                 0x657e7aull})
                  hx::mem[o] ^= 0x10;
-             for (uint64_t s : {kSlotWRE, kSlotOLE, kSlotRPE, kSlotRLE}) put<uint64_t>(s, 1);
+             for (uint64_t s : {kSlotWRE, kSlotOLE, kSlotRPE, kSlotRP, kSlotRLE}) put<uint64_t>(s, 1);
          }},
     };
     for (const Br &b : breaks) run(b.name, [&b](Side &S) {
@@ -838,10 +968,12 @@ int main() {
     });
 
     // ============================== playback ==============================
+    // E19 no longer fills the stream (L-C1): the scenarios compare the state after the next pump
     run("12a E19 plays the selected file", [](Side &S) {
         open_list(S);
         E12(1);
         E19();
+        E1();
         dump("e19", S);
         E9();
     }, [] { mkrec("a.u2cinema", 5000, 300); mkrec("b.u2cinema", 4000, 0x1234, false, 9); });
@@ -882,7 +1014,6 @@ int main() {
         run(nm, [](Side &S) {
             open_list(S);
             E19();
-            dump("open", S);
             rec("E1 -> %llu", (unsigned long long)E1());
             dump("pump", S);
             for (uint32_t bits : {0x20000u, 0x20001u, 0x7fff0u, 0x30000u, 0xfffffu, 0x41000u, 0x100u, 0xfffffffau, 0u}) {
@@ -895,20 +1026,151 @@ int main() {
             dump("closed", S);
         }, [len] { mkrec("a.u2cinema", 5000, len); });
     }
-    run("14 E8/E9 with and without an open reader", [](Side &S) {
+    run("14 E9 with and without an open reader (E8 is L-C1's, run_new)", [](Side &S) {
         open_list(S);
-        E8();
         E9();
         E19();
-        E8();
-        dump("e8", S);
+        E1();
+        E9();
+        dump("e9 once", S);
         E19();
+        E1();
         E9();
         dump("e9", S);
         E19();
+        E1();
         put<uint32_t>(kC, 5), hx::mem[kC + 0x94] = 7;
         E9();
     }, [] { mkrec("a.u2cinema", 5000, 300); });
+
+    // ============================== parity L-C1 (new only) ==============================
+    // u2mp/docs/spec/parity-l-cinema-progression.md 2.1 and 3: every entry into RePlay reopens the film from its start.
+    static const std::string kFilm = "a.u2cinema";
+    static const auto film_path = [] { return store() + "/" + kFilm; };
+    constexpr uint32_t kBig = 0xc000, kSmall = 0x80;   // stream words: 192 KB (more than the 128 KB buffer), 512 bytes
+    run_new("L-C1 install: E21 in E8's place, RePlaying::Exit left to the game", [] {
+        EXPECT(install(NEW) == 20);
+        EXPECT(lines("log cinema: RePlay::Enter (slot 0x100a7d8) -> C++") == 1);
+        EXPECT(lines("log cinema: RePlaying::Exit") == 0);
+        EXPECT(slot_host(kSlotRP));
+        EXPECT(get<uint64_t>(kSlotRPE) == addr(0x5e8740));
+    });
+    run_new("L-C1 install: RePlay slot differs", [] {
+        EXPECT(install(NEW, [] { put<uint64_t>(kSlotRP, addr(0x5e9631)); }) == 19);
+        EXPECT(lines("log cinema: RePlay::Enter slot 0x100a7d8 differs, not hooked") == 1);
+    });
+    run_new("L-C1a film larger than 128 KB: plays from the stream start", [&] {
+        open_list(NEW);
+        E19();
+        EXPECT(lines("log cinema: playing " + film_path()) == 1);
+        EXPECT(lines("play task") == 1);
+        EXPECT(gs()->bytes == 0);   // opening puts nothing into the stream
+        const size_t mark = hx::calls.size();
+        enter_replay();
+        EXPECT(g_spins == 1 && g_tag == 5);
+        EXPECT(gs()->bytes == 0x20000 && gs()->data[1] == 1 && gs()->data[2] == 2);
+        EXPECT(hx::mem[kC + 0x94] == 1 && get<int32_t>(kC) == 1 && hx::mem[kC + 0x95] == 0);
+        EXPECT(log_lines(mark) == 0);   // the first entry after E19 is no restart
+        EXPECT(play_to_end(kBig));
+        EXPECT(hx::mem[kC + 0x95] == 1);
+    }, [&] { mkfilm(kFilm, 5000, kBig); });
+    run_new("L-C1b film smaller than 64 KB: starts and plays, no hang", [&] {
+        open_list(NEW);
+        E19();
+        enter_replay();
+        EXPECT(g_spins == 1 && g_tag == 5);
+        EXPECT(gs()->bytes == kSmall * 4 && hx::mem[kC + 0x95] == 1);
+        EXPECT(play_to_end(kSmall));
+    }, [&] { mkfilm(kFilm, 5000, kSmall); });
+    run_new("L-C1c film end: plays again from the start, three loops, one open file", [&] {
+        open_list(NEW);
+        E19();
+        enter_replay();
+        const int fd_playing = lowest_free_fd();
+        for (int loop = 0; loop < 3; loop++) {
+            EXPECT(play_to_end(kBig));
+            E8();   // RePlaying::Exit: the game's own, the film stays open
+            EXPECT(hx::mem[kC + 0x94] == 1 && get<int32_t>(kC) == 1);
+            enter_replay();
+            EXPECT(g_spins == 1 && g_tag == 5 && gs()->data[1] == 1);
+            EXPECT(lowest_free_fd() == fd_playing);
+        }
+        EXPECT(lines("log cinema: replay restarts " + film_path()) == 3);
+        EXPECT(lines("orig RePlaying::Exit") == 3);
+        E9();
+        EXPECT(lowest_free_fd() == fd_playing - 1);
+    }, [&] { mkfilm(kFilm, 5000, kBig); });
+    run_new("L-C1d Restart mid-film: from the start", [&] {
+        open_list(NEW);
+        E19();
+        enter_replay();
+        EXPECT(play(kBig / 2, kBig));
+        E8();
+        enter_replay();
+        EXPECT(g_spins == 1 && g_tag == 5 && gs()->bytes == 0x20000 && gs()->data[1] == 1);
+        EXPECT(lines("log cinema: replay restarts " + film_path()) == 1);
+        EXPECT(play_to_end(kBig));
+    }, [&] { mkfilm(kFilm, 5000, kBig); });
+    run_new("L-C1e multi-round film: Resetting keeps the file open, no log line", [&] {
+        open_list(NEW);
+        E19();
+        enter_replay();
+        EXPECT(play(0x3000, kBig));
+        const size_t mark = hx::calls.size();
+        E8();   // RePlaying -> Resetting -> RePlaying: no RePlay::Enter
+        EXPECT(hx::mem[kC + 0x94] == 1 && get<int32_t>(kC) == 1);
+        EXPECT(play(0x9000, kBig));   // the next round continues in the same file
+        E8();
+        EXPECT(play_to_end(kBig));
+        EXPECT(log_lines(mark) == 0);
+    }, [&] { mkfilm(kFilm, 5000, kBig); });
+    run_new("L-C1f quit from the pause menu: Leave closes the film", [&] {
+        open_list(NEW);
+        E19();
+        enter_replay();
+        const int fd_playing = lowest_free_fd();
+        EXPECT(play(0x2000, kBig));
+        E9();
+        EXPECT(lines("orig replay Leave::Enter state=img+0x1440000 C0=0 reading=0") == 1);
+        EXPECT(lowest_free_fd() == fd_playing - 1);
+        const uint32_t bytes = gs()->bytes;
+        E1();
+        EXPECT(gs()->bytes == bytes);
+    }, [&] { mkfilm(kFilm, 5000, kBig); });
+    run_new("L-C1g film unreadable while looping: the film ends, no spin", [&] {
+        open_list(NEW);
+        E19();
+        enter_replay();
+        EXPECT(play_to_end(kSmall));
+        write_raw(film_path(), std::vector<uint8_t>(0x100, 0x5a));   // the file changed under the open handle
+        E8();
+        enter_replay();
+        EXPECT(lines("log cinema: cannot reopen " + film_path() + "; the film ends") == 1);
+        EXPECT(g_spins == 1 && g_tag == 0 && gs()->bytes == 4 && hx::mem[kC + 0x95] == 1);
+        EXPECT(lines("log cinema: replay restarts") == 0);
+        E9();
+        gs()->bytes = 0;
+        E1();   // the empty-film mark is used once
+        EXPECT(gs()->bytes == 0);
+    }, [&] { mkfilm(kFilm, 5000, kSmall); });
+    run_new("L-C1g selection out of range on reopen: (none), the film ends", [&] {
+        open_list(NEW);
+        E19();
+        enter_replay();
+        put<int32_t>(kC + 0x1a4, 7);
+        E8();
+        enter_replay();
+        EXPECT(lines("log cinema: cannot reopen (none); the film ends") == 1);
+        EXPECT(g_spins == 1 && g_tag == 0);
+    }, [&] { mkfilm(kFilm, 5000, kSmall); });
+    run_new("L-C1h unreadable film at start: stays on PAGE_CINEMA, no task", [&] {
+        open_list(NEW);
+        write_raw(film_path(), std::vector<uint8_t>(0x100, 0x5a));
+        E19();
+        EXPECT(lines("log cinema: cannot read " + film_path()) == 1);
+        EXPECT(lines("menu reset") == 0 && lines("find task") == 0 && lines("play task") == 0);
+        EXPECT(gs()->bytes == 4 && hx::mem[kC + 0x95] == 1);
+    }, [&] { mkfilm(kFilm, 5000, kSmall); });
 
     // ============================== menus ==============================
     run("15a E10 events 2/3/4 (flags), 5/7/0/-1 (nothing)", [](Side &S) {
