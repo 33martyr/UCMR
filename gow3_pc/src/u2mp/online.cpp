@@ -41,14 +41,6 @@
 #include <string>
 #include <vector>
 
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
-
 #include "cinema.h"
 #include "frontend3.h"
 #include "online.h"
@@ -210,9 +202,8 @@ bool load() {
         log("online: off (UNCHARTED_U2MP_JOIN is set: LAN join by address)");
         return false;
     }
-    wchar_t path[1024];
-    const DWORD n = GetEnvironmentVariableW(L"UNCHARTED_U2MP_ONLINE_EXE", path, DWORD(sizeof path / sizeof *path));
-    if (!n || n >= sizeof path / sizeof *path) {
+    online_link::Path path;
+    if (!online_link::env_path("UNCHARTED_U2MP_ONLINE_EXE", path)) {
         log("online: off (UNCHARTED_U2MP_ONLINE_EXE not set: no online extension): LAN only");
         return false;
     }

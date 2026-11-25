@@ -14,11 +14,11 @@
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
-#include <windows.h>
 #include <unordered_set>
 #include <array>
 #include <utility>
 
+#include "host_memory.h"
 #include "u2mp_internal.h"
 
 namespace u2mp {
@@ -95,7 +95,7 @@ void netheap_install() {
         log("network heap: context 0x14 already has a heap (%#llx), left alone", (unsigned long long)*slot);
         return;
     }
-    void *memory = VirtualAlloc(nullptr, kBytes, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    void *memory = host_alloc(kBytes);
     if (!memory) {
         log("network heap: no %zu MiB of host memory", kBytes >> 20);
         return;

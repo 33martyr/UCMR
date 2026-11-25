@@ -1,8 +1,8 @@
 // u2mp online link: starts u2_online.exe and speaks u2_online_rpc.h with it (online_link.h).
 //
 // One reader thread takes the program's frames: replies go to the call waiting for them (one call at a time),
-// datagrams and events go to queues that recv / poll read. The program runs in a job object that ends it with
-// this process; closing our pipe end ends it too.
+// datagrams and events go to queues that recv / poll read. The program ends with this process (Windows: a job
+// object; Linux: its parent-death signal); closing our end of its stdin ends it too.
 #include "online_link.h"
 
 #include <algorithm>
@@ -10,6 +10,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <map>
@@ -17,6 +18,7 @@
 #include <thread>
 #include <vector>
 
+#ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -24,6 +26,18 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#else
+#include <cerrno>
+#include <csignal>
+#include <fcntl.h>
+#include <sys/socket.h>
+#include <sys/syscall.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#ifdef __linux__
+#include <sys/prctl.h>
+#endif
+#endif
 
 #include "u2_online_rpc.h"
 
@@ -35,6 +49,249 @@ using namespace u2o_rpc;
 constexpr auto kCallTimeout = std::chrono::seconds(10);
 constexpr auto kHelloTimeout = std::chrono::seconds(10);
 constexpr size_t kMaxQueued = 4096;   // datagrams kept for the game (the oldest go first), as the link itself does
+constexpr size_t kPipeBytes = 1u << 20;
+
+// ---------------------------------------------------------------------------------------------
+// The OS part: starting the program, its stdin / stdout, ending it.
+
+#ifdef _WIN32
+
+struct Program {
+    HANDLE to = nullptr, from = nullptr, process = nullptr, job = nullptr;
+};
+
+bool read_all(Program &p, void *data, size_t n) {
+    auto *b = static_cast<uint8_t *>(data);
+    while (n) {
+        DWORD got = 0;
+        if (!ReadFile(p.from, b, DWORD(std::min<size_t>(n, 1u << 20)), &got, nullptr) || !got) return false;
+        b += got;
+        n -= got;
+    }
+    return true;
+}
+
+bool write_all(Program &p, const void *data, size_t n) {
+    auto *b = static_cast<const uint8_t *>(data);
+    while (n) {
+        DWORD put = 0;
+        if (!WriteFile(p.to, b, DWORD(std::min<size_t>(n, 1u << 20)), &put, nullptr) || !put) return false;
+        b += put;
+        n -= put;
+    }
+    return true;
+}
+
+void end_program(Program &p) { TerminateProcess(p.process, 1); }
+
+std::wstring quoted(const wchar_t *s) {
+    std::wstring q = L"\"";
+    q += s;
+    q += L"\"";
+    return q;
+}
+
+bool launch(const Path &exe, Program &p, std::string &why) {
+    SECURITY_ATTRIBUTES sa{sizeof sa, nullptr, TRUE};
+    HANDLE in_r = nullptr, in_w = nullptr, out_r = nullptr, out_w = nullptr;
+    if (!CreatePipe(&in_r, &in_w, &sa, DWORD(kPipeBytes)) || !CreatePipe(&out_r, &out_w, &sa, DWORD(kPipeBytes))) {
+        why = "no pipe (Windows error " + std::to_string(GetLastError()) + ")";
+        return false;
+    }
+    SetHandleInformation(in_w, HANDLE_FLAG_INHERIT, 0);
+    SetHandleInformation(out_r, HANDLE_FLAG_INHERIT, 0);
+    // the program inherits exactly its two pipe ends
+    SIZE_T attr_size = 0;
+    InitializeProcThreadAttributeList(nullptr, 1, 0, &attr_size);
+    std::vector<uint8_t> attr_buf(attr_size);
+    auto *attrs = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(attr_buf.data());
+    HANDLE inherit[2] = {in_r, out_w};
+    const bool attrs_ok = InitializeProcThreadAttributeList(attrs, 1, 0, &attr_size) &&
+                          UpdateProcThreadAttribute(attrs, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherit, sizeof inherit,
+                                                    nullptr, nullptr);
+    STARTUPINFOEXW si{};
+    si.StartupInfo.cb = sizeof si;
+    si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    si.StartupInfo.hStdInput = in_r;
+    si.StartupInfo.hStdOutput = out_w;
+    si.StartupInfo.hStdError = nullptr;
+    si.lpAttributeList = attrs_ok ? attrs : nullptr;
+    PROCESS_INFORMATION pi{};
+    std::wstring cmd = quoted(exe.c_str());
+    const BOOL made = CreateProcessW(exe.c_str(), cmd.data(), nullptr, nullptr, TRUE,
+                                     CREATE_NO_WINDOW | CREATE_SUSPENDED | (attrs_ok ? EXTENDED_STARTUPINFO_PRESENT : 0),
+                                     nullptr, nullptr, &si.StartupInfo, &pi);
+    const DWORD err = GetLastError();
+    if (attrs_ok) DeleteProcThreadAttributeList(attrs);
+    CloseHandle(in_r);
+    CloseHandle(out_w);
+    if (!made) {
+        CloseHandle(in_w);
+        CloseHandle(out_r);
+        why = "u2_online.exe did not start (Windows error " + std::to_string(err) + ")";
+        return false;
+    }
+    // ends the program with this process, however it ends
+    HANDLE job = CreateJobObjectW(nullptr, nullptr);
+    if (job) {
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION li{};
+        li.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        SetInformationJobObject(job, JobObjectExtendedLimitInformation, &li, sizeof li);
+        AssignProcessToJobObject(job, pi.hProcess);
+    }
+    ResumeThread(pi.hThread);
+    CloseHandle(pi.hThread);
+    p.to = in_w;
+    p.from = out_r;
+    p.process = pi.hProcess;
+    p.job = job;
+    return true;
+}
+
+#else
+
+// The program's process as its keeper thread sees it (never freed, like the client).
+struct Child {
+    std::mutex m;
+    std::condition_variable cv;
+    pid_t pid = 0;           // 0 until fork answered, -1 when it failed
+    int fork_error = 0;
+    bool exited = false;     // ended and about to be reaped: its pid may name another process from now on
+};
+
+// One stream socket pair stands in for the two pipes: the program gets its end as stdin and stdout, ours is
+// read for its frames and written with MSG_NOSIGNAL (a pipe write after the program ended would raise SIGPIPE
+// and end the game; WriteFile only fails).
+struct Program {
+    int fd = -1;
+    Child *child = nullptr;
+};
+
+bool read_all(Program &p, void *data, size_t n) {
+    auto *b = static_cast<uint8_t *>(data);
+    while (n) {
+        const ssize_t got = ::read(p.fd, b, std::min<size_t>(n, 1u << 20));
+        if (got < 0 && errno == EINTR) continue;
+        if (got <= 0) return false;
+        b += got;
+        n -= size_t(got);
+    }
+    return true;
+}
+
+bool write_all(Program &p, const void *data, size_t n) {
+    auto *b = static_cast<const uint8_t *>(data);
+    while (n) {
+        const ssize_t put = ::send(p.fd, b, std::min<size_t>(n, 1u << 20), MSG_NOSIGNAL);
+        if (put < 0 && errno == EINTR) continue;
+        if (put <= 0) return false;
+        b += put;
+        n -= size_t(put);
+    }
+    return true;
+}
+
+void end_program(Program &p) {
+    std::lock_guard<std::mutex> l(p.child->m);
+    if (p.child->pid > 0 && !p.child->exited) kill(p.child->pid, SIGKILL);
+}
+
+// The forked child up to exec: async-signal-safe calls only. Never returns.
+[[noreturn]] void run_child(char *const argv[], int stdio, int devnull, int status, pid_t parent, long max_fd) {
+#ifdef __linux__
+    // ends the program with this process, however it ends (the signal follows the forking thread, the keeper,
+    // which lives until the program ended)
+    prctl(PR_SET_PDEATHSIG, SIGKILL);
+    if (getppid() != parent) _exit(127);   // this process ended before the line above
+#else
+    (void)parent;
+#endif
+    dup2(stdio, 0);
+    dup2(stdio, 1);
+    if (devnull >= 0) dup2(devnull, 2); else ::close(2);   // no stderr, as on Windows
+    // the program inherits exactly its stdin / stdout (and stderr); `status` closes itself on exec
+    bool closed = false;
+#ifdef SYS_close_range
+    closed = (status == 3 || syscall(SYS_close_range, 3u, unsigned(status - 1), 0u) == 0) &&
+             syscall(SYS_close_range, unsigned(status + 1), ~0u, 0u) == 0;
+#endif
+    for (int fd = 3; !closed && fd < max_fd; ++fd)
+        if (fd != status) ::close(fd);
+    execv(argv[0], argv);
+    const int err = errno;
+    ssize_t ignored = write(status, &err, sizeof err);
+    (void)ignored;
+    _exit(127);
+}
+
+bool launch(const Path &exe, Program &p, std::string &why) {
+    int pair[2], status[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, pair) != 0) {
+        why = "no pipe (error " + std::to_string(errno) + ")";
+        return false;
+    }
+    if (pipe2(status, O_CLOEXEC) != 0) {
+        why = "no pipe (error " + std::to_string(errno) + ")";
+        ::close(pair[0]);
+        ::close(pair[1]);
+        return false;
+    }
+    const int bytes = int(kPipeBytes);   // as much as the Windows pipes hold (the kernel may give less)
+    for (int fd : pair) setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &bytes, sizeof bytes);
+    const int devnull = ::open("/dev/null", O_WRONLY | O_CLOEXEC);
+    const long max_fd = sysconf(_SC_OPEN_MAX) > 0 ? sysconf(_SC_OPEN_MAX) : 1024;
+    auto *child = new Child;
+    // The keeper thread forks the program and then waits for its end (and reaps it).
+    std::thread([child, exe, stdio = pair[1], devnull, status_w = status[1], parent = getpid(), max_fd] {
+        char *const argv[] = {const_cast<char *>(exe.c_str()), nullptr};
+        const pid_t pid = fork();
+        if (pid == 0) run_child(argv, stdio, devnull, status_w, parent, max_fd);
+        const int err = errno;
+        ::close(stdio);
+        if (devnull >= 0) ::close(devnull);
+        ::close(status_w);
+        {
+            std::lock_guard<std::mutex> l(child->m);
+            child->pid = pid < 0 ? -1 : pid;
+            child->fork_error = err;
+        }
+        child->cv.notify_all();
+        if (pid < 0) return;
+        siginfo_t info{};
+        while (waitid(P_PID, id_t(pid), &info, WEXITED | WNOWAIT) != 0 && errno == EINTR) {
+        }
+        {
+            std::lock_guard<std::mutex> l(child->m);
+            child->exited = true;
+        }
+        waitpid(pid, nullptr, 0);
+    }).detach();
+    int err = 0;
+    {
+        std::unique_lock<std::mutex> l(child->m);
+        child->cv.wait(l, [child] { return child->pid != 0; });
+        if (child->pid < 0) err = child->fork_error;
+    }
+    if (!err) {   // the status pipe closes at exec, or brings exec's error
+        ssize_t got;
+        while ((got = ::read(status[0], &err, sizeof err)) < 0 && errno == EINTR) {
+        }
+        if (got <= 0) err = 0;
+    }
+    ::close(status[0]);
+    if (err) {
+        ::close(pair[0]);
+        why = "u2_online.exe did not start (error " + std::to_string(err) + ")";
+        return false;
+    }
+    p.fd = pair[0];
+    p.child = child;
+    return true;
+}
+
+#endif
+
+// ---------------------------------------------------------------------------------------------
 
 struct Datagram {
     char npid[20];
@@ -42,7 +299,7 @@ struct Datagram {
 };
 
 struct Client {
-    HANDLE to = nullptr, from = nullptr, process = nullptr, job = nullptr;
+    Program program;
     std::mutex call_m;     // one call at a time
     std::mutex write_m;    // whole frames
     std::mutex m;          // everything below
@@ -60,28 +317,6 @@ struct Client {
 };
 Client *g = nullptr;   // never freed: the reader thread may run until the process ends
 
-bool read_all(HANDLE h, void *p, size_t n) {
-    auto *b = static_cast<uint8_t *>(p);
-    while (n) {
-        DWORD got = 0;
-        if (!ReadFile(h, b, DWORD(std::min<size_t>(n, 1u << 20)), &got, nullptr) || !got) return false;
-        b += got;
-        n -= got;
-    }
-    return true;
-}
-
-bool write_all(HANDLE h, const void *p, size_t n) {
-    auto *b = static_cast<const uint8_t *>(p);
-    while (n) {
-        DWORD put = 0;
-        if (!WriteFile(h, b, DWORD(std::min<size_t>(n, 1u << 20)), &put, nullptr) || !put) return false;
-        b += put;
-        n -= put;
-    }
-    return true;
-}
-
 void mark_dead() {
     {
         std::lock_guard<std::mutex> l(g->m);
@@ -94,9 +329,9 @@ void reader() {
     std::vector<uint8_t> f;
     for (;;) {
         uint32_t size = 0;
-        if (!read_all(g->from, &size, 4) || !size || size > kMaxFrame) break;
+        if (!read_all(g->program, &size, 4) || !size || size > kMaxFrame) break;
         f.resize(size);
-        if (!read_all(g->from, f.data(), size)) break;
+        if (!read_all(g->program, f.data(), size)) break;
         const uint8_t op = f[0];
         In in(f.data() + 1, size - 1);
         std::unique_lock<std::mutex> l(g->m);
@@ -136,7 +371,7 @@ bool write_frame(Out &o) {
     if (!g || g->dead) return false;
     const std::vector<uint8_t> &f = o.frame();
     std::lock_guard<std::mutex> l(g->write_m);
-    if (write_all(g->to, f.data(), f.size())) return true;
+    if (write_all(g->program, f.data(), f.size())) return true;
     mark_dead();
     return false;
 }
@@ -154,7 +389,7 @@ bool call(Out &o, std::vector<uint8_t> &reply) {
     if (!g->cv.wait_for(l, kCallTimeout, [] { return g->reply_ready || g->dead.load(); }) || !g->reply_ready) {
         if (!g->dead) {   // hung: end it, the game goes on without online
             g->dead = true;
-            TerminateProcess(g->process, 1);
+            end_program(g->program);
         }
         return false;
     }
@@ -172,76 +407,35 @@ uint64_t call_u64(Out &o) {
     return in.ok() ? v : 0;
 }
 
-std::wstring quoted(const wchar_t *s) {
-    std::wstring q = L"\"";
-    q += s;
-    q += L"\"";
-    return q;
-}
-
 }  // namespace
 
-bool start(const wchar_t *exe, std::string &why) {
+bool env_path(const char *name, Path &path) {
+    constexpr size_t kCap = 1024;
+#ifdef _WIN32
+    const std::wstring wide(name, name + std::strlen(name));
+    wchar_t value[kCap];
+    const DWORD n = GetEnvironmentVariableW(wide.c_str(), value, DWORD(kCap));
+    if (!n || n >= kCap) return false;
+    path.assign(value, n);
+#else
+    const char *value = std::getenv(name);
+    if (!value || !*value || std::strlen(value) >= kCap) return false;
+    path = value;
+#endif
+    return true;
+}
+
+bool start(const Path &exe, std::string &why) {
     static bool tried = false;
     if (tried) {
         why = g ? "" : "the online program did not start before";
         return g && !g->dead;
     }
     tried = true;
-    SECURITY_ATTRIBUTES sa{sizeof sa, nullptr, TRUE};
-    HANDLE in_r = nullptr, in_w = nullptr, out_r = nullptr, out_w = nullptr;
-    if (!CreatePipe(&in_r, &in_w, &sa, 1u << 20) || !CreatePipe(&out_r, &out_w, &sa, 1u << 20)) {
-        why = "no pipe (Windows error " + std::to_string(GetLastError()) + ")";
-        return false;
-    }
-    SetHandleInformation(in_w, HANDLE_FLAG_INHERIT, 0);
-    SetHandleInformation(out_r, HANDLE_FLAG_INHERIT, 0);
-    // the program inherits exactly its two pipe ends
-    SIZE_T attr_size = 0;
-    InitializeProcThreadAttributeList(nullptr, 1, 0, &attr_size);
-    std::vector<uint8_t> attr_buf(attr_size);
-    auto *attrs = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(attr_buf.data());
-    HANDLE inherit[2] = {in_r, out_w};
-    const bool attrs_ok = InitializeProcThreadAttributeList(attrs, 1, 0, &attr_size) &&
-                          UpdateProcThreadAttribute(attrs, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherit, sizeof inherit,
-                                                    nullptr, nullptr);
-    STARTUPINFOEXW si{};
-    si.StartupInfo.cb = sizeof si;
-    si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
-    si.StartupInfo.hStdInput = in_r;
-    si.StartupInfo.hStdOutput = out_w;
-    si.StartupInfo.hStdError = nullptr;
-    si.lpAttributeList = attrs_ok ? attrs : nullptr;
-    PROCESS_INFORMATION pi{};
-    std::wstring cmd = quoted(exe);
-    const BOOL made = CreateProcessW(exe, cmd.data(), nullptr, nullptr, TRUE,
-                                     CREATE_NO_WINDOW | CREATE_SUSPENDED | (attrs_ok ? EXTENDED_STARTUPINFO_PRESENT : 0),
-                                     nullptr, nullptr, &si.StartupInfo, &pi);
-    const DWORD err = GetLastError();
-    if (attrs_ok) DeleteProcThreadAttributeList(attrs);
-    CloseHandle(in_r);
-    CloseHandle(out_w);
-    if (!made) {
-        CloseHandle(in_w);
-        CloseHandle(out_r);
-        why = "u2_online.exe did not start (Windows error " + std::to_string(err) + ")";
-        return false;
-    }
-    // ends the program with this process, however it ends
-    HANDLE job = CreateJobObjectW(nullptr, nullptr);
-    if (job) {
-        JOBOBJECT_EXTENDED_LIMIT_INFORMATION li{};
-        li.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-        SetInformationJobObject(job, JobObjectExtendedLimitInformation, &li, sizeof li);
-        AssignProcessToJobObject(job, pi.hProcess);
-    }
-    ResumeThread(pi.hThread);
-    CloseHandle(pi.hThread);
+    Program program;
+    if (!launch(exe, program, why)) return false;
     g = new Client;
-    g->to = in_w;
-    g->from = out_r;
-    g->process = pi.hProcess;
-    g->job = job;
+    g->program = program;
     std::thread(reader).detach();
     std::unique_lock<std::mutex> l(g->m);
     g->cv.wait_for(l, kHelloTimeout, [] { return g->hello != -1 || g->dead.load(); });
@@ -250,7 +444,7 @@ bool start(const wchar_t *exe, std::string &why) {
                              : "u2_online.exe has ABI " + std::to_string(g->hello) + ", this build needs " +
                                    std::to_string(int(U2O_ABI));
         g->dead = true;
-        TerminateProcess(g->process, 1);
+        end_program(g->program);
         return false;
     }
     return true;
