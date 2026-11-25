@@ -4,6 +4,10 @@ Clean-room description of `gow3_pc/src/u2mp/unlocks.cpp`. It says what the code 
 game and the tester can see it. It does not say how to structure the code. Background notes:
 `u2mp/docs/UNLOCKS.md`.
 
+This spec was written from the clean-room rewrite (edef8d6). The changes the code got after it
+(the history squash 934a6ca, no message; commit 6b34909, issue #34) are described where they apply
+and listed in section 12 with their origin; three of them were bugs, fixed on 2026-11-25 (12, B1..B3).
+
 All addresses are image offsets of Uncharted 2 PS4 1.02 (CUSA02320). "Guest" means the game
 image. `B` is `image.base`; an image offset `X` is the absolute address `B + X`. Guest functions
 use the System V x86-64 convention (`U2MP_GUEST` in `u2mp_internal.h`): arguments in rdi, rsi,
@@ -54,7 +58,8 @@ Hook methods:
 
 - `replace_function` at 0xa4bb40 (length 16) and 0xa4d280 (length 16).
 - `retarget_call` at 0x663339, 0x663782 (spawn lookups), 0x5f2f49, 0x609551, 0x609c2b (player
-  data message), 0x6145f5, 0x614688 (random skin picks).
+  data message), 0x6145f5, 0x614688 (random skin picks); since 6b34909 also the twelve table lookup
+  and store name sites of 7 step 3a.
 - Plain host functions called by other files (section 2).
 
 Callers in other files:
@@ -81,7 +86,16 @@ uint32_t unlocks_skin_fingerprint();
 ```
 
 `install_unlocks` is also declared in `u2mp_internal.h` with the same signature. `unlocks.h`
-must keep these four declarations unchanged. Nothing else is exported. No variable is exported.
+must keep these four declarations unchanged. Since 934a6ca it also declares (used by `session.cpp`):
+
+```
+const char *unlocks_local_skin();     // the local hero package of the last skin choice, NULL before one
+const char *unlocks_local_villain();  // the same for the villain side
+void unlocks_apply_slot_skins();      // 5.8, called by session.cpp every frame and at the actor request
+```
+
+Nothing else is exported. No variable is exported. The module calls `session::member_skins(net id,
+hero, villain)` (`session_api.h`): the chosen packages of a party member, false when unknown.
 
 ### 2.2 Entry points the game reaches
 
@@ -93,6 +107,9 @@ must keep these four declarations unchanged. Nothing else is exported. No variab
 | call at 0x663782 (expects 0x56a980) | same | `retarget_call` | same |
 | calls at 0x5f2f49, 0x609551, 0x609c2b (expect 0x6144b0) | build player data message, 6 integer args -> u64 | byte signatures | `uint64_t (u64 a0..a5)` |
 | calls at 0x6145f5, 0x614688 (expect 0x64b430) | random skin pick (list, s32 side) -> u64 | byte signatures | `uint64_t (void *list, int32_t side)` |
+| calls at 0x5aea9d, 0x5aecbe, 0x5aedfe, 0x5aeff0, 0x5b00c7, 0x5b098f, 0x65a4fa, 0xa4ce88, 0xa4d123 (expect 0xa15e70) | symbol lookup (u32 id) -> ptr (store pages, store activation) | none (6b34909) | `void *(uint32_t symbol)` (5.9) |
+| calls at 0x6597e5, 0x6597f3 (expect 0xa15e70) | same (Profile hero / villain lists) | none (6b34909) | same, a separate host function (5.9) |
+| call at 0x5aef11 (expects 0x5aef40) | store item name (entry ptr) -> text ptr | none (6b34909) | `const char *(const uint8_t *entry)` (5.9) |
 
 The host functions for the two spawn lookups are separate functions (they log different site
 texts). The three player data calls share one host function. The two random pick calls share one
@@ -229,6 +246,8 @@ State that lives for the whole process (never reset):
 - bind budget 4 (shared across all symbols and all calls); store rebuild budget 4; "skin choice
   applied at bind" done flag.
 - skin hooks installed flag; forced skin package name (string, may be empty).
+- (934a6ca) the local hero and villain package names (strings, empty until set; 5.6); the slot
+  table (the merged skin table, once built) and ten slot art buffers of 48 bytes (6.3 step 9, 5.8).
 
 The table work in `unlocks_refresh` after the fast check runs under a mutex.
 
@@ -406,6 +425,9 @@ against the build (the ready flag is published after the list is complete).
 
 ### 5.6 Skin choice, random pick, spawn lookup
 
+"Package ptr" of a skin record in the skin choice, the random pick log and the skin id of a name (5.1): for
+positions 0..9 of the merged table, its kept record package (6.3 step 11), else the ptr at +8 (12, B3).
+
 **Apply the skin choice** (`when` text): only when the skin hooks are installed (section 7, step 7) and
 DcFind(0x5a4731d2) is non-NULL (that lookup is made only when the hooks are installed).
 1. forced = 0. If a forced package name is set: forced = skin id of that name (5.1). If forced is
@@ -415,9 +437,12 @@ DcFind(0x5a4731d2) is non-NULL (that lookup is made only when the hooks are inst
 3. Hero side (`hero`, NetPlayerData +0x10c), then villain side (`villain`, +0x110):
    before = the u32 there; (at, pk) = skin index of before. If forced is non-zero: write forced,
    reason `UNCHARTED_U2MP_SKIN`. Else if at < 0: write `sid("mp-hero")`, reason `not in the table:
-   Drake`. Else leave it, reason `kept`. Then if a skins slot is free: (now_at, now) = skin index
-   of the current value; log `skins: %s id %08x (index %d '%s') -> %08x (index %d '%s'): %s` with
-   side, before, at, pk or `-`, the current value, now_at, now or `-`, reason.
+   Drake`. Else leave it, reason `kept`. Then (934a6ca) the skin index of the current value
+   (one more DcFind(0x5a4731d2), always made): when its package ptr is non-NULL and not empty, it
+   becomes the local hero package (hero side) or the local villain package (villain side); else the
+   stored name stays. Then if a skins slot is free: (now_at, now) = skin index of the current
+   value; log `skins: %s id %08x (index %d '%s') -> %08x (index %d '%s'): %s` with side, before, at,
+   pk or `-`, the current value, now_at, now or `-`, reason.
 
 **Player data message hook** (calls at 0x5f2f49, 0x609551, 0x609c2b): apply the skin choice with
 `player data message 0x6144b0`, then guest call 0x6144b0 with the same six integer arguments and
@@ -438,6 +463,23 @@ with site, name or `(null)`, r, id, `loaded` or `not loaded`, the s32 at pkg+0x3
 source of name or `-` when name is NULL, the entry count, `name listed` (alias non-zero) or `name
 NOT listed`. Return r.
 
+After that common part (934a6ca):
+
+- Hook A (`0x663280`): when r is non-NULL and name is non-NULL and not empty, name becomes the
+  local hero package. Return r.
+- Hook B (`0x6636b0`, the remote characters): r non-NULL: return r. Else (the remote PC's skin is a
+  position this table names differently, or a package this PC did not import) pick a model instead
+  of passing NULL on: fallback = the local hero package when set, else the first loaded skin, else
+  `mp-hero`. "First loaded skin": t = DcFind(0x5a4731d2); records i = 0.. while the records ptr is
+  non-NULL, i < count, i < 512: the first record whose package ptr is non-NULL and
+  `package_by_id(sid(package))` is non-NULL gives that package; none: NULL. Then r = guest call
+  0x56a980(table, fallback). NULL: compute the first loaded skin again (its DcFind and
+  `package_by_id` calls are made again) and, when it is non-NULL and differs (strcmp) from
+  fallback, r = 0x56a980(table, it). Still NULL and fallback is not `mp-hero`: r = 0x56a980(table,
+  `mp-hero`). The first time ever this fallback path runs, log `skins: remote model '%s' not
+  loaded; using '%s'` with name or `(null)` and fallback (the text names fallback even when a later
+  lookup gave the model). Return r (may be NULL).
+
 ### 5.7 Fixed order of the extra tables
 
 1. 0xa977dad3, label `net-npc-info`
@@ -445,6 +487,34 @@ NOT listed`. Return r.
 3. 0xbdf0cfd6, label `speakers`
 4. 0xef68c757, label `material parameter set`
 5. 0x1ad223b4, label `default game settings`
+
+### 5.8 unlocks_apply_slot_skins() (934a6ca)
+
+The game spawns the character of net slot k with the skin record whose position is the slot's
+skin index (tracker +0x138). The ten slot art buffers make records 0..9 of the merged table name
+the packages of the players in net slots with ids 1..10, so a remote player's skin no longer
+depends on both PCs having the same table position for it (session.cpp sends the packages by name).
+
+1. No slot table (the merged skin table was not built): return.
+2. hero = the local hero package, villain = the local villain package (NULL when not set).
+   local = the ptr at 0x113b760. Slots: k = 0..9, slot = 0x113b770 + 0x2c0 * k.
+3. For each slot: id = s32 at slot+0x120; skip unless 1 <= id <= 10. index = id - 1. When the slot
+   is not the local one and `session::member_skins(id, h, v)` is true, use h / v instead of the
+   local names. art = the villain name when it is non-NULL, not empty and s32 at slot+0x134 == 1,
+   else the hero name. When art is non-NULL and not empty, copy it into slot art buffer `index`
+   (at most 47 characters and a NUL). Write the buffer's address to record `index`'s package ptr
+   (+8) and write index (u32) to slot+0x138.
+
+No guest calls, no log.
+
+### 5.9 Table lookups at the store and Profile pages (6b34909)
+
+Both host functions (store sites, Profile sites; 2.2) do the same: for symbol 0x5a4731d2 with a
+merged skin table, or 0x92c6db02 with a store copy: when DcFind(symbol) does not return ours,
+BindSymbol(symbol, &ours) (no budget, no log). Then return guest call 0xa15e70(symbol). Other
+symbols: only the guest call. The store name host function returns guest call 0x5aef40(entry)
+unchanged.
+
 
 ---
 
@@ -473,46 +543,74 @@ them that point into our net-patch9 copy stay valid because that copy is never f
 
 ### 6.3 Merged skin table
 
-1. t = net-patch9 symbol 0x5a4731d2. Missing: log `unlocks: net-patch9 has no skin table 0x%08x`,
-   no table.
-2. n = s32 at t+0, recs = ptr at t+8. Layout: PS4 if the skin layout check (recs, n, 0x30, ps4,
-   ours) passes; else converted if the check (recs, n, 0x28, not ps4, ours) passes. Else log
-   `unlocks: net-patch9 skin table (%d records) has an unknown layout; PS4 skins kept` with n, no
-   table.
-3. PS4 stub (captured in 5.4 step 5.1): usable when non-NULL, its count is 1..8 and the skin layout
-   check (its recs, count, 0x30, ps4, not ours) passes.
-4. Allocate 0x10 + 0x30 * (n + usable stub count + 1 + 7) bytes; zero all of it. NULL: no table,
-   no log.
-5. Records 0..n-1 = net-patch9's, in order. PS4 layout: copied whole. Converted: +0, +4, +8 (8
-   bytes), +0x10 (4 bytes; high half stays 0), and the five u32 at +0x14.. go to +0x18, +0x1c,
-   +0x20, +0x24, +0x28.
-6. Each usable PS4 stub record in order: id = u32 at +0x10. Find the first of records 0..n-1 (only
-   the net-patch9 ones) with that u32 at +0x10. Found: overwrite it (count as replaced). Not found:
-   append at the end (count as appended). The record is copied whole (0x30 bytes). Then its package
-   string is copied into a new `netheap_alloc(length + 1, 16)` block and +8 points to the copy (if
-   the allocation fails, +8 keeps the stub's pointer).
-7. Baseball Shirt Drake: if no record so far has u32 +0x10 == `sid("mp-hero-red")`, append one
-   (counts as appended): +0 = 1 (not its index), +4 = 0 (hero), +8 = ptr to a static host string
-   `mp-hero-red`, +0x10 = the id, +0x18 / +0x1c / +0x20 = the values of 9.2, rest 0.
-8. Campaign skins: each of the 7 entries of 9.1 in order: if no record so far has its id at
-   +0x10, append one (counts as appended): +0 = its own index in the table, +4 = 1 for villain,
-   0 for hero, +8 = ptr to a static host string with its package name, +0x10 = id, +0x18 name,
-   +0x1c photo, +0x20 icon, rest 0.
-9. Header: s32 count at +0, ptr (block + 0x10) at +8.
-10. Fingerprint: fp = 0; for each record in order: fp = `sid(text, fp)` where text is the u32 at
+The rules below are the code since 934a6ca and 6b34909 (section 12 says which step came from
+which), with the three corrections of 2026-11-25 (12, B1..B3).
+
+1. t = net-patch9 symbol 0x5a4731d2 (may be NULL). n = s32 at t+0 (0 when t is NULL), recs = ptr
+   at t+8.
+2. Layout of net-patch9's records:
+   - PS4 layout (stride 0x30) when the skin layout check (recs, n, 0x30, ps4, ours) passes (the
+     rewrite's rule; 6b34909 had dropped it, restored: 12, B1).
+   - Else converted layout (stride 0x28) when recs is non-NULL, 1 <= n <= 512 and
+     `in(recs, 0x28 * n)` (no package name check here: step 6 checks each record).
+   - Else net-patch9 gives no records.
+3. PS4 stub (captured in 5.4 step 5.1): when net-patch9 gives no records and the stub ptr is NULL:
+   no table, no log. The stub's records are usable when its count is 1..8 and the skin layout check
+   (its recs, count, 0x30, ps4, not ours) passes; else it gives 0 records (the stub ptr alone still
+   lets the table be built from the extra records).
+4. Allocate 0x10 + 0x30 * (net-patch9 count (0 when it gives no records) + usable stub count + 8 +
+   7) bytes; zero all of it. NULL: no table, no log.
+5. Adding a record `src` (a 0x30-byte record in the PS4 form): id = u32 at src+0x10, p = the
+   package ptr at src+8. Skip it when id is 0, p is below 0x10000 or not readable host memory
+   (committed, not no-access, not a guard page), or the name at p is empty or has no NUL in its
+   first 63 bytes. Copy the name (length len < 63): a `netheap_alloc(len + 1, 16)` block with the
+   text and a NUL; if that block exists and starts with `mp-`, `costume-` or `hero-`, it is the
+   copy. Else a second `netheap_alloc(len + 1, 16)` block with the text reversed in each group of
+   4 bytes (a last group of 1..3 bytes is reversed in itself) and a NUL; if that block exists and
+   starts with one of the prefixes, it is the copy. Else the copy is the first block (NULL when its
+   allocation failed: skip the record). Then skip the record when a record with the same id is
+   already in the table (the copies made stay allocated). Else append: the 0x30 bytes of src, +8 =
+   the copy.
+6. Records, in this order:
+   1. Each usable PS4 stub record, in stub order (the stub keeps the low positions the game's own
+      player data paths use: Drake 0, Eddy Raja 1).
+   2. Each net-patch9 record in order. PS4 layout: the record as it is. Converted: a zeroed PS4-form
+      record with +4 = its +4, +8 = its +8, +0x10 = its u32 +0x10, +0x18 / +0x1c / +0x20 = its
+      +0x14 / +0x18 / +0x1c, and +0x24 / +0x28 = its +0x20 / +0x24 (the last two: the rewrite's
+      rule, restored, 12, B2; the game reads +0x24 as the package request flag, `0x641af8`).
+7. Baseball Shirt Drake: if no record has u32 +0x10 == `sid("mp-hero-red")`, append one at
+   position c (the current count): +0 = c, +4 = 0, +8 = a `netheap_alloc` copy of `mp-hero-red`
+   (NULL when that allocation fails), +0x10 = the id (u64), +0x18 / +0x1c / +0x20 = the values of
+   9.2, rest 0.
+8. Campaign skins: each entry of 9.1 in order: if no record has its id, append one the same way
+   (+4 = 1 for villain, 0 for hero; +8 = a heap copy of its package name).
+9. Fixed records (6b34909): each entry of 9.1b in order, then each entry of 9.1c in order: at =
+   the last position whose record has its id, else a new position at the end. Write there (as in
+   step 7, with a new heap copy of its package name each time): +0 = at, +4 side, +8, +0x10 id
+   (u64), +0x18 name, +0x1c photo, +0x20 icon; +0x24.. keep what the record had (0 for a new one).
+10. Every record's +0 = its position.
+11. Slot art (934a6ca): for each position i < 10 and < count: keep the record's own package (its
+    ptr, `mp-hero` when NULL) as record package i, copy that text into slot art buffer i (at most 47
+    characters and a NUL) and point the record's +8 at that buffer. 5.8 rewrites these ten during a
+    match. Record package i of a position >= count is none. Wherever this module names the package
+    of a record of the merged table (the skin choice 5.6, the package -> id search, the random pick
+    log, the store copy 6.4), position i < 10 gives record package i, not the slot art (12, B3).
+12. Header: s32 count at +0, ptr (block + 0x10) at +8. This table is also the slot table.
+13. Fingerprint: fp = 0; for each record in order: fp = `sid(text, fp)` where text is the u32 at
     +0x10 printed as `%08x` (8 lowercase hex digits). Log `unlocks: skin table order fingerprint
     %08x (%d records; every PC of a match must log the same)` with fp and count. Store fp.
-11. Labels: for each record in order whose u32 at +0x18 is non-zero and not yet in the list: add
-    (that id, label of the record's package name). The first record wins.
-12. Actor sources: for each record: the actor source of its package name. Count `PS4 game` and
-    `import overlay`. For any other result: if the missing text is shorter than 400 characters and
-    does not already contain the package name as a substring, append a space and the name. Log
-    `unlocks: skin actors: %d records from the PS4 game, %d from the import overlay, missing:%s`
-    with the two counts and ` none` when the missing text is empty, else the missing text.
-13. Publish the labels (ready flag).
-14. Log `unlocks: skin table: %d GOTY records (%s layout) + PS4 %d (%d replaced, %d appended) = %d`
-    with n, `PS4` or `0x28-byte converted`, the usable stub count (0 when not usable), replaced,
-    appended (including steps 7 and 8), count.
+14. Labels: for each record in order whose u32 at +0x18 is non-zero and not yet in the list: add
+    (that id, label of the record's package name; an empty name when the package ptr fails the
+    readable test of step 5). The first record wins.
+15. Actor sources: for each record: the actor source of its package name (empty when the ptr fails
+    the readable test). Count `PS4 game` and `import overlay`. For any other result: if the missing
+    text is shorter than 400 characters and does not already contain the package name as a
+    substring, append a space and the name. Log `unlocks: skin actors: %d records from the PS4
+    game, %d from the import overlay, missing:%s` with the two counts and ` none` when the missing
+    text is empty, else the missing text.
+16. Publish the labels (ready flag).
+17. Log `unlocks: skin table: %d net-patch9 records (%s layout) + PS4/extras = %d` with n (step 1,
+    also when step 2 found no records), `PS4` for the PS4 layout else `converted`, and count.
 
 ### 6.4 Store copy
 
@@ -521,14 +619,20 @@ them that point into our net-patch9 copy stay valid because that copy is never f
 3. Allocate 0x10 + 0x18 * sections. NULL: return. Zero the first 0x10 bytes. Copy the section array
    to block + 0x10.
 4. For each copied section whose id is 0x681022f5 (hero) or 0x4252add5 (villain): n = s32 at +8,
-   items = ptr at +0x10; skip when n <= 0, n > 200 or items NULL. The skins to add are the merged
-   table's records of that side (in table order) whose id is not the u32 at +8 of any of the n
-   items. None: skip. Allocate 0x50 * (n + k). NULL: skip (the section keeps the game's array).
-   Copy the n items. Each added item: a copy of the game's last item (index n-1), then +0 = an
-   unused purchase bit (the fixed bits of 9.1a, else the first free bit from 160 to 287), +4 = 10,
-   +8 = id (u32), +0x18 = 0 (u64), +0x38 = 1 (game-owned content), +0x40 = ptr to the entry's
-   static package string (u64), +0x48 = id (u64). Insert the item after its 9.1a anchor when it
-   has one, else at the end. Set the section's count to n + k and its array ptr to the new array.
+   items = ptr at +0x10; skip when n <= 0, n > 200 or items NULL. The skins to add (934a6ca) are
+   the merged table's records of that side (side u32 +4 == 1 is villain; in table order) whose
+   package ptr passes the readable test of 6.3 step 5, whose id is not the u32 at +8 of any of the
+   n items and not already chosen; without a merged table, the 9.1 entries of that side (their
+   static package strings) the same way. None: skip. Allocate 0x50 * (n + k). NULL: skip (the
+   section keeps the game's array). Copy the n items. Each added item (6b34909): a copy of the
+   game's last item (index n-1), then +0 = a purchase bit, +4 = 10, +8 = id (u32), +0x18 = 0
+   (u64), +0x38 = 1 (game-owned content), +0x40 = the record's package ptr (u64; for records 0..9
+   that is a slot art buffer, 6.3 step 11), +0x48 = id (u64). Purchase bits: before the sections
+   are walked, the bit (+0) of every item of every section with 1..1024 items and a non-NULL array
+   is "used"; an added item takes its 9.1a bit when that is not used, else the first unused bit
+   from 160 to 287, else 287; the bit taken becomes used. Insert the item right after the first row
+   (original or already inserted) whose package (+0x40 of an original item) equals its 9.1a anchor
+   (strcmp), else at the end. Set the section's count to n + k and its array ptr to the new array.
 5. Header: s32 sections at +0, ptr (block + 0x10) at +8. This block becomes the store copy (the
    previous copy, if any, is dropped without freeing).
 6. Log `unlocks: MP store copied with %d added skin item(s) (hero / villain lists)` with the number
@@ -626,6 +730,15 @@ In this order:
    - `replace_function(0xa4bb40, 16, IsLocked host, "item IsLocked (0xa4bb40)")`
    Success: `installed += 1`. Else log `unlocks: IsLocked 0xa4bb40 differs, multiplayer items keep
    their rank conditions`. (Short-circuit: later checks are not made after a failed one.)
+3a. Table lookups (6b34909; made whatever step 3 gave, no byte check): `retarget_call(site,
+   0xa15e70, store host, name)` for each of 0x5aea9d `store list count`, 0x5aecbe `store list
+   count`, 0x5aedfe `store list item`, 0x5aeff0 `store item name`, 0x5b00c7 `store item picture`,
+   0x5b098f `store item page`, 0x65a4fa `store section table`, 0xa4ce88 `store activate skin`,
+   0xa4d123 `store activate skin` (each tried); at least one succeeded: `installed += 1`. Then
+   `retarget_call(0x6597e5, 0xa15e70, Profile host, "profile skin table")` and, only if it
+   succeeded, `retarget_call(0x6597f3, 0xa15e70, Profile host, "profile store table")`; both:
+   `installed += 1`. Then `retarget_call(0x5aef11, 0x5aef40, store name host, "store name probe")`;
+   success: `installed += 1`. No log of their own.
 4. Upgrade level: all of
    - `executable(0xa4d280, 0x80)`
    - 0xa4d280, 41 bytes: `55 48 89 E5 41 57 41 56 41 55 41 54 53 48 83 EC 48 48 89 75 B8 31 C0
@@ -653,7 +766,7 @@ In this order:
 8. Log `unlocks: every multiplayer skin, booster, co-op weapon upgrade and taunt unlocked` when spoof
    is on, else `unlocks: spoof off (UNCHARTED_U2MP_UNLOCKS=off); GOTY tables only`.
 
-`installed` grows by 0 to 4. Install makes no guest calls.
+`installed` grows by 0 to 7 (4 before 6b34909). Install makes no guest calls.
 
 ---
 
@@ -690,8 +803,10 @@ side. Order matters (it fixes the appended record positions and thus the fingerp
 | 6 | `mp-hero-nd` | hero | 0x258034ff = `sid(package)` | 0x9b7568c5 | 0xaa7dcc3a = `sid("general/net/player-photos/hero-nd")` | 0x2534f068 = `sid("general/net/player-icons/hero-nd")` |
 | 7 | `mp-hero-frosty` | hero | 0xf0d8079a = `sid(package)` | 0xaacd3194 | 0x01bf230e | 0xb58cceaa |
 
-The package names are static host strings. The store copy (6.4) points item +0x40 at them, and the
-merged skin table (6.3 step 8) points record +8 at them.
+The merged skin table (6.3 step 8) points record +8 at a net heap copy of the package name (static
+host strings before 6b34909); the store copy (6.4) uses the static strings only when there is no
+merged table. Entries 1 and 2 carry the ids of `mp-hero-lazarevic-fat` and `mp-hero-pirate-nd`
+under other package names; 9.1b rewrites those two records with the matching names.
 
 Note (background only): entries 1, 2, 6 and 7 are GOTY multiplayer skins that normally already have
 a record in net-patch9's skin table, so 6.3 step 8 appends nothing for them with a normal import;
@@ -713,9 +828,32 @@ skins get the first free bit from 160 and are appended.
 | `costume-hero-lazarevic-healed` | `mp-hero-lazarevic` | 15 |
 | `costume-hero-skeleton-sir-francis` | `mp-hero-skeleton-marco` | 14 |
 
+### 9.1b Fixed skin records (6b34909, 5 entries)
+
+Written over the record with the id (or appended) by 6.3 step 9, in this order. Every id is
+`sid(package)`.
+
+| # | package name | side | id | name text id | photo | icon |
+|---|---|---|---|---|---|---|
+| 1 | `mp-hero-nd` | hero | 0x258034ff | 0x9b7568c5 | 0xaa7dcc3a = `sid("general/net/player-photos/hero-nd")` | 0x2534f068 |
+| 2 | `mp-hero-pirate-nd` | villain | 0x5a2e4839 | 0xc0f12cfd | 0x9f8d3fe9 = `sid("general/net/player-photos/pirate")` | 0xb980d32e = `sid("general/net/player-icons/pirate")` |
+| 3 | `mp-hero-lazarevic-fat` | villain | 0x345329d1 | 0xa5e10001 (own text, texts.cpp) | 0x2699dcf8 | 0xff290e47 |
+| 4 | `mp-hero-flynn-frosty` | villain | 0x6628af6b | 0xa5e10002 (own text) | 0xc5a421aa | 0x7197cc0e |
+| 5 | `mp-hero-frosty` | hero | 0xf0d8079a | 0xaacd3194 | 0x01bf230e | 0xb58cceaa |
+
+### 9.1c Skin record corrections (6b34909, 2 entries)
+
+Applied after 9.1b the same way (entry 1 replaces what 9.1b entry 2 wrote).
+
+| # | package name | side | id | name text id | photo | icon |
+|---|---|---|---|---|---|---|
+| 1 | `mp-hero-pirate-nd` | villain | 0x5a2e4839 | 0xa5e10003 (own text) | 0xe226ff59 = `sid("general/net/player-photos/pirate-nd")` | 0xf7309a91 = `sid("general/net/player-icons/pirate-nd")` |
+| 2 | `costume-hero-sol-med-b-1a` | villain | 0xd8f8cbb4 = `sid(package)` | 0x7039261f | 0x59555d94 | 0x14e4258f |
+
 ### 9.2 Baseball Shirt Drake record (1 entry)
 
-Fields: +0 = 1, +4 = 0 (hero), +8 = static host string `mp-hero-red`, +0x10 id 0x76474d48 =
+Fields: +0 = its position (1 before 934a6ca), +4 = 0 (hero), +8 = a heap copy of `mp-hero-red`
+(a static host string before 6b34909), +0x10 id 0x76474d48 =
 `sid("mp-hero-red")`, +0x18 name text id 0x9a88ecdc, +0x1c photo 0xdafcd51b =
 `sid("general/net/player-photos/hero-red")`, +0x20 icon 0xc283da48 =
 `sid("general/net/player-icons/hero-red")`, everything else 0.
@@ -822,6 +960,19 @@ Texts and fingerprint:
 34. `unlocks_text(0)`, before the build, known id, unknown id.
 35. `unlocks_skin_fingerprint()` before (0) and after the build.
 
+Changes after the rewrite (section 12; new build only, `test_unlocks.cpp` new-only worlds):
+
+36. Merged table from a converted net-patch9 with a stub-id duplicate, id 0, a word-swapped name, a
+    name without prefix, a NULL package ptr, a name without NUL in 63 bytes and a duplicate id:
+    order, +0 positions, sides, packages, ids, texts and pictures (9.1b, 9.1c), slot art buffers for
+    positions 0..9, heap copies for the others, fingerprint, summary line, labels (6.3).
+37. A PS4-layout net-patch9 skin table (6.3 step 2; B1).
+38. Skin choice tracking and its extra lookups; spawn A sets the local hero; spawn B fallback order
+    and its one-time line (5.6).
+39. Slot skins: local slot, remote member with a villain team, unknown member, id out of range
+    (5.8); the local choice after 5.8 (B3).
+40. Store / Profile lookups: our table rebound before the game's lookup; other symbols passed (5.9).
+
 ---
 
 ## 11. Ambiguous or risky points
@@ -835,10 +986,61 @@ Texts and fingerprint:
   `log` with `%p`.
 - The values of section 9 must be used exactly and in table order: they fix the appended record
   positions, the added store items and the skin fingerprint.
-- The Baseball Shirt record's +0 is 1, while appended campaign records get their own index. Keep.
+- Since 934a6ca every record's +0 is its position (the rewrite kept the Baseball Shirt record's
+  +0 = 1).
 - `build store copy` during a rebind may return early (the game's new store is invalid) and the
   old copy is bound again.
 - IsLocked re-reads the list ptr after each ConditionMet call but reads the count from the list
   ptr held at the loop test; a NULL list after a call would crash in the old code too.
 - Speakers and npc-info stub records are not validated beyond count and ptr; character attribute
   stub names are read with strlen from guest memory without a bound.
+
+---
+
+## 12. Changes after the rewrite
+
+The rewrite (edef8d6) matched the old code (62fc26b) in `gow3_pc/tests/u2mp_rewrite/test_unlocks.cpp`.
+Then `unlocks.cpp` changed in the history squash 934a6ca (no message; the pre-squash commits are not
+kept in any repository here) and in 6b34909 (fix(uc2mp): add missing character skins in the roster,
+issue #34). 6b34909 also changed 6.4 and 9.1a of this spec; the other points are described here.
+
+| # | origin | change | spec | test |
+|---|---|---|---|---|
+| C1 | 934a6ca | `unlocks.h` exports the local skin packages and `unlocks_apply_slot_skins`; the module calls `session::member_skins` | 2.1 | new-only (scenarios 38, 39) |
+| C2 | 934a6ca | the skin choice remembers the local hero / villain package: one more skin table lookup per side | 5.6 | old record mapped (one lookup per side); scenario 38 |
+| C3 | 934a6ca | spawn A remembers the local hero; spawn B looks up a fallback model when the remote one is missing, with a one-time line | 5.6 | scenario 38 (its lookups read the merged table, which differs from the old one) |
+| C4 | 934a6ca | slot art: records 0..9 name module buffers that 5.8 rewrites per net slot; slot index written to each tracker | 6.3 step 11, 5.8 | scenarios 36, 39 |
+| C5 | 934a6ca | merged table: PS4 stub first, then net-patch9, one record per id (the first wins), every +0 = its position; a table is built from the stub alone when net-patch9 has none; the `has no skin table` / `unknown layout` lines are gone; new summary line | 6.3 | scenario 36 |
+| C6 | 934a6ca, 6b34909 | store copy offers every merged record of the side (934a6ca walked the records 0x10 bytes off: from the table header; 6b34909 reads them from the records ptr) | 6.4 | (store rows follow the merged table) |
+| C7 | 6b34909 | per-record checks and net heap copies of the package names (also of the appended records), word-swapped names, reserve + 8 | 6.3 steps 4, 5, 7, 8 | scenario 36 |
+| C8 | 6b34909 | fixed records 9.1b and corrections 9.1c (own texts 0xa5e10001..3 in texts.cpp) | 6.3 step 9, 9.1b, 9.1c | scenario 36 |
+| C9 | 6b34909 | store rows: purchase bits, anchors (9.1a), +0x38 = 1 | 6.4 | (store rows follow the merged table) |
+| C10 | 6b34909 | twelve table lookup / store name call sites retargeted at install; `installed` up to 7 | 2.2, 5.9, 7 step 3a | old install record mapped (22bc129); scenario 40 |
+
+Because C4, C5, C7 and C8 change the merged table's records, order and heap layout, every old-vs-new
+world that builds the table differs from the first refresh on (the table, the store copy, labels,
+fingerprint and skin logs all follow it). That is the documented change, not mapped as an edit of
+the old record; the new rules are checked by scenarios 36..40.
+
+Bugs found by the differential test, fixed 2026-11-25 (new-only checks "B1".."B3" now pass):
+
+- **B1** (6b34909): a net-patch9 skin table in the PS4 layout was no longer recognised: every table
+  that fits 0x28 * n bytes was read with the 0x28 stride (934a6ca still had the 0x30 branch; the
+  summary line kept printing `PS4` for a stride that could no longer occur). The 0x30 branch is back
+  (6.3 step 2, the rewrite's check with the `+0x14 == 0` test). The importer writes the converted
+  layout (`u2mp/docs/UNLOCKS.md` 3), so real imports did not hit it.
+- **B2** (6b34909): a converted record's fourth and fifth values (+0x20, +0x24) were no longer copied
+  to +0x24 / +0x28 (left 0), so every imported skin was requested with flag 0: StartNetGame's request
+  loop (`0x641aa0`..`0x641b1e`) passes "record +0x24 != 0" to `0x56d170` (`0x641af8`). All five values
+  are copied again, as in the rewrite and 934a6ca (6.3 step 6.2).
+- **B3** (934a6ca): slot art aliased records 0..9: 5.8 rewrites their package names per net slot, so
+  the skin choice (5.6) of a player whose skin is one of records 0..9 (default Drake is record 0)
+  took another player's package as its own and session.cpp sent it as this PC's skin; the random pick
+  log and the store copy rows (+0x40) of those records followed the slot art too. Each record's own
+  package is now kept aside when the slot art is made (6.3 step 11) and these readers use it.
+
+Other points (behaviour as described above, no bug claimed): copies made before the duplicate test
+stay allocated, and 9.1b entry 2 is written and then replaced by 9.1c entry 1 (two copies); slot art
+holds 47 characters while 6.3 step 5 accepts names of up to 62; the readable-memory test of 6.3
+step 5 is `host_readable` (host_memory.h: `VirtualQuery` on Windows, a pipe write on POSIX); the
+spawn B line names the first fallback even when a later lookup gave the model.

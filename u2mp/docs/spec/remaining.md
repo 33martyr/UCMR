@@ -621,6 +621,19 @@ Steps in this exact order (logs and `near_stub` use follow it). "+1" means `inst
       (name, address); skip.
     - else `replace_function(address, 5, fn, name)`; each success counts.
     The successes are added to `installed` after the loop.
+12. **Mute Players row search** (since 50a6b69, `parity-n-remaining.md` N2 and section 10). Always runs, last.
+    The PS4 catch-all list callback `0x5ecb80` finds the row of the two Mute Players lists itself; the port only
+    registers its own row callback for the two ids at run time (`mute_players_frame()`, every session frame) when
+    these bytes are as in PS4 1.02: `0x5ed0ca` `81 fe 8b 82 4c b0` (own list id `0xb04c828b`), `0x5ed076`
+    `81 fe 3c 9f 8d b4` (other list `0xb48d9f3c`), `0x5ed0e9` `8b 90 34 01 00 00` (own team +0x134), `0x5ed102`
+    `8b 91 80 1e 00 00 ff ca` (NGM state - 1), `0x5ed111` `48 8d b1 1c 57 00 00 48 83 c1 08` (the two NetStatGame
+    copies), `0x5ed12d` `44 8b 47 04 41 ff c0 48 8d b9 4c 3e 00 00 48 81 c1 eb 38 00 00` (row + 1, positions, team
+    bytes), and the `lea` at `0x5ed10a` targets NetStatGame (its rel32 at `0x5ed10d`: `0x5ed10a + 7 + rel32 + 8` =
+    the current-copy address). All match: remember "mute lists ok", `installed` += 1, log
+    `mute players page: row search 0x5ed076 / 0x5ed0ca as expected, mute callbacks follow it`. Otherwise log
+    `mute players page: row search in 0x5ecb80 not as expected: selecting a row changes nothing` (nothing is
+    registered later). Differential test: `test_remaining.cpp` `n2_install_expected` (the scenarios' image lacks
+    these bytes, so the old record gets the second line before its `installed` line).
 
 The function never fails as a whole and returns nothing.
 

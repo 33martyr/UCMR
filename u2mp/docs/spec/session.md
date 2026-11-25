@@ -513,7 +513,8 @@ Only when the pointer is non-NULL and event[0] == 6:
 ### 5.4 BUTTON_MULTIPLAYER
 
 In order: log `Multiplayer selected`; `netheap_install()`; `netinit_prepare()`; `netpatch_load()`.
-If not active: start the transport (5.5); on failure (PS3 bootstrap 0x438bc8 without a network, parity group
+If not active: `voice::reset_volume()` (parity J6, commit dc349a9: PS3 NetInit made the speaker port at full volume
+on every online start), then start the transport (5.5); on failure (PS3 bootstrap 0x438bc8 without a network, parity group
 D 2.1) log `Multiplayer could not start: network message, staying in the main menu`, close transport (5.1),
 `online::on_transport_closed("Multiplayer could not start")`, `game_message_box(0x88a082af, 0)` (body text,
 OK button) and return: no error byte, no PAGE_MULTIPLAYER, active stays false, the player stays in the main
@@ -601,6 +602,18 @@ Runs from the page handler and after every wrapped state Update.
     call `netinit_dump("state 16")`, if s is 3 call `netinit_dump("state 3")`; if hosting, s == 3 and
     the old value was 35, match+0x99 = 0; remember s.
 
+Frame work additions after the rewrite, active only (not described step by step here; the differential test's old
+scenarios show them as differences, the new-only scenarios check the parity rules): before the clock check, the
+client's Info resend while the roster is not synced and the host's roster rebroadcast every 120 frames in NET_SM 16 /
+18, the skin sync (`unlocks_local_skin`, `unlocks_local_villain`, `unlocks_apply_slot_skins`) (934a6ca); after
+`gamenet::frame`: `grenades::frame`, the host's lobby return and the client's leave paths, `hud_weapon_tick`
+(934a6ca), `mute_players_frame` (parity N2, 50a6b69), the clock sync, slot manager and Party Up frames (parity E,
+fa52c63); after the fade skip: tracker and stats team sync and the team preference (u32 NPD+0x114: co-op = the
+host's team, else 1 + (local slot & 1); log `party: team preference %d for slot %u (%s, mode %d)`) (934a6ca). The page
+handler (5.3) also calls `ticker_refresh` while the Multiplayer page is open (parity M, 514bcfe). The host's team of
+a co-op client is the team of member slot 0 (the host is always slot 0, 3.3; 934a6ca read `members[host_id]`, the
+host's net id used as a slot index, i.e. another client: fixed 2026-11-25, new-only scenario "5.8 co-op client").
+
 ### 5.9 Wrapped state Update (state index I, state pointer)
 
 1. ms = steady_clock milliseconds. If the last state index differs from I (it is set to I in any case)
@@ -653,6 +666,47 @@ stop. If the file exists
 not waited for`. Then for each wait-list-0 entry (at most min(count, 256), pointer non-NULL) with id ==
 sid(name) and flag bit 0 clear: set bit 0 and log
 `load levels: %s is defined nowhere (no registry entry, no file): not waited for`.
+
+#### 5.9.1 Playing (state 3, original `0x5f14d0`): additions after the rewrite
+
+Origin: the squash commit 934a6ca (2026-11-24, no message; the legacy commits between the rewrite fc361d5 and the
+squash are not in this repository), Players Met from parity group E (fa52c63). In the wrapped Update of Playing:
+1. On entry (the last state index was not Playing), after the online state line of step 1 and before the
+   original: if u8 match+0xc8 is 0, set it to 1 and log `playing: the match session is joined (match +0xc8 = 1)`;
+   u8 0x104f1c0 = 0 and u8 0x14ce978 = 0 (the match-over bytes); Players Met (parity-e-flow2.md 2.9): the names
+   (+0x20, at most 64 bytes) of the trackers 0..9 that are used (name byte non-zero), not excluded (+0x26c = 0) and
+   not the local one (ngm+0) go to `progression_note_met` (not called when there is none). Remember now (ms) as
+   the Playing start and set the resend count to 0.
+2. Every Playing update, hosting only: while fewer than 2 resends were made and 1 s (first) / 10 s (second) have
+   passed since the Playing start: guest `0x610840()` (the player setup sent again; a joiner can apply the setup
+   before it has the host's slot) and log `playing: the player setup sent again (%d s)` (1, then 10).
+3. After the original returned (on entry only): log `playing: update returned`; after the frame work (on entry
+   only): log `playing: frame work returned`.
+
+Create match (5.14) sets match+0xc8 = 0 before its `Start Match: creating the match` line (934a6ca).
+
+#### 5.9.2 WaitReady (state 2): diagnostics after the rewrite (934a6ca)
+
+What WaitReady's update (`0x5f26d0`) reads: the match task (u64 at state+8) +0x151 (u8, all ready) and +0x154 (s32
+deadline in net clock ticks), the net clock object's +0xc (3.1), and the trackers: when no used (name byte non-zero),
+not excluded (+0x26c = 0), +0x274 = 0 tracker other than the local one is left, it asks for a start at ticks + 900.
+With the online state line of step 1 (state changed or 10 s), at most once per 2 s (steady clock): task = u64 at
+state+8, clock = u64 at 0x113a040; log `wait ready: all ready %u, deadline %d, timer %d, local tracker 0x%llx`
+(u8 task+0x151 and s32 task+0x154, 0 each when task is NULL; s32 clock+0xc, 0 when clock is NULL; u64 ngm+0), then
+for each tracker i = 0..9 (t = ngm + 0x10 + i*0x2c0) whose name byte (+0x20) is non-zero:
+`wait ready: slot %d net id %u%s, %02x %02x` (i, u32 t+0x120, ` (local)` when t is the local tracker else empty,
+u8 t+0x26c, u8 t+0x274). (934a6ca read the ready byte and deadline at ngm+0x151 / +0x154, the timer at image
+0x113a04c beside the clock pointer, an "id" 8 bytes before each tracker and stopped at the local tracker: corrected
+2026-11-25 to the reads above.)
+
+#### 5.9.3 Other match-state additions after the rewrite (934a6ca), active only
+
+Not described step by step here and not in the differential test's old scenarios (they need an active session):
+the reset watch (PreResetting / Resetting / ResettingReady: `reset: ...` lines; after 7 s stuck in PreResetting,
+4 s without the level list shrinking, or 17 s past ResettingReady's start the task is moved on through its vtable
+slot 0x178 / 0x180 / 0x168; the host marks remote slots ready (+0x274) after 8 s), the round results hold (ShowResults
+and ShowRoundResults: the original is not called for 10 s, then `round results: held 10 s (state 0x%llx)` and the
+host marks the other slots done (+0x26d)), the Leave state's lobby return and voluntary-leave paths (parity E 2.5).
 
 ### 5.10 Abort wrapper
 
@@ -885,19 +939,72 @@ page 0x471007a1: the first entry with that page id, else (count < 32) a new entr
 
 ## 6. Install
 
-`install(installed)`:
+`install(installed)` (steps marked * were added after the clean-room rewrite: 6.1):
 1. If `gamenet::install()` returns false: return (no log from this file, nothing patched).
-2. For the five functions of 2.2, in table order: check the expected bytes (LEAVE_MULTIPLAYER: `48 8d
+2. * `voice::install(installed)` (voice.cpp: the talking indicator table and the mouth patch, parity N5 / N6,
+   commit 50a6b69; it counts its own patches).
+3. * Lost links (6.1.1), then the actor request hook (6.1.2), then the three tracker state traces (6.1.3).
+4. For the five functions of 2.2, in table order: check the expected bytes (LEAVE_MULTIPLAYER: `48 8d
    3d` at 0x5eb180; the others: `is_ret_stub`). On mismatch log
    `%s at 0x%llx: not the stripped function this port expects, left alone` (name, address) and go on.
    Else `replace_function(address, 5, our function, name)`; +1 to `installed` when it returns true.
-3. Check all ten state slots: each u64 must equal base + its original update. If any differs: log
-   `match state vtables differ: no per-frame network during matches` and return (no abort hook either).
-4. Remember the ten originals, write the ten wrapper addresses into the slots, log
+5. Check all ten state slots: each u64 must equal base + its original update. If any differs: log
+   `match state vtables differ: no per-frame network during matches` and return (no abort hook).
+6. Remember the ten originals, write the ten wrapper addresses into the slots, log
    `match state updates wrapped (%zu states)` (10), +1 to `installed`.
-5. If u64 at 0x103fa70 == base + 0x5e9f10: write the abort wrapper's address there (no log, no count).
+7. If u64 at 0x103fa70 == base + 0x5e9f10: write the abort wrapper's address there (no log, no count).
+8. The idle-kick limit is left as the game has it (6.1.4).
 
 The page handler is not registered at install; Multiplayer entry and host create register it.
+
+### 6.1 Install additions after the rewrite
+
+Origin of 6.1.1 to 6.1.4: the squash commit 934a6ca (2026-11-24, no message; the session.cpp of the rewrite fc361d5
+and of the last legacy commits 28105f6 / 78c3b43 has none of them, and the legacy commits in between are not in this
+repository). The texts below are what the code does; the reasons are from its log texts and comments.
+
+#### 6.1.1 Lost links: Playing's PSN record check (`0x5f17ed`)
+
+The 6 bytes at 0x5f17ed (inside Playing::Update `0x5f14d0`): `0f 8c 13 01 00 00` (jl 0x5f1906) -> write
+`90 e9 13 01 00 00` (nop; jmp 0x5f1906: the branch is always taken), log
+`lost links: Playing's PSN record check jumped (0x5f17ed)`, +1. Already `90 e9 13 01 00 00`: +1, no log, no write.
+Any other bytes: nothing (no log, no count).
+
+#### 6.1.2 Actor requests after StartNetGame's package requests (`0x641b20`)
+
+Needs the 7 bytes at 0x641b20 executable (else nothing). `48 8b 05 d9 90 a0 00` (mov rax, [0x104ac00]): take a
+32-byte near stub, fill it with `48 b8 <u64 hook address>` `ff d0` (call rax) `ff 25 00 00 00 00 <u64 base+0x641b27>`
+(jmp back after the replaced instruction); no stub or the stub out of rel32 reach of base+0x641b25: nothing (no
+count). Then write `e9 <s32 stub - (base+0x641b25)> 90 90` at 0x641b20, log
+`skins: actor requests hooked after StartNetGame's package requests (0x641b20)`, +1. Bytes starting with `e9`
+(patched already): +1, no log. Other bytes: nothing.
+
+The hook (System V, no arguments): `unlocks_apply_slot_skins()`; then the match skin requests: the local skin
+(`unlocks_local_skin()`), the local villain (`unlocks_local_villain()`) when it differs, then every used member's hero
+and (when different) villain, each name once; a name that is empty or `hero-default` is skipped; else guest
+`0x56d170(base+0x1130390, name, 0)` and log `skins: actor '%s' requested from the level manager`. Returns the u64 at
+0x104ac00 (what the replaced mov loaded). (The same skin requests also run in create match, 5.14.)
+
+#### 6.1.3 Tracker state traces
+
+`retarget_call(0x664d6a, 0x60ded0, send trace, "tracker state send")`, `retarget_call(0x60df2f, 0xb332a0, alloc trace,
+"tracker state alloc")`, `retarget_call(0x60e291, 0x634970, helper trace, "tracker state helper")`, in this order,
++1 for each that returns true. Each trace calls its original with all its arguments and returns its result; for its
+first 8 calls in the process (each trace counts its own) it logs around the original call:
+- send (tracker): `tracker: state send enter`, `0x60ded0(tracker)`, `tracker: state send leave`;
+- alloc (u64 size, context, u32 align): `tracker: state alloc enter %llu` (size), `0xb332a0(size, context, align)`,
+  `tracker: state alloc leave`; returns the pointer;
+- helper (six arguments, the last two integers): `tracker: state helper enter`, `0x634970(...)`,
+  `tracker: state helper leave`; returns the u32 result.
+From the 9th call on: the original only. Diagnostics only (parity-n-inlined.md 1 lists them as wrappers that call the
+originals).
+
+#### 6.1.4 Idle-kick limit (`0xe622a8`)
+
+Not patched (since 2026-11-25). Playing's update (`0x5f16df`) compares the idle timer (f32 `0x14cec0c`) with the
+f32 at `0xe622a8`, 120.0 in the PS4 1.02 image; parity-e-flow2.md 1 checked the same 120 s limit in PS3 1.10's
+Playing::Update (`0x442558`), the version U2 parity follows. 934a6ca had raised it to 300 s (log
+`idle kick: limit 120 s -> 300 s`, +1 to `installed`); that is removed so idle players are kicked as on PS3.
 
 The file also contains an unused helper for the network heap context 0x14; it is never called and is
 not part of the behaviour.
@@ -908,7 +1015,8 @@ not part of the behaviour.
 
 Install
 1. All bytes as expected: five `-> C++` lines, wrapped line, installed += 6, ten slots point to
-   wrappers, abort slot replaced.
+   wrappers, abort slot replaced. (Since 6.1: plus voice::install and three traces, installed += 9 in an image
+   without the 6.1 bytes; with them installed += 11.)
 2. One stub differs (e.g. 0x659bc0 not a ret stub): its "left alone" line, installed += 5.
 3. gamenet::install false: nothing at all.
 4. One state slot differs: "vtables differ" line, no slot written, abort slot untouched.
@@ -1034,6 +1142,20 @@ Teardown and public calls
   so a different id in between allows the same id again.
 - Match choice diagnostics (5.14): a `*levels*` table whose records pointer is NULL has no records; the name stays "?".
 
+## Differential test after the rewrite (2026-11-25)
+
+`gow3_pc/tests/u2mp_rewrite/test_session.cpp` compares the rewrite's base (62fc26b) with today's session.cpp.
+`expected_new` turns the old record and image into what the new build must give, by these documented changes only:
+6 / 6.1 (voice::install, the three traces, the 6.1.1 / 6.1.2 results for the bytes the image holds, the
+installed count), 5.4 (J6 `voice::reset_volume` before the transport start), 5.6 (present preload packages get bit
+0x40), 5.9.1 (Playing entry lines, match +0xc8, the match-over bytes). Everything else must match unchanged. The
+post-rewrite parity behaviour is not rebuilt in the comparison: new-only scenarios (`N ...`) check 6.1 with the PS4
+bytes in place (the idle limit stays 120 s, 6.1.4), the traces, J6, D 2.1 (no network), the D teardown releases,
+5.9.1 with Players Met, 5.9.2 (task, clock and tracker reads), the 5.8 co-op team preference (slot 0), H1, H5, H8 and
+the E 2.2 / I6 timeout line. Old scenarios still differing: the three that run WaitReady (5.9.2 lines, not mapped), the four
+without a network (D 2.1, new-only), LEAVE_MULTIPLAYER without entering (D releases, new-only), Start Match with a
+full table (D checks), and every scenario with an active session (the frame work additions of 5.8).
+
 ## Parity group F changes (2026-11-25, spec parity-f-party-mm.md 7)
 
 New interface (session_api.h, frontend3.h, online.h's `u2mp::session` part):
@@ -1079,8 +1201,9 @@ New session message types (older peers ignore them, 4.2 "12..0x0f ignored" no lo
 | 14 | Reserve | client -> host / host -> client | `{0, u64 room, u8 n, n x {u8 len, npid}}` request (0x100); `{1, u8 ok}` reply (0x101) |
 | 15 | LeaderLeave | host -> clients | nothing: the custom-game leader leaves, leave with it (0x117) |
 
-- **Silent peer (2.2).** `transport.on_timeout` logs `%s has left : timed out (nothing heard for 20 s)` with the
-  member's name before the normal "left" path; `net::kTimeoutSeconds` is 20 s in every mode (owner decision).
+- **Silent peer (2.2).** `transport.on_timeout` logs
+  `*************** %s has left : timed out (nothing heard for 20 s)` (the PS3 prefix since parity-i-connection.md 8;
+  `?` for a slot without a member) with the member's name before the normal "left" path; `net::kTimeoutSeconds` is 20 s in every mode (owner decision).
 - **Net clock (2.3).** Client, per frame (`clock_sync_frame`): while fewer than 8 samples and connected, a ClockSync
   request every 20..120 ms (LCG, steady clock in us). Host: answers at once with the echo and `own_ticks()`. Client:
   sample = round trip, offset = int32(host - own ticks) + half the round trip in ticks (300/s); after 8, the 4 with

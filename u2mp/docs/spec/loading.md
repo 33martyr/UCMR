@@ -135,6 +135,7 @@ of the call at `0x3fc52d` (this module's stub) and chains it. This module must t
 | `0x113b760 + 0x1ca0` | s16 | current net game index |
 | `0x113b760 + 0x21b4` | object | ngm overrides (passed to `0x64abd0`) |
 | `0x1066660` | object | text database (first argument of `0xcddc00`) |
+| `0x1139fe0` | s32 count + 0x2c bytes | a curve copied from DC record `c85e199d`; StartNetGame divides by its count (4.2 "Curve repair") |
 | `0x104ad28` | u64 pointer | data root; the C string at (root + 0x408) is the base directory |
 | `0x1116284` (`0x1116180 + 0x104`) | s32 | frame counter |
 | `0x1050e58` | f32 | item fade (written and restored around the roster draw; also read for tip +0x90) |
@@ -315,6 +316,21 @@ Recording a request (`on` = show or hide, `why` = the slot's name):
 - If the module was turned off by the environment, nothing happens (unreachable in practice).
 - Store `why` as the latest reason, store the request (replacing any pending one), and log
   `loading screen: %s requested (%s)` with `show` or `hide`, and the name.
+
+**Curve repair (Playing::Enter only).** Added by commit 49e7b63 (2026-11-16, "fixes, import corrections, new
+hooks for debugging"; carried into 9fd6134). The curve at `0x1139fe0` is copied from DC record `c85e199d`; a
+count of 0 makes StartNetGame divide by zero (loading.cpp `kCurve` comment). In the Playing::Enter hook (a
+hide slot, so after the request is recorded), the curve is repaired right before and again right after the call
+of the original:
+
+1. count = s32 at `0x1139fe0`. When count > 0: nothing.
+2. Otherwise log `playing: curve count %d, using the 5-entry fallback` with that count, write count 5 and zero
+   the 0x2c bytes at `0x1139fe4..0x113a00f`.
+
+So the original always sees a positive count, and a count the original leaves at 0 or below is repaired again
+(and logged again) after it. The other five slots do not touch the curve. Differential test:
+`test_loading.cpp` `curve_expected` gives the old record the line (before each call of the original of slot 4,
+while the count is <= 0) and the old image the repaired curve.
 
 ### 4.3 Per-frame entry (the retargeted call at `0x3fc52d`)
 
@@ -511,6 +527,12 @@ flags (first frame, visible) to true, also when the page was not found.
 Draw (alpha, x, y, dt), every frame the screen is drawn:
 1. If the roster switch is off, or a menu is up (`menu_up()`: s32 `[0x1136640 + 0x1014]` != 0, the PS3 roster
    gate, `parity-m-features.md` 10.2): nothing. Find the page; if not found: nothing.
+   `menu_up()` (6d52c86, also used by scoreboard.cpp) first compares, once per process on its first call, the
+   word's three PS4 1.02 users: `0x5e5b82` `c7 83 14 10 00 00 05 00 00 00 c7 83 18 10 00 00 00 00 00 00 c7 83 1c 10
+   00 00 00 00 80 3f` (the inlined setter), `0x665151` `48 8d 05 e8 14 ad 00 83 b8 14 10 00 00 00` (death camera)
+   and `0x4cbc18` `48 8d 05 21 aa c6 00 83 b8 14 10 00 00 00` (the "a menu is open" helper). When any differs it
+   logs `menu state word +0x1014: its users are not as expected, treated as "no menu up"` (once) and answers
+   false from then on; otherwise it answers whether the word is non-zero.
 2. Guest call page vtable +0x10 (vtable = u64 at page +0) with (page, update args 3.7).
 3. Build the page desc (3.7) with alpha, x, y. Read the page flags (u32 +0xb0) after the update
    call; if flags & 0x80000, desc transform [0] x= 0.75.

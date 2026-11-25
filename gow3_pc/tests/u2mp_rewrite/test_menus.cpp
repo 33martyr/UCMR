@@ -292,6 +292,18 @@ void expected_old(std::vector<std::string> &r) {
     }
 }
 
+// per query of the current run, by side (filled by model_ask, used by cursor_expected)
+int g_side = 1;
+struct AskNote {
+    bool op4 = false;          // an op 4 of a plain list with a known cursor
+    int32_t answer = 0;        // what op 4 answers under this side's rule
+    bool join_trace = false;   // new build: the call logs a join query line
+    bool join_known = false;   // ... and the model knows the cursor it prints
+    std::string join_line;
+};
+std::vector<AskNote> g_notes[2];
+void cursor_expected(std::vector<std::string> &r);
+
 void run(const std::string &name, const std::function<void(const Api &)> &body) {
     std::vector<std::string> c[2];
     std::vector<uint8_t> img[2];
@@ -299,12 +311,16 @@ void run(const std::string &name, const std::function<void(const Api &)> &body) 
         hx::clear();
         hx::bind_both();
         reset_script();
+        g_side = side;
+        g_notes[side].clear();
         body(side == 0 ? A_old : A_new);
         finish();
         c[side] = hx::calls;
         img[side] = masked_snapshot();
     }
+    g_side = 1;
     expected_old(c[0]);
+    cursor_expected(c[0]);
     const bool ok = hx::same(name.c_str(), c[0], c[1], &img[0], &img[1]);
     if (ok) std::printf("PASS %s (%zu records)\n", name.c_str(), c[0].size());
     const char *dump = std::getenv("MENUS_DUMP");
@@ -332,6 +348,8 @@ void run_new(const std::string &name, const std::function<void(const Api &)> &bo
     hx::clear();
     hx::bind_both();
     reset_script();
+    g_side = 1;
+    g_notes[1].clear();
     g_scenario = name.c_str();
     const int before = g_failed_checks;
     body(A_new);
@@ -433,8 +451,62 @@ void menus_ready(const Api &a) {
 
 using QueryFn = void(U2MP_GUEST *)(uint8_t *);
 
+// The plain-list cursors (spec menus.md 1.4 "Plain list behaviour"), followed for each build from the queries the
+// test makes, so the old record can get the answers of the new op 8 rule (commit 934a6ca, menus.md 1.4 "Since
+// 934a6ca"): old op 8 sets cur = 0, new op 8 clamps cur (-1 for an empty list, 0 below, count - 1 above). Both
+// builds' cursors live for the process, so the model does too: side 0 follows the old build (run's first side),
+// side 1 the new one (run's second side and run_new). A cursor the model cannot follow (the online LIST_FRIENDS
+// form's op 8 / 9, parity group B) is unknown until the next op 9; its op 4 answers are not mapped.
+// The join list's diagnostic trace (934a6ca, menus.md 1.11 step 2a) is produced from the same model.
+struct CursorModel {
+    int32_t cur = 0;
+    bool known = true;
+    size_t met = 0;       // the cached Players Met list size (reload on op 8 or when empty, menus.md 1.10)
+    int join_traced = 0;  // new build: join query lines logged so far (at most 96)
+};
+CursorModel g_model[2][3];   // [side][0 LIST_FRIENDS, 1 LIST_PLAYERSMET, 2 join list]
+void model_ask(int e, uint32_t op, int32_t v) {
+    AskNote n;
+    int list = -1;
+    int32_t count = 0;
+    if (e == E36 && s.online) {
+        if (op == 8 || op == 9) g_model[g_side][0].known = false;   // the online form keeps its cursor by friend
+    } else if (e == E36) {
+        list = 0, count = s.members;
+    } else if (e == E39) {
+        CursorModel &m = g_model[g_side][1];
+        if (op == 8 || m.met == 0) m.met = s.recent.size();
+        list = 1, count = int32_t(m.met);
+    } else if (e == E3) {
+        list = 2, count = s.join_rows >= 0 ? s.join_rows : 0;
+        CursorModel &m = g_model[g_side][2];
+        if (g_side == 1 && s.join_rows >= 0 && m.join_traced < 96) {
+            ++m.join_traced;
+            n.join_trace = true;
+            n.join_known = m.known;
+            char b[128];
+            std::snprintf(b, sizeof b, "log join query: op %u row %d cur %d rows %d", op, v, m.cur, s.join_rows);
+            n.join_line = b;
+        }
+        if (op == 1) list = -1;   // the title, no plain list
+    }
+    if (list >= 0 && !(list == 0 && op == 1)) {
+        CursorModel &m = g_model[g_side][list];
+        if (op == 4 && m.known) n.op4 = true, n.answer = count == 0 ? -1 : (m.cur < count ? m.cur : count - 1);
+        if (op == 8) {
+            if (g_side == 0) m.cur = 0, m.known = true;
+            else if (count <= 0) m.cur = -1, m.known = true;
+            else if (m.cur < 0) m.cur = 0;
+            else if (m.cur >= count) m.cur = count - 1;
+        }
+        if (op == 9) m.cur = v, m.known = true;
+    }
+    g_notes[g_side].push_back(n);
+}
+
 // One query call as the game makes it: through the table entry `e`.
 void ask(int e, uint32_t op, int32_t v = 0, uint32_t t = 0, uint32_t col = 0, uint32_t element = 0xc1c1c1c1) {
+    model_ask(e, op, v);
     uint8_t *q = mem + Q;
     std::memset(q, 0xc1, 0x80);
     put<uint32_t>(Q, op);
@@ -453,6 +525,44 @@ void ask(int e, uint32_t op, int32_t v = 0, uint32_t t = 0, uint32_t col = 0, ui
     put<uint64_t>(Q + 0x40, 0);
     rec("  -> q %s text %s", hex(q, 0x60).c_str(), text.c_str());
 }
+// The old record with the new op 8 rule and the join query trace (see model_ask). An op 4 answer is rewritten only
+// when the old build answered what the old rule gives (so the old build is still checked against its own spec);
+// a join trace line is added only when the model knows the cursor it prints. Anything else stays as recorded.
+void cursor_expected(std::vector<std::string> &r) {
+    if (g_notes[0].size() != g_notes[1].size()) return;   // not the same queries: left to the comparison
+    std::vector<std::string> out;
+    out.reserve(r.size());
+    size_t k = 0;
+    const AskNote *o = nullptr, *n = nullptr;
+    bool want_trace = false;
+    for (std::string &l : r) {
+        if (l.rfind("ask entry ", 0) == 0 && k < g_notes[0].size()) {
+            o = &g_notes[0][k], n = &g_notes[1][k];
+            ++k;
+            want_trace = n->join_trace && n->join_known;
+            out.push_back(l);
+            continue;
+        }
+        if (o && l.rfind("  -> q ", 0) == 0) {
+            if (o->op4 && n->op4) {
+                std::string h = l.substr(7, 2 * 0x60);
+                if (int32_t(hex_u32(h, 4)) == o->answer) {
+                    put_hex_u32(h, 4, uint32_t(n->answer));
+                    l.replace(7, 2 * 0x60, h);
+                }
+            }
+            o = n = nullptr;
+            want_trace = false;
+        }
+        out.push_back(l);
+        if (want_trace && l.rfind("online::join_rows -> ", 0) == 0) {
+            out.push_back(n->join_line);
+            want_trace = false;
+        }
+    }
+    r.swap(out);
+}
+
 // One query (as ask), for the new-only checks: q+4 afterwards and the text as ask records it ("null" or quoted).
 struct Answer {
     int32_t v;

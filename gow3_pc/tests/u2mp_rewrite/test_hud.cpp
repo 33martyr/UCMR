@@ -301,8 +301,17 @@ U2MP_GUEST void sndinit_handler() {
 U2MP_GUEST void sndplay_handler() {
     hx::rec("SoundPlay buf=%s %u", GP(0) == st.snd_buf ? "same" : "other", uint32_t(GP(1)));
 }
+// the old side's per-frame weapon trigger inputs, for weapon_expected (set by draw while the old Draw runs)
+struct OldTickFrame {
+    bool live = false;        // the local player as spec 4.12 step 2 finds it, before the frame
+    bool got = false;         // the tick read the current weapon this frame
+    uint64_t weapon = 0;      // what it read
+};
+std::vector<OldTickFrame> g_old_ticks;
+bool g_old_drawing = false;
 U2MP_GUEST uint64_t curweapon_handler() {
     hx::rec("CurrentWeapon %s", where(GP(0)).c_str());
+    if (g_old_drawing && !g_old_ticks.empty()) g_old_ticks.back().got = true, g_old_ticks.back().weapon = st.weapon;
     return st.weapon;
 }
 U2MP_GUEST void showweapon_handler() {
@@ -381,6 +390,76 @@ int g_scen = 0, g_pass = 0;
 std::vector<std::string> g_fail_names;
 std::function<void(int)> g_post;   // after each side's body: normalise per-side host values in the image
 
+// spec 4.12 step 2: the local player the tick finds (cell, id, object at cell, object+0x44 == id)
+bool local_player_live() {
+    const uint64_t cell = get<uint64_t>(LPCELL);
+    const uint32_t id = get<uint32_t>(LPID);
+    if (!cell || !id || cell < P(0) || cell + 8 > P(hx::kImageSize)) return false;
+    const uint64_t obj = get<uint64_t>(OFF(cell));
+    if (!obj || obj < P(0) || obj + 0x48 > P(hx::kImageSize)) return false;
+    return get<uint32_t>(OFF(obj) + 0x44) == id;
+}
+
+// The documented changes of the old record, applied before the comparison:
+// - Commit 934a6ca, spec hud.md 4.12 step 6 ("Weapon switch: one ShowWeaponHud"): the trigger calls
+//   ShowWeaponHud(ctrl, -100.0) once, on the tick whose weapon differs from the last one and is non-zero, instead of
+//   on every tick of the 900-frame window. The old record keeps its own call (the ShowWeaponHud line right after the
+//   tick's CurrentWeapon line) only on such a tick; the last weapon follows spec 4.12 steps 2 and 6 (0 on a tick
+//   without a local player, the weapon read otherwise) and is process-wide like the module's. The own count in the
+//   periodic log ("/ N here") drops by the calls removed so far in the process.
+// - Spec hud.md 5 step 9 (the 3 s window went in 934a6ca): the install line names the one call per weapon switch.
+// - Commit 934a6ca, spec hud.md 4.1 "Image widget draw" step 5: a name pointer below 4 GiB is not read; the log
+//   prints the pointer in hex, so a NULL name logs `widget 0` where the old code logged `widget (no name)`.
+uint64_t g_map_last_weapon = 0, g_map_dropped = 0;
+void hud_expected(std::vector<std::string> &r) {
+    std::vector<std::string> out;
+    out.reserve(r.size());
+    size_t frame = 0;
+    bool in_frame = false, keep_own = true, after_get = false;
+    for (std::string &l : r) {
+        if (l.rfind("-- frame ", 0) == 0) {
+            in_frame = frame < g_old_ticks.size();
+            if (in_frame) {
+                const OldTickFrame &t = g_old_ticks[frame];
+                if (!t.live) g_map_last_weapon = 0;
+                else if (t.got) {
+                    keep_own = t.weapon != g_map_last_weapon && t.weapon != 0;
+                    g_map_last_weapon = t.weapon;
+                }
+            }
+            ++frame;
+            after_get = false;
+            out.push_back(l);
+            continue;
+        }
+        if (in_frame && after_get && l.rfind("ShowWeaponHud ", 0) == 0 && l.find(" arg=c2c80000(-100)") != std::string::npos) {
+            after_get = false;
+            if (!keep_own) {
+                ++g_map_dropped;
+                continue;
+            }
+            out.push_back(l);
+            continue;
+        }
+        after_get = l.rfind("CurrentWeapon ", 0) == 0;
+        if (const size_t w = l.find("(widget (no name))"); l.rfind("log hud: image ", 0) == 0 && w != std::string::npos)
+            l.replace(w, 18, "(widget 0)");
+        if (l == "log hud: weapon panel: shown for 3 s after a weapon switch (ShowWeaponHud 0x954740 from the multiplayer "
+                 "draw), probes on")
+            l = "log hud: weapon panel: ShowWeaponHud 0x954740 once per weapon switch (from the frame work), probes on";
+        if (l.rfind("log hud: weapon panel: ", 0) == 0 && g_map_dropped) {
+            const size_t h = l.find(" here, panel draws ");
+            const size_t s = h == std::string::npos ? h : l.rfind("/ ", h);
+            if (s != std::string::npos) {
+                const unsigned long long n = std::strtoull(l.c_str() + s + 2, nullptr, 10);
+                l.replace(s + 2, h - s - 2, std::to_string(n - g_map_dropped));
+            }
+        }
+        out.push_back(l);
+    }
+    r.swap(out);
+}
+
 void run(const std::string &name, const std::function<void()> &setup, const std::function<void(int)> &body) {
     if (std::getenv("HX_HUD_TRACE")) std::printf("RUN %s\n", name.c_str()), std::fflush(stdout);
     hx::clear();
@@ -393,9 +472,11 @@ void run(const std::string &name, const std::function<void()> &setup, const std:
     const St saved = st;
     const uint64_t heap_saved = g_heap;
     hx::calls.clear();
+    g_old_ticks.clear();
     body(0);
     if (g_post) g_post(0);
-    const auto a = hx::calls;
+    auto a = hx::calls;
+    hud_expected(a);
     if (const char *d = std::getenv("HX_HUD_DUMP"); d && name.rfind(d, 0) == 0)   // print the old record
         for (const auto &c : a) std::printf("  %s\n", c.c_str());
     const auto ia = hx::snapshot();
@@ -885,11 +966,55 @@ void rich(int32_t type, uint32_t f) {
     centre("Capture the flag!", 1000 - 150, 0xc0ffe080);
 }
 
+// Parity N1 (commit 50a6b69, spec hud.md 4.7 step 1, parity-n-remaining.md N1, PORT-HUD.md): the film
+// booster site now draws in cinema mode 0 (the follow camera) instead of cinema mode != 0. The old Draw is given the
+// input that makes its film-site decision the new one, and the bytes are put back after its frame:
+// - cinema mode != 0: the new code skips the site. The old code reads the local tracker's booster indices +0x2a0 /
+//   +0x2a4 only there (old hud.cpp draw_boosters); with both -1 its booster_by_index returns NULL before any lookup
+//   and booster_pair draws nothing, which is exactly "site skipped".
+// - cinema mode 0: the new code may draw the site. The old code reads the cinema mode at one more place, the theater
+//   HUD, which returns before reading it when the camera count element+0x1928+0xfc is not 1..10. Only then the old
+//   side gets mode 1 (any value != 0 gives the same old decision); otherwise nothing is changed and a difference
+//   stays visible.
+struct N1Saved {
+    uint64_t local = 0;
+    int32_t idx[2] = {0, 0};
+    bool idx_set = false, mode_set = false;
+};
+N1Saved n1_old_input() {
+    N1Saved s;
+    if (get<int32_t>(CINMODE) != 0) {
+        const uint64_t lp = get<uint64_t>(ngm(0));
+        if (lp >= P(0) && lp + 0x2a8 <= P(hx::kImageSize)) {
+            s.local = OFF(lp);
+            s.idx[0] = get<int32_t>(s.local + 0x2a0), s.idx[1] = get<int32_t>(s.local + 0x2a4);
+            put<int32_t>(s.local + 0x2a0, -1), put<int32_t>(s.local + 0x2a4, -1);
+            s.idx_set = true;
+        }
+    } else {
+        const int32_t cams = W.element ? get<int32_t>(el(E_TH) + 0xfc) : 0;
+        if (cams <= 0 || cams > 10) {
+            put<int32_t>(CINMODE, 1);
+            s.mode_set = true;
+        }
+    }
+    return s;
+}
+void n1_put_back(const N1Saved &s) {
+    if (s.idx_set) put<int32_t>(s.local + 0x2a0, s.idx[0]), put<int32_t>(s.local + 0x2a4, s.idx[1]);
+    if (s.mode_set) put<int32_t>(CINMODE, 0);
+}
+
 void draw(int which, int frames = 1, const std::function<void(int)> &per_frame = nullptr, uint64_t ctx = 0) {
     for (int f = 0; f < frames; f++) {
         if (per_frame) per_frame(f);
         hx::rec("-- frame %d", f);
+        const N1Saved n1 = which == 0 ? n1_old_input() : N1Saved{};
+        if (which == 0) g_old_ticks.push_back(OldTickFrame{local_player_live()});
+        g_old_drawing = which == 0;
         g_draw[which](reinterpret_cast<void *>(P(W.element)), reinterpret_cast<void *>(ctx));
+        g_old_drawing = false;
+        n1_put_back(n1);
         // Since 934a6ca the weapon panel trigger runs from the frame, not from the Draw (u2mp_internal.h:
         // hud_weapon_tick "from the frame (not the HUD draw)"; session.cpp calls it every frame). The old Draw ran
         // it after its periodic logs and gates, before the panels: only the weapon worlds have a local player, and

@@ -61,7 +61,6 @@ constexpr uint64_t kAbortByte = 0x113a270;
 constexpr uint64_t kMatchOver = 0x104f1c0;
 constexpr uint64_t kMatchOverCompanion = 0x14ce978;
 constexpr uint64_t kIdleTimer = 0x14cec0c;
-constexpr uint64_t kIdleLimit = 0xe622a8;
 constexpr uint64_t kCustomChoiceCount = 0x113ddb0;
 constexpr uint64_t kLevelListHead = 0x1534140;
 constexpr uint64_t kAbortSlot = 0x103fa70;
@@ -1802,7 +1801,7 @@ void frame_work() {
         const bool coop = cooperative_match();
         int32_t team;
         if (coop) {
-            team = hosting ? local_team() : int32_t(members[host_id].team);
+            team = hosting ? local_team() : int32_t(members[0].team);   // slot 0 is the host (3.3)
             if (team != 1 && team != 2) team = 1;
         } else {
             team = int32_t(transport.local_slot() & 1) + 1;
@@ -2131,21 +2130,25 @@ int64_t steady_ms() {
     return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
 }
 
-// WaitReady only leaves once every player slot has signalled in, so show what each slot reports.
-void wait_ready_diagnostics() {
+// WaitReady leaves once the match task's ready byte is set and the net clock reaches its deadline; the
+// countdown starts when no used, not excluded tracker other than the local one is left. Show what it reads.
+void wait_ready_diagnostics(uint8_t *state) {
     static int64_t next = 0;
     const int64_t ms = steady_ms();
     if (ms < next) return;
     next = ms + 2000;
+    uint8_t *task = ptr_at(state + 8);
+    uint8_t *clock_object = ptr_at(g(kNetClockPtr));
     uint8_t *base = ngm();
-    const uint64_t end = get<uint64_t>(base) - 0x10;
-    log("wait ready: all ready %u, deadline %d, timer %d, end 0x%llx", unsigned(base[0x151]),
-        get<int32_t>(base + 0x154), get<int32_t>(g(0x113a040) + 0xc), (unsigned long long)end);
+    uint8_t *local = ptr_at(base);
+    log("wait ready: all ready %u, deadline %d, timer %d, local tracker 0x%llx", task ? unsigned(task[0x151]) : 0u,
+        task ? get<int32_t>(task + 0x154) : 0, clock_object ? get<int32_t>(clock_object + 0xc) : 0,
+        (unsigned long long)reinterpret_cast<uint64_t>(local));
     for (int i = 0; i < 10; ++i) {
-        uint8_t *slot = base + 0x2c0 * i;
-        if (reinterpret_cast<uint64_t>(slot) == end) break;
-        log("wait ready: slot %d id %d in game %u, %02x %02x, state %d", i, get<int32_t>(slot + 8),
-            unsigned(slot[0x30]), unsigned(slot[0x27c]), unsigned(slot[0x284]), get<int32_t>(slot + 0x2c));
+        uint8_t *t = base + 0x10 + 0x2c0 * i;
+        if (!t[0x20]) continue;
+        log("wait ready: slot %d net id %u%s, %02x %02x", i, get<uint32_t>(t + 0x120), t == local ? " (local)" : "",
+            unsigned(t[0x26c]), unsigned(t[0x274]));
     }
 }
 
@@ -2343,7 +2346,7 @@ uint64_t state_update(int index, void *state) {
         log("online state: update 0x%llx (vtable slot 0x%llx)", (unsigned long long)kStates[index].original,
             (unsigned long long)(kStates[index].slot - 0x18));
         if (index == kLoadLevels) load_levels_diagnostics(static_cast<uint8_t *>(state));
-        if (index == kWaitReady) wait_ready_diagnostics();
+        if (index == kWaitReady) wait_ready_diagnostics(static_cast<uint8_t *>(state));
         if (index == kLeave) {
             leave_reason("leave");
             // PS3 Leave::Enter's voluntary path: the player chose Leave Game (the leave byte is set).
@@ -3384,15 +3387,7 @@ void install(int &installed) {
 
     if (get<uint64_t>(g(kAbortSlot)) == addr_of(g(kAbortOriginal)))
         put<uint64_t>(g(kAbortSlot), addr_of(reinterpret_cast<void *>(&abort_wrapper)));
-
-    static const unsigned char idle_120[] = {0x00, 0x00, 0xf0, 0x42};
-    if (image.matches(kIdleLimit, idle_120, sizeof idle_120)) {
-        put<float>(g(kIdleLimit), 300.0f);
-        log("idle kick: limit 120 s -> 300 s");
-        ++installed;
-    } else {
-        log("idle kick limit at 0x%llx differs: left alone", (unsigned long long)kIdleLimit);
-    }
+    // The idle-kick limit (f32 0xe622a8, read by Playing's update) stays the game's 120 s, as PS3 1.10.
 }
 
 }  // namespace session
