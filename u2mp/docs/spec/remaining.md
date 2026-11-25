@@ -791,6 +791,15 @@ None. Nothing is patched and `installed` is not changed.
   options: no player in row %d`; no options: no popup.
 - B9 friends: Join and Invite To Party only when `online::friend_view(r).party_member` is false.
 
+## Parity group H changes (2026-11-25, spec parity-h-session.md H7)
+
+- B8 match rows, Mute All / Unmute All: "the others" are the remote players of the session the page names: page mode
+  (netInfo +0x2c4) below 2 = the party (roster rows `session::member_at` 0..9 without this PC and without
+  `session::party_stranger` players), else the match (the matchmaking list as before); every one of them is on our
+  transport, so it has a connection record. "Mute All" is offered unless `voice::all_muted(others)` (PS3 `0x4d6fa0`:
+  also true with nobody), "Unmute All" unless `voice::none_muted(others)` (`0x4d6d10`: also true with nobody), so
+  with nobody else neither row shows. The callbacks call `voice::set_all_muted(others, on)` (`0x4d6ab0`, silent).
+
 ## Parity group G changes (2026-11-25, spec parity-g-friends.md G4)
 
 - B10 Profile: before building the text, `online::friend_party(selected friend row, party)` (the cached party

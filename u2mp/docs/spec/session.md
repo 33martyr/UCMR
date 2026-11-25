@@ -1113,3 +1113,31 @@ New session message types (older peers ignore them, 4.2 "12..0x0f ignored" no lo
 - **Version text (2.11).** Page handler, once per frame clock, NET_SM != 0 and package `menu-temple` in state 7
   with flag 0x80: `hud_menu_text(1140, 60, 0.4, "%i.%02i.%03i")` of 1, bits 16..23 and bits 0..15 of netInfo +0
   (0 there: PS3's 0x0009004e, "1.09.078").
+
+## Parity group H changes (2026-11-25, spec parity-h-session.md)
+
+New functions (online.h, called by online.cpp):
+
+- `int custom_room_slots()`: the slot count of a custom game room (H1): `type_max_players` of the current net
+  game's type (`*net-games*` record +0x0c of ngm +0x1ca0): 10 competitive, 3 co-op, 0 when no game is chosen or the
+  type is unknown (online.cpp then makes no room and Start Match ends, H2).
+- `int playlist_room_slots()`: the slot count of a matchmaking room (H1): the largest `type_max_players` over the
+  chosen playlist's game types (`playlist_game_types`); 10 when there is none. Stand-in for the PS3 playlist maximum
+  (`0x49a958`), which our playlist data does not carry.
+- `uint32_t mm_pack_mask()` (H5, PS3 `0x4d6a08` + `0x49b858`): 0 when no playlist of ours is chosen or no net game of
+  its game types has a map-pack map (`dlc_net_game_pack` 1 or 2); else `dlc_packs() & 0xff` ANDed with `packs` of
+  every used member other than this PC (0xff = the member sent none: no narrowing). Only the host knows the members'
+  packs (kInfo), and only the host searches / creates matchmaking rooms.
+- `void online_network_error(const char *why)`: active only: log `party: network error (%s): leaving online play`,
+  netInfo +0x1c = 1, host_lost (the transport closes on the next frame), host and members alike (H8, no world).
+
+Changed:
+
+- `void online_match_abort(const char *why)`: the log names the reason: `party: the custom game is dropped (%s):
+  back to PAGE_MULTIPLAYER, NET_SM 18`; also used when the custom game room cannot be made (H2, owner decision:
+  PS3 behaviour instead of playing without a room). The rest as before.
+- `create_match_now`: `online::create_match_room()` true now also covers a room that cannot be made; online.cpp then
+  calls `online_match_abort` (next frame) instead of `online_match_ready(0)`. `online_match_ready(0)` has no caller
+  left.
+- The slot manager's capacity (`online::mm_slots()`) is now the match room's real slot count for a custom game too
+  (3 for a co-op room, H1).

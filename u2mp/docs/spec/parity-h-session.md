@@ -126,7 +126,7 @@ messages: nothing sends them in this build.
 
 ## 3. Items
 
-### H1. Room size by game type and playlist (`0x4d421c` callers) - MISSING
+### H1. Room size by game type and playlist (`0x4d421c` callers) - MISSING, implemented 2026-11-25 (section 7)
 
 PS3: the room's slot count is fixed at creation (1.4 item 7). A custom game of a co-op type gets a 3-slot room, so a
 4th player is refused by the room service ("room full"): the join fails like any failed join (F3: Joining page
@@ -142,7 +142,7 @@ the playlist's maximum player count (open question 1); party room: 10. `mm_slots
 the room's real slot count. The type is read when the room is created; later game-type changes in the lobby do not
 resize the room (PS3 neither).
 
-### H2. Every room request ends: PS3 time limits and failure results (`0x4d421c`, `0x4d4578`, `0x4d3c50`, `0x4d8220`) - MISSING
+### H2. Every room request ends: PS3 time limits and failure results (`0x4d421c`, `0x4d4578`, `0x4d3c50`, `0x4d8220`) - MISSING, implemented 2026-11-25 (section 7)
 
 PS3: no room request waits forever (1.4 item 3). The visible ends:
 
@@ -165,7 +165,7 @@ is treated exactly as a failure answer of that kind and a later answer is ignore
 failure / timeout of the custom match room: PS3 result (pop to PAGE_MULTIPLAYER, NET_SM 18) instead of playing
 without a room - **owner decision** (open question 4); the 15 s becomes 20 s either way.
 
-### H3. Join list: at most 5 rooms, random choice (`0x4d3c50` from BUTTON_MULTIPLAYER_JOIN) - MISSING
+### H3. Join list: at most 5 rooms, random choice (`0x4d3c50` from BUTTON_MULTIPLAYER_JOIN) - MISSING, implemented 2026-11-25 (section 7)
 
 PS3: the custom game list shows at most 5 rooms of the same build key, a random pick of the open rooms each time the
 list is opened. Ours: up to 20 rooms in the service's order.
@@ -174,7 +174,7 @@ To do: ask for the matching rooms as now, then keep a random choice of 5 of the 
 our own rooms first), so that a fresh search can show other rooms. With 5 or fewer matches, all of them in random
 order.
 
-### H4. Party rooms are not in the join list (`0x4d3c50`, party create key) - MISSING (owner decision)
+### H4. Party rooms are not in the join list (`0x4d3c50`, party create key) - MISSING (owner decision 2026-11-25: kept, the party rows stay as a PC extra)
 
 PS3: the party room is created with the build key plus bit 20 (`parity-f` F11), so the custom game search (key equal
 to the build key) never finds it; friends reach a party only through Join Party / invites. Ours: the party room has
@@ -185,7 +185,7 @@ To do if parity is chosen: party room key = build key with bit 20 set; the join 
 (the "Party" row kind and its select path go away). Join Party from the friends list and invites keep working (they
 use the room id, not the search).
 
-### H5. Map-pack mask in the matchmaking room key (`0x4d421c`, `0x4d3c50`, `0x4d6a08`) - MISSING (small)
+### H5. Map-pack mask in the matchmaking room key (`0x4d421c`, `0x4d3c50`, `0x4d6a08`) - MISSING (small), implemented 2026-11-25 (section 7)
 
 PS3 (1.4 item 1): in a playlist with map-pack content, the matchmaking room key (0x4C) carries the party's common
 map-pack bits from bit 12 up and 0x4D holds the same mask, both on create and on search, so parties only meet rooms
@@ -197,7 +197,7 @@ not 0, add it to the matchmaking key from bit 12 up and put it in 0x4D, on creat
 as now and 0x4D = 0. Custom game and party rooms: 0x4D = 0. (`parity-f` F5's "party size bits" in the room pick are
 these mask bits.)
 
-### H6. Owner succession order of a match room (`0x4d4868`) - MISSING (small)
+### H6. Owner succession order of a match room (`0x4d4868`) - MISSING (small), implemented 2026-11-25 (section 7)
 
 PS3 (1.4 item 5): at match start the host gives the room the remote players in game slot order, players that can
 talk to everybody first. Who takes over after the host leaves a running match is the first of that list still there.
@@ -209,7 +209,7 @@ PC knows from the roster), players without a working link to some other player b
 the `migration_tick` fallback picks the first remaining player of the same order, so every PC agrees without the
 service. Party room succession (lowest member id) stays: PS3 sent no order for party rooms.
 
-### H7. Mute All / Unmute All helpers (`0x4d6ab0`, `0x4d6d10`, `0x4d6fa0`) - MISSING (see `parity-e-flow2.md` 2.7)
+### H7. Mute All / Unmute All helpers (`0x4d6ab0`, `0x4d6d10`, `0x4d6fa0`) - MISSING (see `parity-e-flow2.md` 2.7), implemented 2026-11-25 (section 7)
 
 The popup rules and texts are `parity-e` 2.7; this gives the three helpers' exact results (read from the
 assembly; this answers `parity-e` open question 4 for `0x4d6d10` / `0x4d6fa0`). "Others" = the members of the given
@@ -288,14 +288,16 @@ running ahead of the latest snapshot nor behind a floor the owning object report
 2. H5: meaning of NPD+367 bit 0 (it gates the mask) and of `0x49b858` ("the playlist uses map-pack content" is the
    reading); `parity-f` F5 calls NPD+367 bit 0 "may not search" - the two readings must be reconciled from the
    matchmaking page's own code.
-3. H4: keep listing party rooms (PC extra) or follow PS3?
-4. H2: custom room create failure: PS3 abort (back to PAGE_MULTIPLAYER) or ours (play without a room)?
+3. H4: keep listing party rooms (PC extra) or follow PS3? (Owner 2026-11-25: keep.)
+4. H2: custom room create failure: PS3 abort (back to PAGE_MULTIPLAYER) or ours (play without a room)? (Owner
+   2026-11-25: PS3.)
 5. H6: what sets the trackers' "can talk to everybody" flag on PS3 (tracker +580); until known, put players whose
-   reported peer links are not all up behind the others, or keep plain net id order.
+   reported peer links are not all up behind the others, or keep plain net id order. (Owner 2026-11-25: reported
+   links first, net id order as the fallback; section 7.)
 6. H8: with the online program present but no world, should Multiplayer show the PS3 network error instead of going
-   on as a local party?
+   on as a local party? (Owner 2026-11-25: the network error.)
 7. `PORT-MATCHMAKING.md` 1.3 / 1.8 / 1.7 should get the corrections of 1.4 (0x4D = map-pack mask, member data
-   layout, HostRank order); not edited here.
+   layout, HostRank order). (Done 2026-11-25.)
 
 ## 6. Status table
 
@@ -311,7 +313,7 @@ running ahead of the latest snapshot nor behind a floor the owning object report
 | 0x4d0c88 | room event callback: queue it (max 64, assert) | PLATFORM | online program event queue; H8 |
 | 0x4d0d90 | context callback: "started" flag and error | PLATFORM | `u2o_state` link states; H8 |
 | 0x4d0e78 | GetWorldInfoList callback: keep the list | PLATFORM | `u2o_find_world`; H8 |
-| 0x4d0fc0 | session manager start (context, servers, worlds) | PLATFORM | online.cpp `open_link`, `frame`; H8 (question 6) |
+| 0x4d0fc0 | session manager start (context, servers, worlds) | PLATFORM | online.cpp `open_link`, `frame`; no world in Multiplayer: network error (`no_world_error`); H8 |
 | 0x4d1a00 | session manager stop | PLATFORM | online.cpp `on_transport_closed`; H8 |
 | 0x4d1c80 | room message callback (nothing sends) | COVERED | none needed |
 | 0x4d1e2c | session init: no room, records cleared, requests "finished" | COVERED | online.cpp `Room{}` reset; session.cpp sets match+0xc8 (`NETINIT.md` 3) |
@@ -347,12 +349,12 @@ running ahead of the latest snapshot nor behind a floor the owning object report
 | 0x4d3920 | apply a room internal attribute (blob 0x57, name 0x58, "ROOM NAME" log) | COVERED | online.cpp `take_room` (no reader of the name) |
 | 0x4d3a10 | GrantRoomOwner request | PLATFORM | `online::promote`; H8 |
 | 0x4d3af8 | set external state 0x53 (stored while in no room) | COVERED | online.cpp `set_state53` |
-| 0x4d3c50 | SearchRoom (key, location, region, tier filters; 5 random) | MISSING | online.cpp `start_search` / `mm_*`; H2 (20 s), H3, H4, H5 |
+| 0x4d3c50 | SearchRoom (key, location, region, tier filters; 5 random) | COVERED | online.cpp `start_search` / `mm_begin` (20 s, `time_limit`), join list 5 random (`U2O_EV_SEARCH`), map-pack key (`match_key`); H2, H3, H5; party rows kept (H4, owner) |
 | 0x4d4020 | member record by NpId | COVERED | online.cpp `in_room` / session.cpp `net_id_of` |
-| 0x4d421c | CreateJoinRoom (slots, flags, attributes, member data) | MISSING | online.cpp `create_room`; H1, H2, H4, H5 |
-| 0x4d4578 | JoinRoom (member data, 5 s) | MISSING | online.cpp joins; H2 |
+| 0x4d421c | CreateJoinRoom (slots, flags, attributes, member data) | COVERED | online.cpp `create_room` (`room_slots`, 0x4D / 0x4C mask, 20 s); H1, H2, H5; party key kept (H4, owner) |
+| 0x4d4578 | JoinRoom (member data, 5 s) | COVERED | online.cpp joins (5 s, `time_limit` / `expire_requests`); H2 |
 | 0x4d479c | member data callback: log | COVERED | online.cpp `U2O_EV_DONE` log |
-| 0x4d4868 | HostRank: owner succession list | MISSING | online.cpp `room_state`; H6 |
+| 0x4d4868 | HostRank: owner succession list | COVERED | online.cpp `send_match_order` (slot order, kOpTalkAll first; kOpOrder to all), `migration_tick`; H6 |
 | 0x4d4a0c | HostRank callback: log, result | COVERED | `U2O_EV_DONE` log |
 | 0x4d4b28 | HostMigrate: owner auto grant on/off | PLATFORM | always on + session.cpp `match_migration_ok`; H8 |
 | 0x4d4cf0 | HostMigrate callback: log, result | COVERED | `U2O_EV_DONE` log |
@@ -368,15 +370,15 @@ running ahead of the latest snapshot nor behind a floor the owning object report
 | 0x4d5940 | search results -> rows (room id, owner name) | COVERED | online.cpp `found` / join rows |
 | 0x4d5a18 | a member's published data by NpId (48 bytes only) | COVERED | session.cpp member info (kInfo) |
 | 0x4d5e38 | member list for the UI (owner first; team-sorted mode) | COVERED | `session::member_at`, `fill_net_players` |
-| 0x4d6a08 | AND of every member's map-pack byte | COVERED | session.cpp Start Match packs check (matchmaking key: H5) |
-| 0x4d6ab0 | mute / unmute every other member | MISSING | H7 (`parity-e` 2.7) |
-| 0x4d6d10 | "nobody else muted" | MISSING | H7 |
-| 0x4d6fa0 | "everybody else muted" | MISSING | H7 |
+| 0x4d6a08 | AND of every member's map-pack byte | COVERED | session.cpp Start Match packs check, `mm_pack_mask` (matchmaking key, H5) |
+| 0x4d6ab0 | mute / unmute every other member | COVERED | voice.cpp `set_all_muted`, remaining.cpp `mute_others`; H7 |
+| 0x4d6d10 | "nobody else muted" | COVERED | voice.cpp `none_muted`; H7 |
+| 0x4d6fa0 | "everybody else muted" | COVERED | voice.cpp `all_muted`; H7 |
 | 0x4d7200 | remove a member ("REMOVING MEMBER", listener 3, release link) | COVERED | online.cpp `U2O_EV_MEMBER_LEFT`, session.cpp `player_left` |
 | 0x4d74b8 | remove every member | COVERED | online.cpp `leave_room` / `on_transport_closed` |
 | 0x4d76e8 | add a member ("ADDING MEMBER", connect, listener 2) | COVERED | online.cpp `connect_member`, session.cpp `on_peer` |
 | 0x4d7e48 | JoinRoom callback: members, room id, attributes, listener 1 | COVERED | online.cpp `U2O_EV_ROOM_JOINED`, `join_succeeded` |
-| 0x4d8220 | CreateJoinRoom callback: members, room id, listener 0 | MISSING | failure / timeout result: H2 (owner decision) |
+| 0x4d8220 | CreateJoinRoom callback: members, room id, listener 0 | COVERED | online.cpp `U2O_EV_ROOM_CREATED`; failure / timeout of the custom room: `custom_create_failed` (PS3 result, owner); H2 |
 | 0x4d8540 | LeaveRoom: records removed at once, request sent | COVERED | online.cpp `leave_room` |
 | 0x4d8a98 | Kickout (block flag); self = leave | PLATFORM | `session::kick`; H8 |
 | 0x4d8bf4 | LeaveRoom callback: retry on error | PLATFORM | single leave; H8 |
@@ -388,3 +390,56 @@ running ahead of the latest snapshot nor behind a floor the owning object report
 | 0x4d9398 | snapshot buffer clear (second copy) | COVERED | PS4 `0x66a9f0`; H9 |
 
 Counts: 54 COVERED, 23 PLATFORM, 8 MISSING (H4 and H2's create result wait on owner decisions).
+After the implementation (section 7): 62 COVERED, 23 PLATFORM, 0 MISSING (H4 kept as a PC extra by owner decision).
+
+## 7. Implementation (2026-11-25, branch `u2mp-ps3-parity-3`)
+
+Owner decisions: H1 as specified; H2 with the PS3 result for a failed custom room create; H3 as PS3; **H4 kept**
+(party rows stay in the join list, PC extra); H5 as specified; H6 slot order with "can talk to everybody" first,
+net id order as the fallback; H7 as specified; H8 no world = the PS3 network error.
+
+- **H1** (online.cpp `room_slots`, `create_room`; session.cpp `custom_room_slots`, `playlist_room_slots`): party room
+  10; custom game room `type_max_players` of the current game's type at Start Match (10 / co-op 3; 0 = no room, log
+  `the custom game room is not made: the game type has no player count (0 slots)`, then H2's create failure);
+  matchmaking room the largest `type_max_players` of the chosen playlist's game types (open question 1 stand-in; 10
+  without a playlist). `mm_slots()` (slot manager capacity, gathering rows) answers the match room's real
+  `max_slot` for every room kind, without a room the matchmaking size on the matchmaking page, else 10; presence and
+  the join list rows show the service's `max_slot`. A reused custom room keeps its size.
+- **H2** (online.cpp `time_limit`, `request`, `expire_requests`, `late_answer`, `fail_pending_now`,
+  `custom_create_failed`): every request gets the PS3 limit when it is sent (join kinds 5 s; create kinds, both
+  searches and the world list 20 s; leave, room / member data, owner order 10 s; presence, messages, friends and
+  scores none here). Each frame a request past its limit is logged (`%s on room %llx (request %llu): no answer in %.0f
+  s: failed`) and handed to `on_event` as an answer of its kind with error -2 ("no answer in time"), so the existing
+  failure paths run (join list: JOINING pops, NET_SM 18, party left; matchmaking: next room; follow: back to an own
+  party; search: list page pops; party room: next try in 5 s). The real answer, if it still comes, is dropped
+  (`the answer to request %llu came after its time limit: ...`); a room it made or joined is left at once. A link that
+  goes down (U2O_EV_LINK_LOST, or the state leaving READY) fails every such request on the spot. Custom game room
+  that cannot be made (error answer, 20 s, link / world missing, request refused, 0 slots): `custom_create_failed`
+  logs `Session Create failed (%s): Start Match ends, back to PAGE_MULTIPLAYER, NET_SM 18`, shows the party room
+  again and calls `session::online_match_abort(why)` (match session cleared, menu reset, PAGE_MULTIPLAYER, NET_SM 18,
+  no box); `create_match_room` now returns true for those cases and the abort runs on the next frame. The 15 s Start
+  Match timer and "goes on without a room" are gone.
+- **H3** (online.cpp `U2O_EV_SEARCH`): the listable rooms (not ours, not matchmaking) are shuffled and the first 5
+  kept, so every search can show another 5; 5 or fewer: all, in random order.
+- **H4**: unchanged (party room plain build key, "Party" rows).
+- **H5** (session.cpp `mm_pack_mask`; online.cpp `match_key`, `create_room`, `mm_begin`): in a playlist with a
+  map-pack map the key gets mask << 12 and 0x4D the mask, on create and on search; else 0x4D = 0 (all room kinds).
+  The NetPlayerData+367 bit 0 gate is not applied (open question 2: its PS4 offset and meaning are not known).
+- **H6** (online.cpp `send_match_order`, `talk_all_tick`, `on_message` kOpTalkAll / kOpOrder, `migration_tick`):
+  every match room member that is not the host reports once a second whether its links to every other room member
+  are up (session message kOnlineMessage op 5 `{u8 all}`, sent on change or to a new host). At the match start the
+  host orders the other players by net id, the "all up" ones first (stable), room members without a net id last by
+  member id; the member ids go to `u2o_set_owner_rank`, the net ids to every player (op 6 `{u8 n, n x u8 net id}`,
+  log `owner succession of %zu player(s), net ids %s`). `migration_tick`'s fallback picks the promoted player, else
+  the first of that order still in the match room, else the lowest member id (party room, no order). Older PCs ignore
+  both ops (net id order then, as the fallback).
+- **H7** (voice.cpp `all_muted`, `none_muted`, `set_all_muted`; remaining.cpp `mute_others`, `party_others`): see
+  `remaining.md` "Parity group H changes".
+- **H8 no world** (online.cpp `no_world_error`; session.cpp `online_network_error`): in Multiplayer, a world request
+  that fails (error, 20 s, refused) gives the network error (netInfo +0x1c, transport closed next frame, log `party:
+  network error (no room service world): leaving online play`); outside Multiplayer it is tried again every 10 s.
+- `PORT-MATCHMAKING.md` 1.3, 1.5, 1.7, 1.8, 3.3, 3.7 and 6 carry the corrections of 1.4.
+
+Not possible without the online program: the PS3 search option "random" (the room service picks among all matches;
+`U2oSearch` has no option field, so we pick 5 of the first 20 the service returns) and a per-request time limit
+inside the program (`u2_online_abi.h` has none; the limit runs in online.cpp and a late answer is undone).

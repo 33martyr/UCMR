@@ -49,9 +49,15 @@ events (`gamenet.cpp`) and voice ride on it. Online changes only two things:
 
 | Room | Made when | maxSlot / flags | Attributes (PS3 1.3) |
 |---|---|---|---|
-| party | Multiplayer entered (this PC leads its own party; PS3 `0x4c48d0`) | 10, OWNER_AUTO_GRANT | 0x4C key, 0x4D party size, 0x4E/0x4F 0, 0x50 0, **0x52 = 1**, 0x53 0, bin 0x55 (8 zero bytes), bin 0x58 `"%s.%lld"`, member bin 0x59 |
-| custom game (match) | Start Match in a custom game (PS3 `0x444bb0` -> `0x4d421c`) | 10 (`0x49e620` is inlined on PS4), no flags | same, **0x52 = 2**, no 0x51 |
-| matchmaking | Find Match (PS3 `0x4b0f48`) | 10, OWNER_AUTO_GRANT | 0x4C playlist key, 0x4D party size, 0x4E/0x4F 0, 0x50 0, **0x51 tier**, **0x52 = 3**, 0x53 0, bin 0x55/0x58, member bin 0x59 |
+| party | Multiplayer entered (this PC leads its own party; PS3 `0x4c48d0`) | 10, OWNER_AUTO_GRANT | 0x4C key, 0x4D 0, 0x4E/0x4F 0, 0x50 0, **0x52 = 1**, 0x53 0, bin 0x55 (8 zero bytes), bin 0x58 `"%s.%lld"`, member bin 0x59 |
+| custom game (match) | Start Match in a custom game (PS3 `0x444bb0` -> `0x4d421c`) | the game type's player count (`0x49e620`, inlined on PS4: 10 competitive, 3 co-op; unknown type: no room), OWNER_AUTO_GRANT | same, **0x52 = 2**, no 0x51 |
+| matchmaking | Find Match (PS3 `0x4b0f48`) | the playlist's maximum (`0x49a958`; ours: the largest player count of its game types), OWNER_AUTO_GRANT | 0x4C playlist key (+ the party's common map-pack mask << 12 in a map-pack playlist), 0x4D that mask (else 0), 0x4E/0x4F 0, 0x50 0, **0x51 tier**, **0x52 = 3**, 0x53 0, bin 0x55/0x58, member bin 0x59 |
+
+Every room request has the PS3 time limit (spec `parity-h-session.md` H2): JoinRoom 5 s, CreateJoinRoom / SearchRoom
+/ the world list 20 s, leave, room / member data and the owner order 10 s. No answer in time is handled exactly as a
+failure answer of that request; an answer that still comes is not taken (a room it made or joined is left). A link
+that goes down fails every such request at once. With the online program running but no world, Multiplayer ends
+with the network error (PS3 NetInit fails without a world, H8).
 
 - 0x4C key = netInfo+0 when set (PS3: DC `6f1c3f87`[0] \| 0x90000), else the PC value `0x9004e`
   (PS4 never fills netInfo+0). Custom rooms use the key directly; matchmaking rooms use
@@ -75,10 +81,10 @@ events (`gamenet.cpp`) and voice ride on it. Online changes only two things:
 |---|---|---|---|
 | `0x5eb160` BUTTON_MULTIPLAYER (session.cpp `multiplayer_button` -> `start_transport`) | NetInit `0x447a5c`, Matching2 init `0x4d0fc0` | `online::start()`: load DLL, `u2o_open(relay, "NPWR00462_00")`, transport hosted on the link | session.cpp |
 | per frame (`tick`: menu page handler event 6 + TaskManagerOnline state updates) | NdiNetUpdate `0x449e88` / event queue `0x4d0bd0` | `online::frame()`: link state, `u2o_find_world` once READY, `u2o_poll` events, party room create, timers, room hide / 0x53, member data, RTT log | session.cpp |
-| `0x5eb780` STARTMATCH -> `create_match_now` | `0x444bb0` + CreateJoinRoom `0x4d421c`, response `0x4d8220` | custom game: create the match room, wait (15 s max) for `U2O_EV_ROOM_CREATED`, then `match+0x99 = 1` (`session::online_match_ready`); `0x6093f0` runs 3 -> 10 -> 16 | session.cpp / online.cpp |
+| `0x5eb780` STARTMATCH -> `create_match_now` | `0x444bb0` + CreateJoinRoom `0x4d421c`, response `0x4d8220` | custom game: create the match room, wait (20 s max) for `U2O_EV_ROOM_CREATED`, then `match+0x99 = 1` (`session::online_match_ready`); no room (error, no answer, no link / world): Start Match ends, PAGE_MULTIPLAYER, NET_SM 18 (`session::online_match_abort`, PS3 "Session Create failed"); `0x6093f0` runs 3 -> 10 -> 16 | session.cpp / online.cpp |
 | kFollow session message | party follow, mailbox 0x10e, member data +0 | carries the match room id (`{kFollow, u64}`); members `u2o_join_room` it as members (transport unchanged) | session.cpp / online.cpp |
 | host `on_peer` join while NET_SM 16 and `match+0x99` | JOINING 12 -> 14 -> 17 (`0x4661e0`) | a player who joined from the list gets the follow at once and enters CLIENT_LOBBY | session.cpp |
-| `0x5ebea0` BUTTON_MULTIPLAYER_INVITES (remaining.cpp) | `0x440948` (invite inbox) | online: calls the intact BUTTON_MULTIPLAYER_JOIN `0x6095d0` (PAGE_MULTIPLAYER_JOIN, NET_SM 5) + `u2o_search_rooms` (SearchRoom `0x4d3c50`: 0x4C EQ key, flag filter HIDDEN\|CLOSED = 0, max 20) | remaining.cpp |
+| `0x5ebea0` BUTTON_MULTIPLAYER_INVITES (remaining.cpp) | `0x440948` (invite inbox) | online: calls the intact BUTTON_MULTIPLAYER_JOIN `0x6095d0` (PAGE_MULTIPLAYER_JOIN, NET_SM 5) + `u2o_search_rooms` (SearchRoom `0x4d3c50`: 0x4C EQ key, flag filter HIDDEN\|CLOSED = 0, max 20; of the listable rooms 5 are kept at random, PS3 "max 5, random") | remaining.cpp |
 | `0x659590` join list query, cond 3 (menus.cpp) | `0x4b8ebc` + result list `0x4d5940` | rows "owner - Custom Game / Party (n/max)", title "Online Games"; empty: "Searching..." / "No open games found. Select to search again." | menus.cpp |
 | `match+0xa8` / `+0xac` | `0x4d2410` search status | written on search done (1 / 0) and on failure (1 / -1: PAGE_MULTIPLAYER_JOIN `0x609640` pops, NET_SM 18) | online.cpp |
 | `0x609680` SELECT_JOIN_GAME (frontend2.cpp) | `0x465808` + reserve 0x100/0x101 + JoinRoom `0x4d4578` | free-slot check from the search data (whole party must fit), `u2o_join_room` with our member blob | frontend2.cpp |
@@ -233,8 +239,9 @@ framing, every proto3 field, attribute ranges, signaling (SIGN v3, UDP 3657 ping
   the empty communication id; timed-out peers tried again every 5 s.
 - online.cpp: a joined room that is CLOSED (match running; RPCN does not enforce it) is left again ("That game has
   already started."); the join list shows PC rooms only (0x52 >= 1); party rooms get an owner succession (lowest
-  member id first, re-sent when the members change; the match room uses the same order); host migration falls
-  back to that order (or the promoted player) when RPCN has not moved the room in 15 s; a lost link is reopened
+  member id first, re-sent when the members change); the match room gets the PS3 HostRank order at the match start
+  (game slot order, players whose links to everybody are up first; sent to every player too, parity H6); host
+  migration falls back to that order (or the promoted player) when RPCN has not moved the room in 15 s; a lost link is reopened
   every 15 s while in multiplayer; a refused party-room create waits 5 s.
 - Still in the launcher's relay (another change in progress there): only the command ids the game uses should be
   forwarded (any server-side error closes the launcher's RPCN session), RemoveFriend's NotFound is 26, and the

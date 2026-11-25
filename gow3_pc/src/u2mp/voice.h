@@ -123,6 +123,13 @@ void set_volume(float v);
 bool muted(uint32_t net_id);
 bool toggle_mute(uint32_t net_id);
 void set_muted(uint32_t net_id, bool on);   // Mute All / Unmute All (spec parity-e-flow2.md 2.7)
+// The "all" helpers of the player popups (PS3 parity H7, spec parity-h-session.md): `others` = the remote members of
+// the session the popup names (party or match) that have a connection record. All muted: every one of them is (also
+// true for none): Mute All is not offered. None muted: no one of them is (also true for none): Unmute All is not
+// offered. Set all: mutes / unmutes every one of them, silently.
+bool all_muted(const std::vector<uint32_t> &others);
+bool none_muted(const std::vector<uint32_t> &others);
+void set_all_muted(const std::vector<uint32_t> &others, bool on);
 // True while voice from this member (by net id; the local id: our own) arrived in the last 300 ms:
 // the roster rows' talking icon (PS3 0x4bc9f0 image 1, cellVoice energy level).
 bool talking(uint32_t net_id);

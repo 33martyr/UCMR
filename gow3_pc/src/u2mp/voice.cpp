@@ -573,6 +573,23 @@ void set_muted(uint32_t net_id, bool on) {
     toggle_mute(net_id);
 }
 
+// PS3 parity H7 (0x4d6fa0 / 0x4d6d10 / 0x4d6ab0) over the caller's "others" (remote members with a record).
+bool all_muted(const std::vector<uint32_t> &others) {
+    for (const uint32_t id : others)
+        if (!muted(id)) return false;
+    return true;
+}
+
+bool none_muted(const std::vector<uint32_t> &others) {
+    for (const uint32_t id : others)
+        if (muted(id)) return false;
+    return true;
+}
+
+void set_all_muted(const std::vector<uint32_t> &others, bool on) {
+    for (const uint32_t id : others) set_muted(id, on);
+}
+
 float volume() {
     load_config();
     return config.volume;

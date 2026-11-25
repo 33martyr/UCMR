@@ -22,8 +22,10 @@ net::Link *start();
 bool active();
 // Once per game frame: room service events, link state, room state (hide / 0x53), timers.
 void frame();
-// Start Match in a custom game (host): makes the match room. True: the room is being made and
-// session::online_match_ready() follows; false: go on at once (no room needed or online off).
+// Start Match in a custom game (host): makes the match room (the game type's slot count, session::custom_room_slots).
+// True: session::online_match_ready() follows when the room exists, or session::online_match_abort() when it cannot be
+// made (error, no answer in 20 s, no link / world, no slot count: PS3 parity H2); false: go on at once (no room
+// needed or online off).
 bool create_match_room();
 // The match room this PC is in (0 none): sent with the follow so that party members join it too.
 uint64_t match_room();
@@ -180,7 +182,9 @@ bool in_own_party(const std::string &npid);          // this PC or a member of o
 uint64_t own_party_id();                             // our party room while it has 2+ members, else 0
 uint64_t member_party_id(const std::string &npid);   // the party id a match room member published (+0), 0 none
 bool peer_rtt(const std::string &npid, uint32_t &rtt_ms, bool &up);   // false: no connection record
-int mm_slots();                      // the size of the match matchmaking fills (room max), 0 when it is off
+// The match room's slot count (custom or matchmaking); without one the size a matchmaking room of the chosen
+// playlist gets (matchmaking page) or 10. 0 when online matchmaking is off.
+int mm_slots();
 
 // ---- PS3 parity group E (session.cpp; spec parity-e-flow2.md 2.4 Party Up, 2.6 slot manager) ----
 uint64_t party_room_id();            // our party room (also a party of one), 0 none
@@ -218,9 +222,22 @@ void online_match_member_joined();
 // online.cpp -> session.cpp: the leader says whether the whole party is in the custom game room (PS3 0x10e {1} /
 // {0}); also a failed join from the list (0). Posts mailbox 0x10e for the JOINING page while it waits (NET_SM 12).
 void online_party_in(bool ok);
-// online.cpp -> session.cpp, leader: a party member could not join the custom game room (PS3 0x465da0 state 10
-// failure): the match is dropped and the leader goes back to PAGE_MULTIPLAYER with NET_SM 18.
-void online_match_abort();
+// online.cpp -> session.cpp, leader: the custom game is dropped (`why` is logged): a party member could not join the
+// custom game room (PS3 0x465da0 state 10 failure), or the room could not be made (PS3 "Session Create failed",
+// parity H2). The leader goes back to PAGE_MULTIPLAYER with NET_SM 18, no box.
+void online_match_abort(const char *why);
+// online.cpp -> session.cpp: the network error (netInfo +0x1c, the game's error box) and online play ends, for the
+// host and the others alike; `why` is logged (no room service world, parity H8).
+void online_network_error(const char *why);
+// Room sizes (PS3 parity H1, 0x49e620 / 0x49a958): a custom game room gets the current game type's player count (10
+// competitive, 3 co-op, 0 unknown type); a matchmaking room the chosen playlist's maximum: the largest player count of
+// its game types (the PS3 playlist value is not known to this port), 10 without a playlist of ours.
+int custom_room_slots();
+int playlist_room_slots();
+// The matchmaking room key's map-pack mask (PS3 parity H5, 0x4d6a08): the AND of the map-pack bits (dlc_packs) of
+// this PC and every party member (a member that sent none does not narrow it); 0 when the chosen playlist has no
+// map-pack map.
+uint32_t mm_pack_mask();
 // The NpIds of the other members on our transport (host), in slot order; empty when unknown.
 std::vector<std::string> member_npids();
 // online.cpp -> session.cpp: this player's name is the RPCN online name.

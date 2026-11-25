@@ -16,10 +16,15 @@
 //   - Multiplayer entered: link up (u2o_open, U2O_READY, u2o_find_world), then this PC's party room
 //     (PS3 0x4c48d0: 10 slots, OWNER_AUTO_GRANT) - searchable here, PS3 hid it and used invites.
 //   - Start Match, custom game (PS3 0x444bb0 -> CreateJoinRoom 0x4d421c): the match room with the PS3
-//     attribute set (1.3), then match+0x99 (session::online_match_ready). Party members join it too.
+//     attribute set (1.3) and the game type's slot count (10, co-op 3), then match+0x99
+//     (session::online_match_ready); a room that cannot be made ends Start Match as on PS3 (NET_SM 18). Party
+//     members join it too.
 //   - Invites button -> join list (PS3 BUTTON_MULTIPLAYER_JOIN 0x4655b0 = PS4 0x6095d0 + SearchRoom
-//     0x4d3c50, 0x4C == version): the rooms found; selecting one (SELECT_JOIN_GAME 0x465808 = 0x609680)
-//     checks its free slots (the PS3 reservation 0x100/0x101, simplified) and joins it (JoinRoom 0x4d4578).
+//     0x4d3c50, 0x4C == version): at most 5 of the rooms found, picked at random; selecting one (SELECT_JOIN_GAME
+//     0x465808 = 0x609680) checks its free slots (the PS3 reservation 0x100/0x101, simplified) and joins it
+//     (JoinRoom 0x4d4578).
+//   - Every room request has the PS3 time limit (time_limit: join 5 s, create / search 20 s, the rest 10 s);
+//     no answer in time counts as a failure answer.
 //     The transport then joins the room owner; a party leader takes its party along.
 //   - Member data 0x59 (48 bytes, PS3 0x4af240 = PS4 0x64e810), room hide (0x4d5338) and state 0x53
 //     (0x4d3af8) follow NET_SM.
@@ -79,7 +84,8 @@ enum : int32_t { kServerLobby = 16, kChooseHostJoin = 18, kUpdate = 26, kReset =
 constexpr char kCommunicationId[] = "NPWR00462_00";   // retail NPWR00462 (PS3 0xe161b0)
 constexpr uint16_t kVport = 1;                       // the one virtual port of the match traffic
 constexpr uint32_t kFlagOwnerAutoGrant = 0x80000000u, kFlagClosed = 0x40000000u, kFlagHidden = 0x10000000u;
-constexpr uint16_t A_KEY = 0x4c, A_PARTY_SIZE = 0x4d, A_LAT = 0x4e, A_LON = 0x4f, A_REGION = 0x50, A_TIER = 0x51,
+// 0x4D: the party's common map-pack mask of a matchmaking room (0 otherwise; spec parity-h-session.md 1.4 item 1).
+constexpr uint16_t A_KEY = 0x4c, A_PACKS = 0x4d, A_LAT = 0x4e, A_LON = 0x4f, A_REGION = 0x50, A_TIER = 0x51,
                    A_KIND = 0x52, A_STATE = 0x53, A_LATLON = 0x55, A_NAME = 0x58;
 // 0x52 (searchable int 7) is unused by PS3; it labels PC rooms for the local UI but is never a search
 // filter. Matchmaking rooms carry the playlist index in 0x4C (PS3: index << 20 | version | 0x10000) and
@@ -94,14 +100,21 @@ enum class MatchRange { Optimal, Close, Any };
 constexpr MatchRange kMatchRange = MatchRange::Any;
 constexpr int32_t kPcLat = 0, kPcLon = 0;                  // PS3 location object read 0/0
 constexpr uint32_t kPcRegion = 0x0000004eu;                 // PS3 netInfo+0 language mask, region 0
-constexpr uint32_t kMaxSlot = 10;                    // custom (0x49e620, inlined on PS4) and party: 10 players
+// Room sizes (PS3 parity H1): the party room 10; a custom game room the game type's player count (0x49e620: 10
+// competitive, 3 co-op; session::custom_room_slots); a matchmaking room the playlist's maximum
+// (session::playlist_room_slots).
+constexpr uint32_t kPartySlots = 10;
 constexpr size_t kBlobSize = 48;                     // member bin 0x59 (PS3 0x4af240)
-constexpr double kJoinTimeout = 20.0, kCreateTimeout = 15.0, kSwitchDelay = 0.3, kRttLogPeriod = 10.0;
+// kJoinTimeout: how long the link to a room owner may take to come up (not a room request; those: time_limit).
+constexpr double kJoinTimeout = 20.0, kSwitchDelay = 0.3, kRttLogPeriod = 10.0;
 // online message ops (session message type session::kOnlineMessage)
 enum : uint8_t { kOpFollowRoom = 1,     // leader -> party: {u64 room id}: I joined that room, come along
                  kOpPromote = 2,        // leader -> party: {u64 room id, npid}: that player leads now (PS3 GrantRoomOwner)
                  kOpPartyIn = 3,        // leader -> party: {u8 ok}: the whole party is in the custom game room (PS3 0x10e)
-                 kOpJoinResult = 4 };   // member -> leader: {u8 ok}: joining the custom game room (PS3 0x10d)
+                 kOpJoinResult = 4,     // member -> leader: {u8 ok}: joining the custom game room (PS3 0x10d)
+                 kOpTalkAll = 5,        // member -> host: {u8 all}: our links to every other match room member are up
+                                        // (PS3 tracker "canTalkToAll")
+                 kOpOrder = 6 };        // host -> all: {u8 n, n x u8 net id}: the match room's owner succession (HostRank)
 // Presence data (RPCN presence of this game, what friends' lists read): "U2MP", what we do, which room.
 // Version 1 is the first 32 bytes; version 2 (48 bytes) adds what the PS3 friends list and friend card show
 // (spec parity-b-menus.md 5); version 3 (80 bytes) adds the career stats PAGE_MULTIPLAYER's friends ticker shows
@@ -276,7 +289,36 @@ struct Pending {
     uint32_t room_kind = 0;
     bool lead_party = false;   // JoinList: we led a party with others, it follows
     std::string what;
+    double deadline = 0;       // no answer by then: failed (time_limit); 0 = no limit
 };
+
+// PS3 room request time limits (spec parity-h-session.md 1.4 item 3, H2): JoinRoom 5 s; CreateJoinRoom, SearchRoom
+// and the world list the context default 20 s; LeaveRoom, room and member data, owner order 10 s. 0: no limit here
+// (presence, messages, friends: not room requests; the leaderboards have their own, board_expire).
+double time_limit(Req k) {
+    switch (k) {
+    case Req::JoinList: case Req::JoinLeader: case Req::JoinMatchMember: case Req::JoinMatchmaking: case Req::Rejoin:
+        return 5;
+    case Req::World: case Req::CreateParty: case Req::CreateMatch: case Req::CreateMatchmaking: case Req::Search:
+    case Req::MmSearch:
+        return 20;
+    case Req::Leave: case Req::SetExternal: case Req::SetInternal: case Req::SetMember: case Req::OwnerRank: return 10;
+    default: return 0;
+    }
+}
+// The answer a request that ran out of time is failed with (the event kind its real answer has).
+int32_t answer_kind(Req k) {
+    switch (k) {
+    case Req::World: return U2O_EV_WORLD;
+    case Req::CreateParty: case Req::CreateMatch: case Req::CreateMatchmaking: return U2O_EV_ROOM_CREATED;
+    case Req::JoinList: case Req::JoinLeader: case Req::JoinMatchMember: case Req::JoinMatchmaking: case Req::Rejoin:
+        return U2O_EV_ROOM_JOINED;
+    case Req::Leave: return U2O_EV_ROOM_LEFT;
+    case Req::Search: case Req::MmSearch: return U2O_EV_SEARCH;
+    default: return U2O_EV_DONE;
+    }
+}
+constexpr int32_t kErrTimeout = -2;   // ours: the request's time limit passed without an answer
 
 struct Peer {
     std::string npid;
@@ -294,10 +336,12 @@ double next_world_try = 0;
 double next_party_try = 0, next_link_try = 0;   // backoffs: our party room create, reopening a lost link
 Room party_room, match_room_;
 std::map<uint64_t, Pending> pending;
+std::vector<uint64_t> expired;   // requests failed by their time limit: a late answer is not taken (late_answer)
 std::vector<Peer> peers;
 std::string my_npid;
 
-// join list
+// join list (PS3: at most 5 rooms, random)
+constexpr size_t kListRooms = 5;
 std::vector<U2oRoomExt> found;
 bool searching = false;
 uint64_t search_req = 0;
@@ -306,7 +350,7 @@ char row_text[U2O_MAX_ROOMS][96];
 // timers / flows
 uint64_t create_party_req = 0, create_match_req = 0;
 bool match_waiting = false;    // Start Match waits for the match room
-double match_deadline = 0;
+std::string create_fail_why;   // the match room cannot be made: Start Match ends on the next frame (custom_create_failed)
 bool waiting_host = false;     // the transport joins a room owner
 double host_deadline = 0;
 uint64_t waiting_room = 0;
@@ -404,6 +448,12 @@ uint64_t promote_room = 0;
 double promote_at = 0;         // the leader leaves and rejoins the room then
 std::string host_npid;         // the player whose transport we are in (us while we host)
 std::string pending_notice;    // a message box for the player, shown once a menu page allows it
+// The match room's owner succession (PS3 HostRank 0x4d4868, parity H6): the host's order of the other players' net
+// ids, sent to everyone at the match start (kOpOrder), so that every PC picks the same next owner (migration_tick).
+std::vector<uint32_t> match_order;
+std::map<std::string, bool> talk_all;   // host: per NpId, what the member last reported (kOpTalkAll)
+int talk_all_sent = -1;                 // member: the value last reported, -1 none
+std::string talk_all_host;              // member: the host it was reported to
 
 const char *link_name(int32_t s) {
     switch (s) {
@@ -432,6 +482,7 @@ const char *error_hint(int32_t e) {
     case 14: return "no such room";
     case 16: return "room full";
     case 26: return "player not online";
+    case kErrTimeout: return "no answer in time";
     default: return "room service error";
     }
 }
@@ -448,8 +499,10 @@ uint32_t room_key() {
     return v ? v : kPcNetVersion;
 }
 
-uint32_t match_key(uint32_t playlist_index) {
-    return ((playlist_index & 0xfff) << 20) | room_key() | 0x10000;
+// The matchmaking room key (PS3 0x4b2a18 create / 0x4b1134 search): version, playlist index and, in a playlist with
+// map-pack maps, the party's common map-pack mask from bit 12 up (`packs`, session::mm_pack_mask; 0 none).
+uint32_t match_key(uint32_t playlist_index, uint32_t packs) {
+    return ((playlist_index & 0xfff) << 20) | room_key() | 0x10000 | ((packs & 0xff) << 12);
 }
 
 uint32_t room_kind(const U2oRoomExt &x) {
@@ -554,7 +607,10 @@ void log_room(const char *what, const Room &r) {
 }
 
 uint64_t request(uint64_t id, Pending p) {
-    if (id) pending[id] = std::move(p);
+    if (!id) return id;
+    const double limit = time_limit(p.kind);
+    p.deadline = limit > 0 ? now() + limit : 0;
+    pending[id] = std::move(p);
     return id;
 }
 
@@ -608,17 +664,30 @@ void publish_blob(Room &r, bool force) {
     }
 }
 
+// The slot count a new room of this kind gets (PS3 parity H1): fixed at creation, later game type changes in the
+// lobby do not resize it (PS3 neither). 0: the custom game's type is unknown (no room, as on PS3).
+uint32_t room_slots(uint32_t kind) {
+    if (kind == kKindCustom) return uint32_t(std::max(0, session::custom_room_slots()));
+    if (kind == kKindMatchmaking) return uint32_t(std::max(1, session::playlist_room_slots()));
+    return kPartySlots;
+}
+
 uint64_t create_room(uint32_t kind) {
-    // PS3 CreateJoinRoom 0x4d421c: searchable ints 0x4C key, 0x4D party size, 0x4E/0x4F lat/lon, 0x50
+    // PS3 CreateJoinRoom 0x4d421c: searchable ints 0x4C key, 0x4D map-pack mask, 0x4E/0x4F lat/lon, 0x50
     // region/languages, 0x51 tier (matchmaking only), 0x52 kind (PC only), 0x53 state; bin 0x55 lat/lon
     // floats (8 bytes), bin 0x58 room name "%s.%lld"; member bin 0x59.
     static uint8_t latlon[8];
     static char name[64];
+    const uint32_t slots = room_slots(kind);
+    if (!slots) {
+        log("online: the %s room is not made: the game type has no player count (0 slots)", kind_name(kind));
+        return 0;
+    }
     std::snprintf(name, sizeof name, "%s.%lld", session::local_name().c_str(), (long long)std::time(nullptr));
-    const uint32_t party_size = uint32_t(std::max(1, session::member_count()));
-    const uint32_t key = kind == kKindMatchmaking ? match_key(mm_playlist_index) : room_key();
+    const uint32_t packs = kind == kKindMatchmaking ? session::mm_pack_mask() : 0;
+    const uint32_t key = kind == kKindMatchmaking ? match_key(mm_playlist_index, packs) : room_key();
     U2oAttr attrs[10] = {
-        {A_KEY, 0, key, nullptr},                 {A_PARTY_SIZE, 0, party_size, nullptr},
+        {A_KEY, 0, key, nullptr},                 {A_PACKS, 0, packs, nullptr},
         {A_LAT, 0, uint32_t(kPcLat), nullptr},    {A_LON, 0, uint32_t(kPcLon), nullptr},
         {A_REGION, 0, kPcRegion, nullptr},        {A_KIND, 0, kind, nullptr},
         {A_STATE, 0, 0, nullptr},                 {A_LATLON, uint16_t(sizeof latlon), 0, latlon},
@@ -633,7 +702,7 @@ uint64_t create_room(uint32_t kind) {
     }
     const auto blob = member_blob();
     U2oCreate c{};
-    c.max_slot = kMaxSlot;
+    c.max_slot = slots;
     // PS3 gave match rooms no auto grant and switched it on for host migration (HostMigrate 0x4d4b28);
     // RPCN hands a room to the next member whenever its owner leaves, so every room has it.
     c.flag_attr = kFlagOwnerAutoGrant;
@@ -644,8 +713,8 @@ uint64_t create_room(uint32_t kind) {
     c.team = 0;
     c.signaling = 1;   // mesh: the room service hands out every member's peer address
     const uint64_t id = api.create_room(world, &c);
-    log("online: creating the %s room in world %u: key 0x%x, party size %u, %u slots, name %s (request %llu)",
-        kind_name(kind), world, key, party_size, kMaxSlot, name, (unsigned long long)id);
+    log("online: creating the %s room in world %u: key 0x%x, map packs 0x%x, %u slots, name %s (request %llu)",
+        kind_name(kind), world, key, packs, slots, name, (unsigned long long)id);
     request(id, Pending{kind == kKindParty ? Req::CreateParty : kind == kKindMatchmaking ? Req::CreateMatchmaking : Req::CreateMatch,
                         0, kind, false, "create"});
     return id;
@@ -1033,7 +1102,7 @@ void presence_now(PresenceData &d, std::string &status) {
     d.magic = kPresenceMagic;
     d.version = kPresenceVersion;
     d.key = room_key();
-    d.max = uint8_t(kMaxSlot);
+    d.max = uint8_t(kPartySlots);
     d.net_game = -1;
     const Room *r = nullptr;
     const bool cinema = G<int32_t>(kNetInfo + NI_MODE) == 3;
@@ -1066,7 +1135,7 @@ void presence_now(PresenceData &d, std::string &status) {
         d.room = r->id;
         d.kind = r->kind;
         d.members = uint8_t(std::min<size_t>(r->members.size(), 255));
-        d.max = uint8_t(r->max_slot ? r->max_slot : kMaxSlot);
+        d.max = uint8_t(r->max_slot ? r->max_slot : kPartySlots);
         char b[32];
         std::snprintf(b, sizeof b, " (%u/%u)", unsigned(d.members), unsigned(d.max));
         status += b;
@@ -1364,8 +1433,29 @@ void abort_custom_lobby(const char *why) {
     log("online: A party member couldn't talk to the game host (%s): the party goes back to PAGE_MULTIPLAYER", why);
     send_party_in(false);
     party_wait_since = 0;
+    start_hidden = false;   // back in the party: its room shows again
     leave_room(match_room_, "a party member could not join");
-    session::online_match_abort();
+    session::online_match_abort("a party member could not join the custom game room");
+}
+
+// PS3 parity H2 (owner decision: PS3 behaviour): the custom game room could not be made (error answer, no answer in
+// 20 s, link or world missing, no player count): "Session Create failed", the create page pops and NET_SM becomes
+// 18 (PAGE_MULTIPLAYER with the party, no box), instead of playing on without a room.
+void custom_create_failed(const char *why) {
+    log("online: Session Create failed (%s): Start Match ends, back to PAGE_MULTIPLAYER, NET_SM 18", why);
+    match_waiting = false;
+    create_fail_why.clear();
+    start_hidden = false;   // the party room shows again
+    session::online_match_abort(why);
+}
+
+// PS3 parity H8 (owner decision): online play needs a room service world; without one PS3's NetInit failed with the
+// network error. In Multiplayer: the network error (netInfo +0x1c, its box) and online play ends, not a local party.
+// Outside Multiplayer the world is looked for again later.
+void no_world_error() {
+    if (!started) return;
+    log("online: no room service world: network error, leaving online play (PS3 NetInit fails without a world)");
+    session::online_network_error("no room service world");
 }
 
 // ---- host migration (PS3 0x4409c4 / 0x440478 -> RoomOwnerChanged -> listener slot 6) ---------------
@@ -1439,19 +1529,29 @@ void migration_tick(double t) {
     }
     if (t >= migrate_deadline) {
         // RPCN moves a room only when it notices the owner's session end; a PC that dropped off the network can
-        // take minutes. Every PC then picks the same successor: the lowest member id left (the order of the
-        // succession list every owner sends, send_succession), and RPCN's own move later agrees with it.
+        // take minutes. Every PC then picks the same successor, the first one left of the succession the room was
+        // given (RPCN's own move later agrees with it): the match room the host's order sent at the match start
+        // (kOpOrder, parity H6), else (the party room, PS3 sent no order for it) the lowest member id left
+        // (send_succession).
         const Member *next = nullptr;
         for (const Member &m : r->members)   // the player the leader promoted, if any (kOpPromote)
             if (!promote_target.empty() && m.npid == promote_target && m.npid != migrate_old_owner) next = &m;
+        const bool by_order = !next && r == &match_room_ && !match_order.empty();
+        for (size_t k = 0; by_order && !next && k < match_order.size(); ++k)
+            for (const Member &m : r->members)
+                if (!next && !m.npid.empty() && m.npid != migrate_old_owner && session::net_id_of(m.npid) == match_order[k])
+                    next = &m;
+        const bool ordered = next != nullptr;
         for (const Member &m : r->members)
             if (!next && m.npid != migrate_old_owner && !m.npid.empty()) next = &m;
         for (const Member &m : r->members)
-            if (promote_target.empty() && m.npid != migrate_old_owner && !m.npid.empty() && m.id < next->id) next = &m;
+            if (!ordered && promote_target.empty() && m.npid != migrate_old_owner && !m.npid.empty() && m.id < next->id)
+                next = &m;
         if (next) {
             const Member owner = *next;
-            log("online: host migration: RPCN has not moved room %llx in %.0f s; member %u (%s) takes over (lowest id)",
-                (unsigned long long)migrate_room, kMigrateTimeout, unsigned(owner.id), owner.npid.c_str());
+            log("online: host migration: RPCN has not moved room %llx in %.0f s; member %u (%s) takes over (%s)",
+                (unsigned long long)migrate_room, kMigrateTimeout, unsigned(owner.id), owner.npid.c_str(),
+                owner.npid == promote_target ? "promoted" : ordered ? "first of the match order" : "lowest id");
             r->owner_id = owner.id;
             finish_migration(*r, owner);
             return;
@@ -1465,7 +1565,38 @@ void migration_tick(double t) {
 }
 
 // ---- events --------------------------------------------------------------------------------------
+// The link is gone: every room request with a time limit fails at the next check as if its limit had passed (no
+// answer comes any more); the others are dropped.
+void fail_pending_now() {
+    for (auto it = pending.begin(); it != pending.end();) {
+        if (it->second.deadline) {
+            it->second.deadline = 1e-9;   // due at the next check (expire_requests)
+            ++it;
+        } else {
+            it = pending.erase(it);
+        }
+    }
+}
+
+// The real answer of a request that already failed by its time limit (PS3: a timed-out request reaches its callback
+// as a failure and nothing else). A room it made or joined is left at once.
+bool late_answer(const U2oEvent &e) {
+    if (!e.request || e.error == kErrTimeout) return false;
+    const auto it = std::find(expired.begin(), expired.end(), e.request);
+    if (it == expired.end()) return false;
+    expired.erase(it);
+    const bool room = (e.kind == U2O_EV_ROOM_CREATED || e.kind == U2O_EV_ROOM_JOINED) && !e.error && e.room;
+    log("online: the answer to request %llu came after its time limit: %s", (unsigned long long)e.request,
+        room ? "leaving that room" : "ignored");
+    if (room) {
+        const uint64_t id = api.leave_room(e.room->room_id);
+        request(id, Pending{Req::Message, e.room->room_id, 0, false, "leave (answer after the time limit)"});
+    }
+    return true;
+}
+
 void on_event(const U2oEvent &e) {
+    if (late_answer(e)) return;
     Pending p{Req::World, 0, 0, false, "request"};
     bool known = false;
     if (e.request) {
@@ -1482,7 +1613,8 @@ void on_event(const U2oEvent &e) {
         board_expire(true);
         party_room = Room{};
         match_room_ = Room{};
-        pending.clear();
+        fail_pending_now();   // no answer comes any more: each room request fails as its time limit would make it
+        expired.clear();
         world = 0;
         world_req = 0;
         mm_state = mm_state == Mm::Idle ? Mm::Idle : Mm::Failed;
@@ -1496,10 +1628,6 @@ void on_event(const U2oEvent &e) {
             migrating = false;
             session::online_host_gone();
         }
-        if (match_waiting) {
-            match_waiting = false;
-            session::online_match_ready(0);
-        }
         break;
     case U2O_EV_SIGNED_OUT:   // the launcher signed out on purpose: no rejoin through a session that is gone
         log("online: signed out of RPCN in the launcher%s", started ? ": leaving online play" : "");
@@ -1510,6 +1638,7 @@ void on_event(const U2oEvent &e) {
         if (e.error) {
             log("online: no world: error %d (%s); trying again in 10 s", e.error, error_hint(e.error));
             next_world_try = now() + 10;
+            no_world_error();
             break;
         }
         world = kWorldOverride ? kWorldOverride : e.world;
@@ -1543,11 +1672,8 @@ void on_event(const U2oEvent &e) {
         if (e.error || !e.room) {
             log("online: creating the %s room failed: error %d (%s)", match ? "custom game" : "party", e.error,
                 error_hint(e.error));
-            if (match && match_waiting) {
-                match_waiting = false;
-                log("online: Start Match goes on without a room (the party plays; nobody else can join)");
-                session::online_match_ready(0);
-            }
+            if (match && match_waiting) custom_create_failed(error_hint(e.error));
+            if (!match) next_party_try = now() + 5;   // not again every frame
             break;
         }
         Room &r = match ? match_room_ : party_room;
@@ -1652,6 +1778,11 @@ void on_event(const U2oEvent &e) {
                 ours ? " (ours, not listed)" : "");
             if (!ours && kind != kKindMatchmaking) found.push_back(x);
         }
+        // PS3 SearchRoom 0x4d3c50 (parity H3): at most 5 rooms, a random pick of the matches each time the list
+        // opens. The room service hands out the first 20 matches; 5 of the listable ones are picked here at random
+        // (all of them, in random order, when 5 or fewer).
+        for (size_t i = found.size(); i > 1; --i) std::swap(found[i - 1], found[size_t(std::rand()) % i]);
+        if (found.size() > kListRooms) found.resize(kListRooms);
         log("online: join list: %zu room(s) listed (%u found, %u in total)", found.size(), e.count, e.total);
         G<uint8_t>(kMatch + M_SEARCH_DONE) = 1;
         G<int32_t>(kMatch + M_SEARCH_RESULT) = 0;
@@ -1831,6 +1962,29 @@ void on_event(const U2oEvent &e) {
     }
 }
 
+// PS3 parity H2: a room request whose time limit passed fails exactly as an error answer of its kind would (its own
+// handler in on_event runs with the error "no answer in time"); its real answer, should it still come, is not taken.
+void expire_requests(double t) {
+    std::vector<uint64_t> due;
+    for (const auto &[id, p] : pending)
+        if (p.deadline > 0 && t >= p.deadline) due.push_back(id);
+    for (const uint64_t id : due) {
+        const auto it = pending.find(id);
+        if (it == pending.end()) continue;   // an earlier failure's handler dropped it (link lost)
+        log("online: %s on room %llx (request %llu): no answer in %.0f s: failed", it->second.what.c_str(),
+            (unsigned long long)it->second.room, (unsigned long long)id, time_limit(it->second.kind));
+        U2oEvent e;
+        std::memset(&e, 0, sizeof e);
+        e.kind = answer_kind(it->second.kind);
+        e.error = kErrTimeout;
+        e.request = id;
+        e.room_id = it->second.room;
+        if (expired.size() >= 64) expired.erase(expired.begin());
+        expired.push_back(id);
+        on_event(e);
+    }
+}
+
 void open_link() {
     const char *relay = std::getenv("UNCHARTED_U2MP_RELAY");   // never logged
     if (link_opened) api.close();
@@ -1860,6 +2014,71 @@ void send_succession(Room &r) {
     request(id, Pending{Req::OwnerRank, r.id, r.kind, false, "owner succession"});
 }
 
+// PS3 HostRank 0x4d4868 at the match start (parity H6): who takes the match room over when the host leaves. The other
+// players in game slot order (transport net id = slot + 1), those whose links to every other player are up
+// (kOpTalkAll, PS3 "canTalkToAll") in front, the order otherwise kept; room members without a net id last, by member
+// id. The order goes to the room and to every player (kOpOrder), so that a PC that has to pick the next owner itself
+// (migration_tick) picks the one RPCN picks.
+void send_match_order() {
+    struct Entry {
+        uint32_t net_id;
+        uint16_t member;
+        bool all;
+    };
+    std::vector<Entry> v;
+    for (const Member &m : match_room_.members) {
+        if (m.id == match_room_.my_id || m.npid.empty() || m.npid == my_npid) continue;
+        const auto it = talk_all.find(m.npid);
+        const uint32_t nid = session::net_id_of(m.npid);
+        v.push_back(Entry{nid ? nid : 0xffffffffu, m.id, nid && it != talk_all.end() && it->second});
+    }
+    std::sort(v.begin(), v.end(), [](const Entry &a, const Entry &b) {
+        return a.net_id != b.net_id ? a.net_id < b.net_id : a.member < b.member;
+    });
+    std::stable_partition(v.begin(), v.end(), [](const Entry &x) { return x.all; });
+    std::vector<uint16_t> ids;
+    std::vector<uint8_t> msg{session::kOnlineMessage, kOpOrder, 0};
+    match_order.clear();
+    for (const Entry &x : v) {
+        if (ids.size() < U2O_MAX_MEMBERS) ids.push_back(x.member);
+        if (x.net_id != 0xffffffffu && match_order.size() < 16) {
+            match_order.push_back(x.net_id);
+            msg.push_back(uint8_t(x.net_id));
+        }
+    }
+    msg[2] = uint8_t(match_order.size());
+    match_room_.rank_sig = 0;
+    for (uint16_t i : ids) match_room_.rank_sig = match_room_.rank_sig * 1000003u + i;
+    if (ids.empty()) return;
+    const uint64_t id = api.set_owner_rank(match_room_.id, ids.data(), uint32_t(ids.size()));
+    std::string order;
+    for (uint32_t n : match_order) order += (order.empty() ? "" : ", ") + std::to_string(n);
+    log("online: match room %llx: owner succession of %zu player(s), net ids %s (request %llu)",
+        (unsigned long long)match_room_.id, ids.size(), order.empty() ? "-" : order.c_str(), (unsigned long long)id);
+    request(id, Pending{Req::OwnerRank, match_room_.id, match_room_.kind, false, "owner succession"});
+    session::send_message(-1, msg);
+}
+
+// Member of a match room: tells the host whether its links to every other member are up (PS3 tracker canTalkToAll),
+// once and whenever it changes or the host changes.
+void talk_all_tick() {
+    if (session::is_host() || !match_room_.id || host_npid.empty() || host_npid == my_npid || waiting_host || switch_at) {
+        if (session::is_host()) talk_all_sent = -1;
+        return;
+    }
+    bool all = true;
+    for (const Member &m : match_room_.members) {
+        if (m.id == match_room_.my_id || m.npid.empty() || m.npid == my_npid) continue;
+        const int i = peer_index(m.npid, false);
+        all = all && i >= 0 && peers[size_t(i)].state == U2O_PEER_ACTIVE;
+    }
+    if (talk_all_sent == int(all) && talk_all_host == host_npid) return;
+    talk_all_sent = int(all);
+    talk_all_host = host_npid;
+    session::send_message(0, {session::kOnlineMessage, kOpTalkAll, uint8_t(all ? 1 : 0)});
+    log("online: told the host %s that our links to every other player are %s", host_npid.c_str(), all ? "up" : "not all up");
+}
+
 void room_state() {
     const int32_t s = G<int32_t>(kNetState);
     const bool match_running = s == kUpdate || s == kReset || s == kReplay || s == kResults || s == kRoundResults;
@@ -1873,22 +2092,7 @@ void room_state() {
     const bool began = !in_match && match_running;
     in_match = match_running;
     if (began) start_hidden = false;   // the match's own hide takes over (and ends with the match)
-    if (began && link_state == U2O_READY && match_room_.owned()) {
-        // PS3 HostRank 0x4d4868 (the remote players in slot order) + HostMigrate: who takes the room over
-        // (lowest member id first: the order every PC assumes when RPCN is slow to move the room, migration_tick)
-        std::vector<uint16_t> ids;
-        for (const Member &m : match_room_.members)
-            if (m.id != match_room_.my_id && ids.size() < U2O_MAX_MEMBERS) ids.push_back(m.id);
-        std::sort(ids.begin(), ids.end());
-        match_room_.rank_sig = 0;
-        for (uint16_t i : ids) match_room_.rank_sig = match_room_.rank_sig * 1000003u + i;
-        if (!ids.empty()) {
-            const uint64_t id = api.set_owner_rank(match_room_.id, ids.data(), uint32_t(ids.size()));
-            log("online: match room %llx: owner succession of %zu player(s) (request %llu)", (unsigned long long)match_room_.id,
-                ids.size(), (unsigned long long)id);
-            request(id, Pending{Req::OwnerRank, match_room_.id, match_room_.kind, false, "owner succession"});
-        }
-    }
+    if (began && link_state == U2O_READY && match_room_.owned()) send_match_order();
     if (link_state != U2O_READY) return;
     send_succession(party_room);   // the party room's owner order, whenever its members change
     for (Room *r : {&party_room, &match_room_}) {
@@ -1950,10 +2154,7 @@ void frame() {
     const int32_t st = api.state(text, int(sizeof text));
     if (st != link_state) {
         log("online: link %s -> %s (%s)", link_name(link_state), link_name(st), st == U2O_READY ? text : (*text ? text : "-"));
-        if (st == U2O_FAILED && match_waiting) {
-            match_waiting = false;
-            session::online_match_ready(0);
-        }
+        if (link_state == U2O_READY) fail_pending_now();   // no answer comes over a link that went down
         link_state = st;
         if (st != U2O_READY) friends_loaded = false;
         if (st == U2O_READY) {   // the RPCN online name is this player's name everywhere (PS3: NP online id)
@@ -1971,7 +2172,10 @@ void frame() {
         world_req = api.find_world();
         log("online: looking for a world (request %llu)", (unsigned long long)world_req);
         request(world_req, Pending{Req::World, 0, 0, false, "find world"});
-        if (!world_req) next_world_try = t + 10;
+        if (!world_req) {
+            next_world_try = t + 10;
+            no_world_error();
+        }
     }
     U2oEvent e;
     for (int guard = 0; guard < 256; ++guard) {
@@ -1979,6 +2183,7 @@ void frame() {
         if (api.poll(&e) <= 0) break;
         on_event(e);
     }
+    expire_requests(t);
     board_expire();
     if (friends_dirty) refresh_friends();
     publish_presence(t);
@@ -2051,16 +2256,16 @@ void frame() {
         session::online_party_in(false);
     }
     party_owner_tick(t);
-    if (match_waiting && t >= match_deadline) {
-        match_waiting = false;
-        log("online: no answer to the match room create in %.0f s: Start Match goes on without a room", kCreateTimeout);
-        session::online_match_ready(0);
+    if (match_waiting && !create_fail_why.empty()) {   // create_match_room could not ask for the room
+        const std::string why = create_fail_why;
+        custom_create_failed(why.c_str());
     }
     room_state();
     if (t >= next_blob_check) {
         next_blob_check = t + 1.0;
         publish_blob(party_room, false);
         publish_blob(match_room_, false);
+        if (link_state == U2O_READY) talk_all_tick();
     }
     if (t >= next_rtt_log) {
         next_rtt_log = t + kRttLogPeriod;
@@ -2086,19 +2291,20 @@ bool create_match_room() {
         log("online: Start Match: our match room %llx is still open, reused", (unsigned long long)match_room_.id);
         return false;
     }
+    // PS3 parity H2 (owner decision): a room that cannot be made ends Start Match (custom_create_failed, next frame).
+    match_waiting = true;
+    create_fail_why.clear();
     if (link_state != U2O_READY || !world) {
-        log("online: Start Match: link %s, world %u: no match room (the party plays, nobody else can join)",
-            link_name(link_state), world);
-        return false;
+        log("online: Start Match: link %s, world %u: no match room", link_name(link_state), world);
+        create_fail_why = "no link to the room service";
+        return true;
     }
     if (match_room_.id) leave_room(match_room_, "a match room of our own");
     create_match_req = create_room(kKindCustom);
     if (!create_match_req) {
-        log("online: Start Match: the match room request was refused: the party plays without one");
-        return false;
+        log("online: Start Match: the match room request was refused");
+        create_fail_why = "the room request was refused";
     }
-    match_waiting = true;
-    match_deadline = now() + kCreateTimeout;
     return true;
 }
 
@@ -2159,6 +2365,10 @@ void on_transport_closed(const char *why) {
     waiting_host = following_leader = false;
     switch_at = 0;
     match_waiting = false;   // the match is gone with the transport: nothing to finish
+    create_fail_why.clear();
+    match_order.clear();
+    talk_all.clear();
+    talk_all_sent = -1;
     migrating = false;
     promote_at = 0;
     mm_state = Mm::Idle;
@@ -2197,6 +2407,15 @@ void on_message(uint8_t from, const uint8_t *data, size_t size) {
     } else if (data[0] == kOpJoinResult && size >= 2 && session::is_host()) {
         if (!data[1] && match_room_.owned() && match_room_.kind == kKindCustom && party_wait_since)
             abort_custom_lobby("a member's join was refused");
+    } else if (data[0] == kOpTalkAll && size >= 2 && session::is_host()) {
+        net::Address a;
+        const std::string npid = session::member_address(uint32_t(from) + 1, a) ? npid_at(a) : std::string();
+        if (!npid.empty()) talk_all[npid] = data[1] != 0;
+    } else if (data[0] == kOpOrder && size >= 2 && from == 0 && !session::is_host()) {
+        match_order.assign(data + 2, data + std::min<size_t>(size, size_t(2) + data[1]));
+        std::string order;
+        for (uint32_t n : match_order) order += (order.empty() ? "" : ", ") + std::to_string(n);
+        log("online: the host's owner succession for the match: net ids %s", order.empty() ? "-" : order.c_str());
     } else if (data[0] == kOpPromote && size >= 9 && from == 0 && !session::is_host()) {
         std::memcpy(&promote_room, data + 1, 8);
         promote_target.assign(reinterpret_cast<const char *>(data + 9), std::min<size_t>(size - 9, 16));
@@ -2578,7 +2797,9 @@ void mm_begin(uint32_t playlist, uint32_t playlist_index, const MmCriteria &crit
     // PS3 0x4b0f48 -> SearchRoom 0x4d3c50: 0x4C == key (version + playlist), open rooms only. PS3
     // matchmaking rooms carry no 0x52, so the key is the only filter. The criteria row's distance and region
     // parts need a location, which PC has not: every pass searches the same rooms, the rank and ping parts differ.
-    const uint32_t key = match_key(playlist_index);
+    // In a playlist with map-pack maps the key carries the party's common map packs (parity H5): parties only meet
+    // rooms made by parties with the same common packs.
+    const uint32_t key = match_key(playlist_index, session::mm_pack_mask());
     log("online: matchmaking: criteria %d: ping limit %u ms, %s (no distance on PC)", criteria.pass, criteria.ping_limit_ms,
         criteria.rank_only ? "rank within 20" : "any rank");
     U2oSearch s{};
@@ -2744,10 +2965,12 @@ bool peer_rtt(const std::string &npid, uint32_t &rtt_ms, bool &up) {
     return true;
 }
 
+// The match room's real slot count (parity H1: 3 for a co-op custom game, the playlist's maximum in matchmaking);
+// without a room the size a matchmaking room of the chosen playlist gets, else the party's 10.
 int mm_slots() {
     if (!mm_online()) return 0;
-    if (match_room_.id && match_room_.kind == kKindMatchmaking && match_room_.max_slot) return match_room_.max_slot;
-    return int(kMaxSlot);   // the size this port makes its matchmaking rooms with
+    if (match_room_.id && match_room_.max_slot) return match_room_.max_slot;
+    return G<int32_t>(kNetInfo + NI_MODE) == 1 ? int(room_slots(kKindMatchmaking)) : int(kPartySlots);
 }
 std::string my_npid_text() { return my_npid; }
 

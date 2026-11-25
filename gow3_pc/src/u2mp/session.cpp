@@ -2403,7 +2403,7 @@ void create_match_now() {
     fill_trackers();
     request_match_skin_packages();
     put<int32_t>(g(kMatchSession) + 0x9c, 0);
-    if (online::create_match_room()) return;   // online_match_ready() finishes it
+    if (online::create_match_room()) return;   // online_match_ready() finishes it, or online_match_abort() ends it
     g(kMatchSession)[0x99] = 1;
     send_raw(-1, follow_body(), -1);
 }
@@ -3017,9 +3017,9 @@ void online_party_in(bool ok) {
     if (!ok) clear_session(kMatchSession);
 }
 
-void online_match_abort() {
+void online_match_abort(const char *why) {
     if (!active || !hosting) return;
-    log("party: the custom game is dropped (a party member could not join): back to PAGE_MULTIPLAYER, NET_SM 18");
+    log("party: the custom game is dropped (%s): back to PAGE_MULTIPLAYER, NET_SM 18", why ? why : "?");
     g(kMatchSession)[0x99] = 0;
     clear_session(kMatchSession);
     g(kNetInfo)[0x08] = 0;
@@ -3106,11 +3106,52 @@ void online_host_gone() {
     show_page(kPageMultiplayer);
 }
 
+void online_network_error(const char *why) {
+    if (!active) return;
+    log("party: network error (%s): leaving online play", why ? why : "?");
+    g(kNetInfo)[0x1c] = 1;
+    host_lost = true;   // the transport closes on the next frame
+}
+
 void online_signed_out() {
     if (!active) return;
     log("party: signed out of RPCN in the launcher: leaving online play");
     g(kNetInfo)[0x1c] = 1;
     host_lost = true;
+}
+
+int custom_room_slots() {
+    Table games = table_of(lookup(kNetGamesId));
+    const int16_t game = current_game();
+    if (!games.records || game < 0 || game >= games.count) return 0;
+    return type_max_players(get<int32_t>(games.records + game * 0x90 + 0x0c));
+}
+
+int playlist_room_slots() {
+    std::vector<int32_t> types;
+    int most = 0;
+    if (playlist_game_types(types))
+        for (const int32_t t : types) most = std::max(most, type_max_players(t));
+    return most > 0 ? most : 10;
+}
+
+uint32_t mm_pack_mask() {
+    std::vector<int32_t> types;
+    Table games = table_of(lookup(kNetGamesId));
+    if (!playlist_game_types(types) || !games.records) return 0;
+    bool pack_maps = false;   // PS3 0x49b858: the playlist uses map-pack content
+    for (int32_t i = 0; i < games.count && !pack_maps; ++i) {
+        const int32_t type = get<int32_t>(games.records + i * 0x90 + 0x0c);
+        if (std::find(types.begin(), types.end(), type) == types.end()) continue;
+        bool local_ok = true;
+        const int32_t pack = dlc_net_game_pack(i, local_ok);
+        pack_maps = pack == 1 || pack == 2;
+    }
+    if (!pack_maps) return 0;
+    uint32_t mask = dlc_packs() & 0xffu;
+    for (const Member &m : members)
+        if (m.used && m.net_id != my_id) mask &= m.packs;   // 0xff: the member sent none
+    return mask;
 }
 
 bool match_migration_ok() {

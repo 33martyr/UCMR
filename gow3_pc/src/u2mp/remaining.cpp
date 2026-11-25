@@ -411,18 +411,32 @@ std::vector<uint32_t> match_others() {
     return ids;
 }
 
-// Mute All / Unmute All: every other player of the match, silently (as Mute).
-U2MP_GUEST void mute_all(void *, void *, void *) {
-    for (uint32_t id : match_others()) voice::set_muted(id, true);
+// The remote members of the party (party roster rows, without strangers of a matchmaking transport).
+std::vector<uint32_t> party_others() {
+    std::vector<uint32_t> ids;
+    for (int row = 0; row < 10; ++row) {
+        uint32_t id = 0;
+        std::string name;
+        if (session::member_at(row, id, name) && id && id != session::local_id() && !session::party_stranger(id))
+            ids.push_back(id);
+    }
+    return ids;
 }
-U2MP_GUEST void unmute_all(void *, void *, void *) {
-    for (uint32_t id : match_others()) voice::set_muted(id, false);
+
+// The session Mute All / Unmute All work on (PS3 parity E 2.7 / H7): the party in the party pages (page mode < 2),
+// the match otherwise; its players on our transport (they have a connection record), ourselves left out.
+std::vector<uint32_t> mute_others() {
+    return image_load<int32_t>(kNetInfo + 0x2c4) < 2 ? party_others() : match_others();
 }
+
+// Mute All / Unmute All (PS3 0x4d6ab0): every one of them, silently (as Mute).
+U2MP_GUEST void mute_all(void *, void *, void *) { voice::set_all_muted(mute_others(), true); }
+U2MP_GUEST void unmute_all(void *, void *, void *) { voice::set_all_muted(mute_others(), false); }
 
 U2MP_GUEST void party_player_row(void *arg, void *, void *) { player_options(int(arg_word(arg, 8) % 10)); }
 // Matchmaking / postgame rows (PS3 0x440620): the matchmaking slot list (session.cpp), not the party order. No
-// title, no Kick / Promote: "Mute" / "Unmute" (not on the own row), "Mute All" unless every other player is muted,
-// "Unmute All" unless none is.
+// title, no Kick / Promote: "Mute" / "Unmute" (not on the own row), "Mute All" unless every other player of the
+// named session (mute_others) is muted (PS3 0x4d6fa0), "Unmute All" unless none is (0x4d6d10); nobody else: neither.
 U2MP_GUEST void match_player_row(void *arg, void *, void *) {
     const int row = int32_t(arg_word(arg, 8));
     uint32_t id = 0;
@@ -431,17 +445,15 @@ U2MP_GUEST void match_player_row(void *arg, void *, void *) {
         log("player options: no player in row %d", row);
         return;
     }
-    const std::vector<uint32_t> others = match_others();
-    size_t muted = 0;
-    for (uint32_t o : others) muted += voice::muted(o);
+    const std::vector<uint32_t> others = mute_others();
     g_selected_member = id;
     text_set_player(name.c_str());
     const bool cbs = register_callback(kCbMuteAll, mute_all) && register_callback(kCbUnmuteAll, unmute_all);
     Popup popup;
     popup.set_title(0);
     if (id != session::local_id()) popup.add(voice::muted(id) ? kTextUnmute : kTextMute, kCbMatchMute);
-    if (cbs && muted < others.size()) popup.add(kTextMuteAll, kCbMuteAll);
-    if (cbs && muted > 0) popup.add(kTextUnmuteAll, kCbUnmuteAll);
+    if (cbs && !voice::all_muted(others)) popup.add(kTextMuteAll, kCbMuteAll);
+    if (cbs && !voice::none_muted(others)) popup.add(kTextUnmuteAll, kCbUnmuteAll);
     if (!popup.empty()) popup.show();
 }
 
