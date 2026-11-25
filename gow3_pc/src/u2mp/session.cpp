@@ -10,6 +10,7 @@
 //
 // Reimplemented from the behaviour description u2mp/docs/spec/session.md.
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -102,9 +103,11 @@ constexpr uint64_t kCtx = 0x55324d50000001ull;   // any non-zero session context
 static_assert(sid("PAGE_MULTIPLAYER_JOINING") == kPageJoining, "page id");
 static_assert(sid("net") == kNetPackage && sid("net-u2mp") == kNetU2mpPackage, "package ids");
 
-// Session message types (the byte after the layer tag).
+// Session message types (the byte after the layer tag). kTags (11) is newer than the others: the host sends it
+// right after every kRoster ({slot, tag length, tag bytes} per member); older peers ignore an unknown type, so
+// the roster format itself stays as old peers read it.
 enum : uint8_t { kInfo = 1, kRoster = 2, kMode = 3, kFollow = 4, kKick = 5, kTeams = 6, kIds = 8, kClock = 9,
-                  kLobby = 10 };
+                  kLobby = 10, kTags = 11 };
 
 // ---- raw memory helpers -----------------------------------------------------------------------------
 template <typename T> T get(const uint8_t *p) { T v; std::memcpy(&v, p, sizeof v); return v; }
@@ -151,6 +154,7 @@ struct Member {
     uint8_t rank = 0;
     uint8_t team = 0;
     uint32_t import_notice = 0;
+    std::string tag = {};   // the clan tag the member published (kInfo / kTags), "" none; ours is read live
 };
 
 Member members[kSlots];
@@ -172,6 +176,7 @@ bool leaving_seen = false;
 int leaving_cleanup = 0;
 uint8_t sent_rank = 0xff;
 uint8_t sent_team = 0xff;
+std::string sent_tag;   // the clan tag our last kInfo (client) or kTags (host) carried
 double next_rate_log = 0;
 double last_clock = -1;
 bool rehost_pending = false;
@@ -197,15 +202,39 @@ void clear_members() {
 
 uint32_t slot_net_id(int slot) { return slot == 0 ? host_id : uint32_t(slot) + 1; }
 
-// The row-th used member in slot order, or -1.
+// The party / lobby row order (PS3 0x4bc728): the party host (slot 0) first, then, in slot order, the
+// members on the host's team, then the others. Returns the slot of row `row`, or -1.
 int slot_of_row(int row) {
     if (row < 0) return -1;
-    for (int s = 0; s < kSlots; ++s)
-        if (members[s].used && row-- == 0) return s;
-    return -1;
+    const uint8_t host_team = members[0].used ? members[0].team : 0;
+    int order[kSlots];
+    int n = 0;
+    if (members[0].used) order[n++] = 0;
+    for (int pass = 0; pass < 2; ++pass)
+        for (int s = 1; s < kSlots; ++s)
+            if (members[s].used && (members[s].team == host_team) == (pass == 0)) order[n++] = s;
+    return row < n ? order[row] : -1;
 }
 
 std::string cut(const std::string &s, size_t n) { return s.size() > n ? s.substr(0, n) : s; }
+
+// Our clan tag as checked and stored by clantag.cpp (NetPlayerData +0x1a8, 8 bytes NUL-padded, <= 4 chars).
+std::string local_tag() {
+    const char *t = reinterpret_cast<const char *>(g(kNpd + 0x1a8));
+    return cut(std::string(t, strnlen(t, 8)), 4);
+}
+
+// A member's name as the rows show it: "[TAG] name" with a clan tag, else the name (PS3 "[%s] %s").
+std::string shown_name(const Member &m) {
+    const std::string tag = m.net_id == my_id ? local_tag() : m.tag;
+    return tag.empty() ? m.name : "[" + tag + "] " + m.name;
+}
+
+// A game text by id (the text hook answers our own texts first); "" when there is none.
+const char *game_text(uint32_t id) {
+    const char *t = guest<const char *(U2MP_GUEST *)(void *, uint32_t)>(0xcddc00)(g(0x1066660), id);
+    return t ? t : "";
+}
 
 // ---- sessions and trackers --------------------------------------------------------------------------
 void set_session(uint64_t session, uint64_t context, uint32_t me, uint32_t host) {
@@ -552,6 +581,8 @@ void send_info() {
     };
     push_skin(hero);
     push_skin(villain);
+    sent_tag = local_tag();
+    push_skin(sent_tag.c_str());   // the clan tag: one more length-prefixed string (older hosts stop before it)
     send_raw(0, b, -1);
 }
 
@@ -563,6 +594,16 @@ void broadcast_roster() {
                              cut(members[s].villain, 47)});
     }
     send_raw(-1, b, -1);
+    std::vector<uint8_t> tags{kTags};
+    for (int s = 0; s < kSlots; ++s) {
+        if (!members[s].used) continue;
+        const std::string tag = cut(members[s].net_id == my_id ? local_tag() : members[s].tag, 4);
+        if (members[s].net_id == my_id) sent_tag = tag;
+        tags.push_back(uint8_t(s));
+        tags.push_back(uint8_t(tag.size()));
+        tags.insert(tags.end(), tag.begin(), tag.end());
+    }
+    send_raw(-1, tags, -1);
     if (!online::active()) return;
     // Online, clients also need everyone's NpId to map room members to net ids.
     npids.clear();
@@ -660,8 +701,16 @@ void on_info(uint8_t from, const uint8_t *d, size_t size) {
     }
     if (at < size) {
         const uint8_t n = d[at];
-        if (at + 1 + n <= size) m.villain.assign(reinterpret_cast<const char *>(d + at + 1), n);
+        if (at + 1 + n <= size) {
+            m.villain.assign(reinterpret_cast<const char *>(d + at + 1), n);
+            at += 1 + n;
+        } else {
+            at = size;
+        }
     }
+    // The clan tag (newer clients; an older one sends none and shows untagged).
+    m.tag.clear();
+    if (at < size && at + 1 + d[at] <= size) m.tag = cut(std::string(reinterpret_cast<const char *>(d + at + 1), d[at]), 4);
     refresh_sessions();
     broadcast_roster();
     broadcast_teams();
@@ -716,6 +765,17 @@ void on_teams(const uint8_t *d, size_t size) {
         if (d[at] <= 10) members[d[at]].team = d[at + 1];
 }
 
+// kTags from the host: {slot, length, tag} per member, right after its kRoster.
+void on_tags(const uint8_t *d, size_t size) {
+    if (hosting) return;
+    for (size_t at = 1; size - at >= 2;) {
+        const uint8_t slot = d[at], len = d[at + 1];
+        if (at + 2 + len > size) break;
+        if (slot < kSlots) members[slot].tag = cut(std::string(reinterpret_cast<const char *>(d + at + 2), len), 4);
+        at += 2 + len;
+    }
+}
+
 void on_follow(const uint8_t *d, size_t size) {
     if (hosting) return;
     log("following the host into the match");
@@ -760,6 +820,7 @@ void on_session_message(uint8_t from, const uint8_t *d, size_t size) {
     case kInfo: on_info(from, d, size); break;
     case kRoster: on_roster(d, size); break;
     case kTeams: on_teams(d, size); break;
+    case kTags: on_tags(d, size); break;
     case kMode:
         if (!hosting && size >= 5) mailbox_post(0x110, 1, d + 1, 4);
         break;
@@ -1150,10 +1211,11 @@ void frame_work() {
     if (frames % 120 == 7) {
         int r = local_rank();
         int t = local_team();
-        if (hosting && members[0].used && members[0].rank != r) {
+        const bool tag_changed = local_tag() != sent_tag;
+        if (hosting && members[0].used && (members[0].rank != r || tag_changed)) {
             members[0].rank = uint8_t(r);
             broadcast_roster();
-        } else if (!hosting && my_id != 0 && (r != sent_rank || t != sent_team)) {
+        } else if (!hosting && my_id != 0 && (r != sent_rank || t != sent_team || tag_changed)) {
             send_info();
         }
         if (hosting && members[0].used && members[0].team != t) {
@@ -1864,41 +1926,66 @@ U2MP_GUEST void button_multiplayer(void *, void *, void *) {
     show_page(kPageMultiplayer);
 }
 
+// ---- player rows (PS3 0x4bc728 party / lobby, 0x4bfac8 matchmaking) ----------------------------------------
+// Query object fields on PS4 (spec parity-b-menus.md 0 and 11.2).
+constexpr uint64_t kQValue = 0x04, kQOp10Result = 0x38, kQColour = 0x3c, kQText = 0x40, kQArg = 0x48,
+                   kQOp10Selector = 0x4c;
+
+// An op 3 image descriptor: type, value, image id (type 3), colour word (-1 none), scale 1.
+void put_image(uint8_t *q, uint32_t type, uint32_t value, uint32_t icon = 0, int32_t colour = -1) {
+    put<uint32_t>(q + 8, type);
+    put<uint64_t>(q + 0x10, 0);
+    put<uint32_t>(q + 0x18, value);
+    put<uint32_t>(q + 0x1c, icon);
+    put<uint32_t>(q + 0x20, icon ? 1u : 0u);
+    put<int32_t>(q + 0x24, -1);
+    put<uint32_t>(q + 0x28, 0);
+    put<int32_t>(q + 0x2c, colour);
+    put<float>(q + 0x30, 1.0f);
+}
+
+// Picture 0: the rank badge (type 0x27). Picture 1: the muted icon, else the talking icon while the member talks.
+void member_image(uint8_t *q, const Member &m, uint32_t picture) {
+    if (picture == 0) {
+        put_image(q, 0x27, m.rank);
+    } else if (picture == 1) {
+        const uint32_t icon = voice::muted(m.net_id) ? kIconMuted : voice::talking(m.net_id) ? kIconTalking : 0;
+        if (icon) put_image(q, 3, 0, icon);
+    }
+}
+
+void put_row_text(uint8_t *q, char (&buffer)[64], const std::string &text) {
+    const std::string t = cut(text, 63);
+    std::memcpy(buffer, t.c_str(), t.size() + 1);
+    put<uint64_t>(q + kQText, addr_of(buffer));
+}
+
+// The NpId of a member ("" unknown or LAN).
+std::string member_npid(const Member &m) {
+    if (m.net_id == my_id) return online::my_npid_text();
+    auto it = npids.find(m.net_id);
+    return it == npids.end() ? std::string() : it->second;
+}
+
 U2MP_GUEST void roster_query(uint8_t *q) {
-    uint32_t op = get<uint32_t>(q);
-    uint64_t arg = get<uint64_t>(q + 0x48);
-    int slot = slot_of_row(int(arg % 10));
+    const uint32_t op = get<uint32_t>(q);
+    const uint32_t arg = get<uint32_t>(q + kQArg);   // 32 bits: +0x4c right after it is op 10's selector
+    const int slot = slot_of_row(int(arg % 10));
     const Member *m = slot >= 0 ? &members[slot] : nullptr;
     switch (op) {
-    case 7: put<uint32_t>(q + 4, m ? 1 : 0); break;
-    case 3: {
-        uint32_t value = get<uint32_t>(q + 4);
-        if (m && value == 1) {
-            uint32_t icon = 0;
-            if (voice::talking(m->net_id)) icon = kIconTalking;
-            else if (voice::muted(m->net_id)) icon = kIconMuted;
-            if (!icon) break;
-            put<uint32_t>(q + 8, 3);
-            put<uint64_t>(q + 0x10, 0);
-            put<uint32_t>(q + 0x18, 0);
-            put<uint32_t>(q + 0x1c, icon);
-            put<uint32_t>(q + 0x20, 1);
-            put<int32_t>(q + 0x24, -1);
-            put<uint32_t>(q + 0x28, 0);
-            put<int32_t>(q + 0x2c, -1);
-            put<float>(q + 0x30, 1.0f);
-        } else if (m && value == 0) {
-            put<uint32_t>(q + 8, 0x27);   // rank badge
-            put<uint64_t>(q + 0x10, 0);
-            put<uint32_t>(q + 0x18, m->rank);
-            put<uint64_t>(q + 0x1c, 0);
-            put<int32_t>(q + 0x24, -1);
-            put<uint32_t>(q + 0x28, 0);
-            put<int32_t>(q + 0x2c, -1);
-            put<float>(q + 0x30, 1.0f);
-        }
+    case 7:   // the own row is not enabled (it keeps the cursor, presses do nothing); other members are
+        if (m) put<uint32_t>(q + kQValue, m->net_id == my_id ? 0 : 1);
+        break;
+    case 10: {   // sub index 0, selector 0: "can be selected"; selector 1: connection state (0 = connected)
+        if (!m || get<uint32_t>(q + kQValue) != 0) break;
+        const uint32_t selector = get<uint32_t>(q + kQOp10Selector);
+        if (selector == 0) put<int32_t>(q + kQOp10Result, 1);
+        else if (selector == 1 && m->net_id != my_id) put<int32_t>(q + kQOp10Result, 0);
         break;
     }
+    case 3:
+        if (m) member_image(q, *m, get<uint32_t>(q + kQValue));
+        break;
     case 17: {
         if (!m || arg <= 9 || get<int32_t>(g(kNetInfo) + 0x2c4) != 2 || (m->team != 1 && m->team != 2)) break;
         Table games = table_of(lookup(kNetGamesId));
@@ -1915,18 +2002,119 @@ U2MP_GUEST void roster_query(uint8_t *q) {
         if (!colour_ok) break;
         alignas(16) uint8_t out[0x20] = {};
         guest<void(U2MP_GUEST *)(void *, void *, int32_t, int32_t)>(kTeamColor)(out, ngm(), int32_t(m->team) - 1, 0);
-        put<uint32_t>(q + 0x3c, (get<uint32_t>(out + 0xc) & 0xffffff) | 0x20000000u);
+        put<uint32_t>(q + kQColour, (get<uint32_t>(out + 0xc) & 0xffffff) | 0x20000000u);
         break;
     }
     case 1: {
         static const char empty[1] = {0};
-        char *buffer = row_text[m ? slot : 0];
-        std::string name = m ? cut(m->name, 63) : std::string();
-        std::memcpy(buffer, name.c_str(), name.size() + 1);
-        put<uint64_t>(q + 0x40, m ? addr_of(buffer) : addr_of(empty));
+        if (m) put_row_text(q, row_text[slot], shown_name(*m));
+        else put<uint64_t>(q + kQText, addr_of(empty));
         break;
     }
-    default: put<uint32_t>(q + 4, 0); break;
+    default: put<uint32_t>(q + kQValue, 0); break;
+    }
+}
+
+// The matchmaking slot list (PS3 0x4b0008): our party's members first (present), then the other players of
+// the match in slot order (while the gathering runs: "Found Player"), then, while it runs and the playlist
+// is known, open slots ("Finding Player...") up to the size of the match, at most 10 entries.
+enum : int { kOpenSlot = 0, kFoundPlayer = 1, kPresent = 2 };
+struct MmEntry {
+    int kind = kOpenSlot;
+    int slot = -1;
+    uint64_t party = 0;
+    std::string npid;
+};
+
+std::vector<MmEntry> mm_list() {
+    std::vector<MmEntry> list;
+    const bool gathering = get<int32_t>(g(kNetInfo) + 0x34) == 1;   // frontend3 phase 1 (PS3 progress 0 / 1)
+    int used = 0;
+    for (const Member &m : members) used += m.used;
+    const bool online_on = online::active();
+    for (int pass = 0; pass < 2; ++pass)
+        for (int s = 0; s < kSlots && list.size() < 10; ++s) {
+            const Member &m = members[s];
+            if (!m.used) continue;
+            MmEntry e;
+            e.slot = s;
+            e.npid = member_npid(m);
+            // Off line everyone is our party; an unknown NpId counts as ours too.
+            const bool own = !online_on || m.net_id == my_id || e.npid.empty() || online::in_own_party(e.npid);
+            if (own != (pass == 0)) continue;
+            e.kind = own || !gathering ? kPresent : kFoundPlayer;
+            e.party = own ? (online_on ? online::own_party_id() : used >= 2 ? 1 : 0) : online::member_party_id(e.npid);
+            list.push_back(std::move(e));
+        }
+    if (gathering && playlist_index(get<uint32_t>(g(kNpd) + 0x104)) >= 0) {
+        const int slots = std::min(online::mm_slots(), 10);
+        while (int(list.size()) < slots) list.push_back(MmEntry{});
+    }
+    return list;
+}
+
+// The five party group colours (PS3 data, spec 11.3), by the party's position among the shared party ids.
+constexpr uint32_t kPartyColours[5] = {0x1020E0E0u, 0x102000E0u, 0x10E000E0u, 0x1020E000u, 0x10E02000u};
+
+int party_position(const std::vector<MmEntry> &list, uint64_t party) {
+    if (!party) return -1;
+    std::vector<uint64_t> shared;
+    for (const MmEntry &e : list) {
+        if (!e.party) continue;
+        int n = 0;
+        for (const MmEntry &o : list) n += o.party == e.party;
+        bool known = false;
+        for (uint64_t p : shared) known = known || p == e.party;
+        if (n >= 2 && !known) shared.push_back(e.party);
+    }
+    for (size_t i = 0; i < shared.size(); ++i)
+        if (shared[i] == party) return int(i);
+    return -1;
+}
+
+// Connection bars from the round-trip time (PS3 0x4bfac8): <= 49 ms 5, <= 79 4, <= 119 3, <= 199 2, else 1.
+uint32_t bars_of(uint32_t rtt_ms) {
+    return rtt_ms <= 49 ? 5 : rtt_ms <= 79 ? 4 : rtt_ms <= 119 ? 3 : rtt_ms <= 199 ? 2 : 1;
+}
+
+char mm_text[10][64];
+
+U2MP_GUEST void mm_roster_query(uint8_t *q) {
+    const uint32_t op = get<uint32_t>(q);
+    const uint32_t row = get<uint32_t>(q + kQArg);
+    const std::vector<MmEntry> list = mm_list();
+    if (row >= list.size()) return;   // past the list: nothing answered
+    const MmEntry &e = list[row];
+    const Member *m = e.slot >= 0 ? &members[e.slot] : nullptr;
+    switch (op) {
+    case 1:
+        if (e.kind == kPresent && m) put_row_text(q, mm_text[row], shown_name(*m));
+        else put_row_text(q, mm_text[row], game_text(e.kind == kOpenSlot ? 0xc0759450u : 0xa91680a8u));
+        break;
+    case 3: {
+        const uint32_t picture = get<uint32_t>(q + kQValue);
+        if (picture == 2 && m) {
+            uint32_t rtt_ms = 0;
+            bool up = false;
+            const bool known = m->net_id != my_id && online::peer_rtt(e.npid, rtt_ms, up);
+            put_image(q, 0x1d, known ? bars_of(rtt_ms) : 0, 0, int32_t(up ? 0x800000FFu : 0x80808080u));
+        } else if (e.kind == kPresent && m) {
+            member_image(q, *m, picture);
+        } else if (e.kind == kOpenSlot && picture == 0) {
+            put_image(q, 0x10, 0);   // the searching animation
+        }
+        break;
+    }
+    case 10:
+        if (get<uint32_t>(q + kQValue) == 0 && get<uint32_t>(q + kQOp10Selector) == 0 && e.kind == kPresent)
+            put<int32_t>(q + kQOp10Result, 1);
+        break;
+    case 17: {
+        const int at = e.kind == kPresent ? party_position(list, e.party) : -1;
+        if (at >= 0) put<uint32_t>(q + kQColour, kPartyColours[at % 5]);
+        break;
+    }
+    default: break;
     }
 }
 
@@ -1981,6 +2169,16 @@ bool member_at(int row, uint32_t &net_id, std::string &name) {
     if (slot < 0) return false;
     net_id = members[slot].net_id;
     name = members[slot].name;
+    return true;
+}
+
+bool mm_member_at(int row, uint32_t &net_id, std::string &name) {
+    if (row < 0) return false;
+    const std::vector<MmEntry> list = mm_list();
+    if (size_t(row) >= list.size() || list[size_t(row)].kind != kPresent || list[size_t(row)].slot < 0) return false;
+    const Member &m = members[list[size_t(row)].slot];
+    net_id = m.net_id;
+    name = m.name;
     return true;
 }
 
@@ -2272,7 +2470,7 @@ void install(int &installed) {
     const Replacement replacements[] = {
         {0x5eb160, "BUTTON_MULTIPLAYER", reinterpret_cast<void *>(&button_multiplayer)},
         {0x659bb0, "party roster query", reinterpret_cast<void *>(&roster_query)},
-        {0x659bc0, "player roster query", reinterpret_cast<void *>(&roster_query)},
+        {0x659bc0, "player roster query", reinterpret_cast<void *>(&mm_roster_query)},
         {0x5eb780, "BUTTON_MULTIPLAYER_STARTMATCH", reinterpret_cast<void *>(&button_start_match)},
         {0x5eb180, "LEAVE_MULTIPLAYER", reinterpret_cast<void *>(&leave_multiplayer)},
     };

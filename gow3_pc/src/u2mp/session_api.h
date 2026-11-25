@@ -5,8 +5,11 @@
 
 namespace u2mp::session {
 
-// The party member shown in roster row `row` (the order of the PARTY_PLAYERn / PLAYERn rows).
+// The party member shown in roster row `row` (the order of the PARTY_PLAYERn rows: the host first, then the
+// members on the host's team, then the others, each in slot order).
 bool member_at(int row, uint32_t &net_id, std::string &name);
+// The player shown in matchmaking row `row` (PLAYERn, cond 6..15); false for an open or "Found Player" slot.
+bool mm_member_at(int row, uint32_t &net_id, std::string &name);
 // The member with this net id (host 1, a client in transport slot s has s + 1).
 bool member_name(uint32_t net_id, std::string &name);
 // The member's chosen hero and villain actor packages; false when the member is unknown.

@@ -170,7 +170,37 @@ int cinema_received() {
     return st.cinema_received;
 }
 void member_data_changed() { hx::rec("online::member_data_changed"); }   // new build only (clan tag check, parity A 2.1)
+#ifndef u2mp   // new build only (parity group B: picks kept by name, friend card); the old headers lack the types
+int friend_index(const std::string &name) {
+    hx::rec("online::friend_index [%s]", name.c_str());
+    for (size_t i = 0; i < st.friends.size(); ++i)
+        if (st.friends[i].name == name) return int(i);
+    return -1;
+}
+bool friend_view(int i, FriendView &) {
+    hx::rec("online::friend_view %d", i);
+    return false;   // no presence in these scenarios: View Profile falls back to profile_text
+}
+#endif
 }  // namespace online
+#ifndef u2mp
+std::vector<std::string> friend_card_lines(int i) {
+    hx::rec("friend_card_lines %d", i);
+    return {};
+}
+namespace session {
+bool mm_member_at(int row, uint32_t &net_id, std::string &name) {   // matchmaking rows: same fake roster
+    hx::rec("session::mm_member_at %d", row);
+    for (const auto &m : st.members)
+        if (m.row == row) {
+            net_id = m.id;
+            name = m.name;
+            return true;
+        }
+    return false;
+}
+}  // namespace session
+#endif
 
 // voice.cpp
 namespace voice {

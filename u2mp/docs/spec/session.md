@@ -132,7 +132,7 @@ Replaced functions (each: 5 bytes at the address become a jump to our function; 
 |---|---|---|---|
 | `0x5eb160` | `BUTTON_MULTIPLAYER` | ret stub | menu callback `(void*, void*, void*)`, all ignored |
 | `0x659bb0` | `party roster query` | ret stub | `(u8 *query)` |
-| `0x659bc0` | `player roster query` | ret stub | `(u8 *query)` (same behaviour as the party one) |
+| `0x659bc0` | `player roster query` | ret stub | `(u8 *query)` (the matchmaking slot list, 5.13) |
 | `0x5eb780` | `BUTTON_MULTIPLAYER_STARTMATCH` | ret stub | menu callback `(void*, void*, void*)`, ignored |
 | `0x5eb180` | `LEAVE_MULTIPLAYER` | first 3 bytes `48 8d 3d` | menu callback `(void*, void*, void*)`, ignored |
 
@@ -324,17 +324,20 @@ Roles: the host is transport slot 0; clients have slots 1..10. A client only tal
 
 | type | name | direction | layout after the type byte |
 |---|---|---|---|
-| 1 | Info | client -> host | u8 len (<= 31), name[len], u8 rank, u8 team, u32 skin fingerprint (LE) |
-| 2 | Roster | host -> all | repeated {u8 slot, u8 len (<= 31), u8 rank, name[len]} in slot order |
+| 1 | Info | client -> host | u8 len (<= 31), name[len], u8 rank, u8 team, u32 skin fingerprint (LE), then three length-prefixed strings: hero skin (<= 47), villain skin (<= 47), clan tag (<= 4; newer clients only, older hosts stop before it) |
+| 2 | Roster | host -> all | repeated {u8 slot, u8 len (<= 31), u8 rank, name[len], u8 hero len, hero, u8 villain len, villain} in slot order (`roster_wire.h`) |
 | 3 | Mode | host -> all | s32 mode (LE) |
 | 4 | Follow | host -> clients | nothing (LAN), or u64 match room id (LE) when online |
 | 5 | Kick | host -> one client | nothing |
 | 6 | Teams | host -> all | repeated {u8 slot, u8 team} in slot order |
 | 7 | Online | both | forwarded to `online::on_message(from, rest, size-1)` |
 | 8 | Ids | host -> all (online) | repeated {u8 net id, u8 len (<= 16), npid[len]} |
+| 9 | Clock | host -> clients | u32 game clock (LE); a client at NET_SM >= 12 takes it when its own differs by more than 150 ticks |
+| 10 | Lobby | host -> clients | nothing: the client returns to the lobby with the host |
+| 11 | Tags | host -> all | repeated {u8 slot, u8 len (<= 4), tag[len]}, every used slot in slot order (the host's own slot carries its live tag); sent right after every Roster. Newer than the other types: older peers ignore it, so the Roster layout stays as they read it |
 | >= 0x10 | frontend | both | forwarded whole (type byte included) to `matchmaking::on_message(from, body, size)` |
 
-Types 0 and 9..0x0f are ignored. An empty session message is ignored.
+Types 0 and 12..0x0f are ignored. An empty session message is ignored.
 
 Receiving (from = transport slot of the sender):
 
@@ -344,12 +347,17 @@ Receiving (from = transport slot of the sender):
   call `unlocks_skin_fingerprint()` once (mine); if fingerprint != 0, mine != 0 and they differ, log
   `party: %s's skin table differs (fingerprint %08x, ours %08x): a different import; skins may show as others`
   (name, theirs, mine) and call `show_notice(name + " has a different Uncharted 2 multiplayer import. Their character skins may show differently. Both players should run the importer again.")`.
+  Then the hero and villain skin strings (u8 length, bytes; a cut string ends parsing) and the clan tag
+  (u8 length, bytes, first 4 kept; absent or cut = no tag).
   Then: refresh sessions (5.1), broadcast Roster (+ Ids), broadcast Teams. Not host / bad slot / short:
   nothing.
 - Roster (client only). Remember every entry's team; clear all 11 entries; parse from offset 1 while
   at least 3 bytes remain: slot, len, rank; stop if slot > 10 or the name would run past the end;
   otherwise entry[slot] = {used, net id of slot (3.3), name, rank, the remembered team of that slot};
   advance 3 + len. Then refresh sessions. Host: ignored.
+- Tags (client only). From offset 1 while 2 bytes remain: slot, len; stop if the tag would run past the
+  end; if slot <= 10, entry[slot].tag = the first 4 bytes of the tag; advance 2 + len. A Roster clears the
+  tags; the Tags that follow it set them again (an older host sends none: no tags).
 - Teams (client only). From offset 1, while 2 bytes remain: if slot <= 10, entry[slot].team = team
   (used flag untouched). Pairs with slot > 10 are skipped, parsing goes on.
 - Mode (client only, size >= 5): mailbox post (5.1) code 0x110, sender 1, payload the 4 bytes of the
@@ -369,8 +377,10 @@ Receiving (from = transport slot of the sender):
 Sent:
 - Info: built from my name (first min(len, 31) bytes), `local rank` (stored as "sent rank"),
   `local team` (stored as "sent team"), then `unlocks_skin_fingerprint()` LE. Call order: rank (guest
-  lookup), team, fingerprint. Always to slot 0.
-- Roster: then, only if `online::active()`, Ids: clear the map; for each used slot in order: NpId =
+  lookup), team, fingerprint. Then hero, villain and our clan tag (stored as "sent tag") as length-prefixed strings. Always to slot 0.
+- Roster: then Tags (every used slot: our live tag for our own slot, stored as "sent tag"; the member's
+  tag else), then, only if `online::active()`, Ids:
+  clear the map; for each used slot in order: NpId =
   `online::my_npid_text()` for slot 0, else `online::npid_at(address)` if `transport.peer_address(slot)`
   gives one, else empty; skip empty ones; map[net id] = full NpId; append net id (as u8), min(len,16),
   first 16 bytes. Ids is broadcast even when it holds no entries.
@@ -564,10 +574,11 @@ Runs from the page handler and after every wrapped state Update.
    remember them.
 10. If now >= next rate log: if next rate log > 0, log `frame hook: %u calls in 10 s` (frame counter);
     frame counter = 0; next rate log = now + 10.
-11. If frame counter % 120 == 7: r = local rank, then t = local team. If hosting, member 0 used and its
-    rank != r: set it and broadcast Roster (+ Ids). Else if not hosting, my net id != 0 and (r != sent
-    rank or t != sent team): send Info. Then, separately: if hosting, member 0 used and its team != t:
-    set it and broadcast Teams.
+11. If frame counter % 120 == 7: r = local rank, then t = local team; "tag changed" = our clan tag differs
+    from the sent tag. If hosting, member 0 used and (its rank != r or tag changed): set the rank and
+    broadcast Roster (+ Tags, Ids). Else if not hosting, my net id != 0 and (r != sent rank, t != sent team
+    or tag changed): send Info. Then, separately: if hosting, member 0 used and its team != t: set it and
+    broadcast Teams.
 12. If hosting: mode = s32 netInfo+0x2c4; if it differs from sent mode, remember it and broadcast Mode.
 13. s = NET_SM. If s differs from the last seen value: log `net state %d -> %d` (old, new); if s is 16
     call `netinit_dump("state 16")`, if s is 3 call `netinit_dump("state 3")`; if hosting, s == 3 and
@@ -668,26 +679,59 @@ call of the process; 300 per second (4.4).
 
 `net_ticks()`: if u64 0x113a040 is non-zero, the u32 at its +0xc; else own ticks (not 0).
 
-### 5.13 Roster queries (party rows and player rows; same behaviour)
+### 5.13 Roster queries (PS3 parity group B, spec parity-b-menus.md 1, 2, 11)
 
-query: +0 u32 op, +4 u32 value, +0x48 u64 table arg. row = arg % 10. m = the row-th used member in slot
-order (none if fewer).
-- op 7: value = 1 if m exists, else 0.
-- op 3 (image): if m and value == 1: icon = talking (`voice::talking(id)`) ? 0xffa98ec5 : muted
-  (`voice::muted(id)`, asked only when not talking) ? 0x7a5f5bf1 : none. With an icon: u32 +8 = 3,
-  u64 +0x10 = 0, u32 +0x18 = 0, u32 +0x1c = icon, u32 +0x20 = 1, s32 +0x24 = -1, u32 +0x28 = 0,
-  s32 +0x2c = -1, f32 +0x30 = 1.0. If m and value == 0: u32 +8 = 0x27, u64 +0x10 = 0, u32 +0x18 = rank,
-  u64 +0x1c = 0, s32 +0x24 = -1, u32 +0x28 = 0, s32 +0x2c = -1, f32 +0x30 = 1.0. Otherwise nothing.
+Query object (PS4): +0 u32 op, +4 u32 value (sub index / picture), +8..+0x30 image descriptor, +0x38 s32 op 10
+result, +0x3c u32 row colour, +0x40 u64 text, +0x48 **u32** table arg, +0x4c u32 op 10 selector. A member's
+shown name is `"[TAG] name"` when it has a clan tag (ours: NetPlayerData +0x1a8 read live, up to 4 chars;
+others: the tag of their Info / the host's Tags), else the name. Image descriptor written by "image(type,
+value, icon = 0, colour = -1)": u32 +8 = type, u64 +0x10 = 0, u32 +0x18 = value, u32 +0x1c = icon, u32 +0x20 =
+1 with an icon else 0, s32 +0x24 = -1, u32 +0x28 = 0, s32 +0x2c = colour, f32 +0x30 = 1.0. Member pictures:
+value 0 -> image(0x27, rank); value 1 -> muted (`voice::muted`) ? image(3, 0, 0x7a5f5bf1) : talking
+(`voice::talking`) ? image(3, 0, 0xffa98ec5) : nothing.
+
+**Party / lobby rows** (`0x659bb0`, cond 16..35). row = arg % 10. The row order: slot 0 (the party host) first,
+then in slot order the members whose team equals the host's team (the host's team is 0 when it has none, so
+members without a team go with it), then the other members in slot order. m = the member of that row (none past
+the end).
+- op 7: with m, value = 0 for this PC's own row, 1 for the others (the own row keeps the cursor, presses do
+  nothing: PS4 clears the button); without m nothing.
+- op 10: with m and value (sub index) 0: selector 0 -> result 1 ("can be selected": the PS4 party-row control
+  lets the cursor in only then); selector 1 -> result 0 for another member (connection state), nothing for the
+  own row. Else nothing.
+- op 3: with m, the member picture of value.
 - op 17 (colour): stop unless m exists, arg > 9, netInfo+0x2c4 == 2 and m's team is 1 or 2. Look up
   `*net-games*`; stop unless valid and 0 <= game < count; stop if the game's type is a co-op type. Then
   (first time only) the GetTeamColor byte checks of 3.4; on mismatch log
   `party rows: GetTeamColor 0x64aeb0 differs, no team colours` (once) and from then on always stop here.
   Else guest `0x64aeb0(out, ngm, team - 1, 0)` with a zeroed 16-aligned 0x20-byte out; u32 +0x3c =
   (u32 out+0xc & 0xffffff) | 0x20000000.
-- op 1 (text): the text buffer of m's slot (slot 0's buffer when there is no m) gets m's name, or ``
-  without m, as a C string cut to 63 chars. u64 +0x40 = that buffer's address with m, or the address of
-  a static empty string without m.
+- op 1 (text): with m, the text buffer of m's slot gets m's shown name cut to 63 chars and +0x40 = its address;
+  without m, +0x40 = the address of a static empty string.
 - any other op: value = 0.
+
+**Matchmaking rows** (`0x659bc0`, cond 6..15, on MATCHMAKING and POSTGAME). row = arg. The slot list is built on
+every call (PS3 `0x4b0008`): "gathering" = netInfo+0x34 == 1 (frontend3's phase; PS3 progress 0 / 1).
+1. Our party's members first, then the other members, each in slot order, at most 10. A member is ours when
+   online is off, it is this PC, its NpId is unknown, or `online::in_own_party(npid)` (NpId: ours from
+   `online::my_npid_text()`, others from the Ids map). Ours are kind 2 (present); the others kind 1 ("Found
+   Player") while gathering, else kind 2. Party id: ours `online::own_party_id()` (online) or 1 when the
+   party has 2+ members (LAN), else 0; the others `online::member_party_id(npid)`.
+2. While gathering and the chosen playlist (NetPlayerData +0x104) is known (`playlist_index` >= 0): open slots
+   (kind 0) up to min(`online::mm_slots()`, 10) entries.
+3. The party-id list for colours: every distinct non-zero party id held by 2 or more entries, in list order.
+
+A row at or past the list's end answers nothing. Else, with e = the entry and m = its member:
+- op 1: kind 2 -> m's shown name; kind 0 -> game text c0759450 ("Finding Player..."); kind 1 -> a91680a8
+  ("Found Player"); into the row's own 64-byte buffer.
+- op 3: value 2 with m -> image(0x1d, bars, 0, up ? 0x800000FF : 0x80808080) with bars from
+  `online::peer_rtt(npid)` (<= 49 ms 5, <= 79 4, <= 119 3, <= 199 2, else 1; 0 for this PC or no connection
+  record; up = the peer is active); kind 2 -> the member picture of value; kind 0 and value 0 -> image(0x10, 0)
+  (searching).
+- op 10: sub index 0, selector 0 and kind 2 -> result 1.
+- op 17: kind 2 whose party id is at position i of the party-id list -> u32 +0x3c = {0x1020E0E0, 0x102000E0,
+  0x10E000E0, 0x1020E000, 0x10E02000}[i % 5].
+- other ops (op 7 included): nothing.
 
 ### 5.14 BUTTON_MULTIPLAYER_STARTMATCH
 
@@ -727,8 +771,10 @@ page 0x471007a1: the first entry with that page id, else (count < 32) a new entr
 
 ### 5.15 Public functions
 
-- `member_at(row, id, name)`: the row-th used member in slot order (active not checked); fills both
-  and returns true; false otherwise (negative rows never match).
+- `member_at(row, id, name)`: the member of party row `row` in the order of 5.13 (active not checked); fills
+  both and returns true; false otherwise (negative rows never match).
+- `mm_member_at(row, id, name)`: the member of matchmaking row `row` (5.13) when that entry is kind 2; false
+  for open or "Found Player" slots and past the list.
 - `member_name(id, name)`: first used member with that net id; true and fills name; else false.
 - `member_rank(id)`: rank of the first used member with that net id; else 0.
 - `local_id()`: my net id when active, else 0.

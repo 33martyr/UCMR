@@ -92,7 +92,9 @@ using MenuCallback = void(U2MP_GUEST *)(void *, void *, void *);
 
 // ---- state that lives as long as the process ---------------------------------------------------------
 uint32_t g_selected_member = 0;       // net id picked in a party / player row
-int g_selected_friend = -1;           // friends list row picked (online rows, header excluded)
+std::string g_selected_friend_name;    // the friend (or friend request) picked in the friends list
+// The picked friend's row now (the list is kept sorted, so rows move); -1 when it left the list.
+int selected_friend() { return g_selected_friend_name.empty() ? -1 : online::friend_index(g_selected_friend_name); }
 std::string g_selected_met;           // players-met name picked
 std::vector<std::string> g_pick_names;   // cinema picker: the friends offered, by option
 std::string g_last_level_name;        // level package lookups log once per name
@@ -353,19 +355,15 @@ U2MP_GUEST void kick_griefer_apply(void *event, void *) {
 
 // ---- B8: party and match player rows -----------------------------------------------------------------
 
-void player_options(int row) {
-    uint32_t id = 0;
-    std::string name;
-    if (!session::member_at(row, id, name)) {
+// The popup of another player's row. The own row has none: its row query answers op 7 with 0 (PS3), so the
+// game drops the press before it gets here; a press that still arrives does nothing.
+void player_options(bool found, int row, uint32_t id, const std::string &name) {
+    if (!found) {
         log("player options: no player in row %d", row);
         return;
     }
+    if (id == session::local_id()) return;
     g_selected_member = id;
-    if (id == session::local_id()) {
-        text_set_player(with_own_text(name + " ", kTextYou).c_str());
-        message_box(kTextPlayer);
-        return;
-    }
     text_set_player(name.c_str());
     Popup popup;
     popup.add(kTextMute, kCbMute);
@@ -374,21 +372,44 @@ void player_options(int row) {
     popup.show();
 }
 
+void player_options(int row) {
+    uint32_t id = 0;
+    std::string name;
+    const bool found = session::member_at(row, id, name);
+    player_options(found, row, id, name);
+}
+
 U2MP_GUEST void party_player_row(void *arg, void *, void *) { player_options(int(arg_word(arg, 8) % 10)); }
-U2MP_GUEST void match_player_row(void *arg, void *, void *) { player_options(int32_t(arg_word(arg, 8))); }
+// Matchmaking rows show the matchmaking slot list (session.cpp), not the party order.
+U2MP_GUEST void match_player_row(void *arg, void *, void *) {
+    const int row = int32_t(arg_word(arg, 8));
+    uint32_t id = 0;
+    std::string name;
+    const bool found = session::mm_member_at(row, id, name);
+    player_options(found, row, id, name);
+}
 
 // ---- B9 / B10: friends list ---------------------------------------------------------------------------
 
-U2MP_GUEST void friend_accept(void *, void *, void *) { online::accept_request(g_selected_friend); }
-U2MP_GUEST void friend_remove(void *, void *, void *) { online::remove_friend(g_selected_friend); }
+U2MP_GUEST void friend_accept(void *, void *, void *) { online::accept_request(selected_friend()); }
+U2MP_GUEST void friend_remove(void *, void *, void *) { online::remove_friend(selected_friend()); }
+// View Profile: a friend's card lines (PS3 PAGE_FRIENDACTIONS header, menus.cpp), one per line; a request row
+// keeps its own text.
 U2MP_GUEST void friend_profile(void *, void *, void *) {
-    text_set_player(online::profile_text(g_selected_friend).c_str());
+    const int i = selected_friend();
+    std::string text;
+    for (const std::string &line : friend_card_lines(i))
+        if (!line.empty()) text += (text.empty() ? "" : "\\") + line;
+    online::FriendView v;
+    if (online::friend_view(i, v) && v.other_build) text += "\\Plays another version of the game.";
+    if (text.empty()) text = online::profile_text(i);
+    text_set_player(text.c_str());
     message_box(kTextPlayer);
 }
 
 void friend_options(int r) {
     if (r < 0 || r >= online::friend_count()) return;
-    g_selected_friend = r;
+    g_selected_friend_name = online::friend_name(r);
     text_set_player(online::friend_row(r));
     const bool cbs = register_callback(kCbFriendAccept, friend_accept) &&
                      register_callback(kCbFriendRemove, friend_remove) &&
@@ -493,15 +514,15 @@ U2MP_GUEST void invites_button(void *, void *, void *) {
 }
 
 U2MP_GUEST void join_party(void *, void *, void *) {
-    if (online::active() && g_selected_friend >= 0)
-        online::join_friend(g_selected_friend);
+    if (online::active() && selected_friend() >= 0)
+        online::join_friend(selected_friend());
     else
         message_box(kTextInvite);
 }
 
 U2MP_GUEST void invite_to_party(void *, void *, void *) {
-    if (online::active() && g_selected_friend >= 0)
-        online::invite_friend(g_selected_friend);
+    if (online::active() && selected_friend() >= 0)
+        online::invite_friend(selected_friend());
     else
         message_box(kTextInvite);
 }

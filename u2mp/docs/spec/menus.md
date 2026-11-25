@@ -140,6 +140,7 @@ Query conditions and functions:
 | 104 | voice volume slider | `0x65f3f0` | wrap | 1.12 |
 | 36 | LIST_FRIENDS | `0x65bbb0` (`ret` stub) | replace | 1.9 |
 | 3 | join game list | `0x659590` (`ret` stub) | replace | 1.11 |
+| 38 | PAGE_FRIENDACTIONS header (friend card) | `0x65bbc0` (`ret` stub) | replace | 1.9.1 |
 | 105, 77, 78, 134, 40, 41, 80, 82, 135, 108, 109, 110 | Profile page queries | whatever the table holds | wrap (diagnostic trace) | 1.13 |
 
 ## 1.4 Common behaviour
@@ -353,15 +354,34 @@ Building happens only from the cond 55 entry point. Before the first successful 
 
 ## 1.9 cond 36: LIST_FRIENDS (replaces the `ret` stub 0x65bbb0)
 
-**Online** (`online::active()` true):
+**Online** (`online::active()` true). PS3 `0x4c1fe0` behaviour (spec parity-b-menus.md 3) with the PC rows kept
+(owner decision): row 0 `"Browse Online Games"`, the title with the online count, the friend request rows.
 
-1. n = `online::friend_count()` (called first, for every op).
-2. op 1: count k = number of i in 0..n-1 with `online::friend_online(i)` true (called for each i
-   in order). Format `"Friends (%d of %d online)"` with k, n into a 96-byte title buffer
-   (truncated to 95). `q+0x40` = that buffer. Return.
-3. Other ops: plain list with count = 1 + n when n > 0, else 2. Row 0 is
-   `"Browse Online Games"`. Row r >= 1: when n == 0, `"No RPCN friends yet. Add friends in the launcher."`;
-   else the pointer returned by `online::friend_row(r - 1)` (written as is).
+1. The first op of every call (except op 1) is logged while fewer than 96 were: `"friends query: op %u row %d
+   cur %d rows %d"`. n = `online::friend_count()`; count = 1 + n when n > 0, else 2. Rows 1..n are
+   online.cpp's rows r - 1, which it keeps in the PS3 order (friends in this game, then the others online, then
+   offline, each by online id in byte order), then the requests to us, then ours.
+2. op 1: k = number of i in 0..n-1 with `online::friend_online(i)`. `"Friends (%d of %d online)"` (k, n) into
+   the 96-byte title buffer; `q+0x40` = it.
+3. op 2 (row = `q+4`, column = `q+0x54`): only columns 0 and 3 have text (others, and rows outside 0..count-1,
+   get the empty string). Row 0: column 0 `"Browse Online Games"`. n == 0, row 1: column 0 `"No RPCN friends yet.
+   Add friends in the launcher."`. A friend row (`online::friend_view(r - 1)`): column 0 its online id, column
+   3 the status block; a request row: column 0 `online::friend_name(r - 1)`, column 3
+   `online::request_state(r - 1)` ("Friend request" / "Request sent"). Each cell has its own 256-byte buffer.
+   Status block, with H = `"|@H|"` + text fd2de693 (the game's title) + `"|@N|"` and B = `"\"` (line break):
+   - not in this game's multiplayer: in this game -> H B 77f62775 ("Playing Single-Player"); else online ->
+     953825d0 ("Playing another game"); offline -> empty.
+   - in multiplayer with a version 1 presence: H only.
+   - else H B, then (party of 2+) ba8db526 with [A] = party size, B; then lobby -> 84041d79, cinema ->
+     ea3bb70e, match -> cf292b57 B.
+4. op 3 (row = `q+4`, element = `q+0x50`), friend rows only, descriptor {type, u64 +0x10 = 0, +0x18 value,
+   u64 +0x1c = 0, +0x24 -1, +0x28 0, +0x2c -1, f32 +0x30 1.0}: element 0xf5a294f3 -> type 0x20, value 2 for a
+   member of our party room, 1 online, 0 offline; element 0 -> type 0x21 with value max(level, 1) in
+   multiplayer, value 0 in this game outside multiplayer, else nothing. The avatar (0x2138a9b2): nothing.
+5. The cursor follows the selected friend: op 9 stores the row and the online id / request name of that row
+   ("" for row 0); op 4 answers the stored name's current row (`online::friend_index`), else the stored row,
+   clamped to 0..count-1; op 8 asks `online::refresh_friend_list()`, then stores the row op 4 would answer
+   (and its name); op 5 = count - 1; op 7 = 1.
 
 **LAN** (`online::active()` false):
 
@@ -372,6 +392,25 @@ Building happens only from the cond 55 entry point. Before the first successful 
    Else call `session::member_at(r, id, name)`; false: empty string. True: the text is `name`;
    when id == 1, append `" - "` and the game text of `0xac182308` (TextFind called only then,
    after member_at). Copy into a 96-byte buffer owned by row r (truncated to 95), return it.
+
+### 1.9.1 cond 38: friend card (replaces the `ret` stub 0x65bbc0)
+
+PS3 `0x4c1a08`, the PAGE_FRIENDACTIONS header (spec parity-b-menus.md 4). No PC page opens it; View Profile
+(remaining.cpp) shows the same lines through `friend_card_lines(row)`. The friend is the one LIST_FRIENDS
+stored (op 9); nothing is answered while online is off or when that friend is no longer a friend row.
+Lines: 0 = the online id; 1 = H (as 1.9) when in this game (multiplayer or not), else 953825d0 when online,
+else empty; 2 = (multiplayer, version 2 presence) lobby 84041d79, cinema ea3bb70e, match the match line, else
+empty. Match line from the friend's net game (`*net-games*` record of its index; none -> cf292b57): `"- "` +
+map name (level table 0x0dec97a4, stride 0x38, record with +0 == the net game's +4, text id at +4) + `" / "` +
+game type name (0xf985c7b6 record of type +0xc, stride 0x44, text id +0); for types other than 4, 8, 9, 12 with
+an end time: B + `"- "` + 93ac6446 with [TIME] = the remaining time (end - now in UTC seconds, 0 if past,
+at most 216000): hours % 24 and minutes % 60; both 0 -> 20ae4825; only hours `"%d %s"` (669b8ea8 for 1, else
+5879aefb); only minutes `"%d %s"` (9d59ec8a for 1, else 38e8ba93); both `"%d %s %d %s"`. The co-op difficulty
+and the variation of the PS3 line are left out (their text ids / record fields are not specified).
+- op 1: line 0. op 2 row 0 / 1: line 1 / 2 (each in its own 256-byte buffer).
+- op 3 (element `q+0x50`, multiplayer with a version 2 presence and a known net game): 0x0a071025 -> type
+  0x22, value = the net game's level id (+4); 0x57135906 -> type 3 with image id = the game type record's +8
+  (nothing when 0); descriptor as in 1.9 with the image id at +0x1c and +0x20 = 1. The avatar: nothing.
 
 ## 1.10 cond 39: LIST_PLAYERSMET (wrap of 0x65bcd0)
 
@@ -436,7 +475,7 @@ In order:
    `"%s (cond %u): 0x%llx wrapped"` (name, cond, expected), `installed += 1`.
 4. The diagnostic trace (1.13).
 5. Replacements, in this order: (36, 0x65bbb0, "LIST_FRIENDS query"), (3, 0x659590,
-   "join game list query"). For each: the entry for the cond (same search as step 3) must exist
+   "join game list query"), (38, 0x65bbc0, "friend card query"). For each: the entry for the cond (same search as step 3) must exist
    with fn == B + address, and `is_ret_stub(address)` must be true (bytes `c3 66 66 66 66`).
    Otherwise log `"%s at 0x%llx: not the stripped query this port expects, left alone"` (name,
    address) and go on. Else call `replace_function(address, 5, host, name)`; on true,

@@ -92,6 +92,31 @@ const char *join_title() {
     hx::rec("online::join_title");
     return s.join_title.c_str();
 }
+#ifndef u2mp   // new build only (parity group B friends list / friend card); the old headers lack the types
+bool friend_view(int i, FriendView &v) {   // a plain online friend in another game, named by its row text
+    hx::rec("online::friend_view %d", i);
+    if (i < 0 || i >= s.friends) return false;
+    v = FriendView{};
+    v.npid = row_of(s.friend_rows, i);
+    v.online = i < int(s.friend_on.size()) && s.friend_on[size_t(i)];
+    return true;
+}
+std::string friend_name(int i) {
+    hx::rec("online::friend_name %d", i);
+    return row_of(s.friend_rows, i);
+}
+int friend_index(const std::string &name) {
+    hx::rec("online::friend_index [%s]", name.c_str());
+    for (int i = 0; i < s.friends; ++i)
+        if (name == row_of(s.friend_rows, i)) return i;
+    return -1;
+}
+const char *request_state(int i) {
+    hx::rec("online::request_state %d", i);
+    return "";
+}
+void refresh_friend_list() { hx::rec("online::refresh_friend_list"); }
+#endif
 }  // namespace online
 
 namespace voice {
