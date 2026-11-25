@@ -68,6 +68,20 @@ reasons.
   import uses the PS4 asset.
 - Before adding a PS3 asset to an import step, check PS4's data (campaign and multiplayer) for the same asset.
 
+## Portable code: no Windows-only dependencies
+
+- **Always avoid Windows-only dependencies: write code that works on Linux as well.** This prepares for a Linux build
+  of the port, the launcher and the tools.
+- Prefer the C++ standard library (`<filesystem>`, `<thread>`, `<chrono>`, `<mutex>`) and the cross-platform
+  libraries already in use (SDL3, Qt, Vulkan, zlib) over Win32 calls.
+- Where a system call has no portable form, keep it behind one small platform function (a Windows and a Linux
+  implementation side by side, chosen with `#ifdef _WIN32`), not spread through the code. New code adds the Linux
+  side too, or at least a clear `#error` / stub with a comment saying what Linux needs.
+- No new dependency on Windows-only tools or libraries (MSVC-only features, COM, the registry, PowerShell-only steps)
+  where a portable choice exists. Paths: use `std::filesystem::path` and `/`-safe joins, never hard-coded `\` or
+  drive letters. Text: UTF-8 inside the code; convert to wide strings only at a Windows API boundary.
+- Build scripts: keep new build and packaging steps runnable from a POSIX shell (bash) as well.
+
 ## Versions: keep ONLY the latest
 
 - **The repository holds only the latest version of anything versioned.** Never keep an older version next to a new
