@@ -1927,7 +1927,27 @@ U2MP_GUEST void button_start_match(void *, void *, void *) {
 U2MP_GUEST void leave_multiplayer(void *, void *, void *) { teardown(true); }
 
 }  // namespace
-
+void sync_netstat_ranks() {
+    constexpr uint64_t kMatchPlayers = 0x1147bd8;
+    constexpr uint64_t kMatchRecords = 0x114b4bc;
+    constexpr uint64_t kRecordStride = 0x80;
+    constexpr uint64_t kTrackers = 0x113b770;
+    constexpr uint64_t kTrackerStride = 0x2c0;
+    uint32_t count = get<uint32_t>(g(kMatchPlayers));
+    if (count > 10) count = 10;
+    for (uint32_t i = 0; i < count; ++i) {
+        uint8_t *record = g(kMatchRecords + uint64_t(i) * kRecordStride);
+        const uint32_t id = get<uint32_t>(record);
+        if (!id) continue;
+        for (int t = 0; t < 10; ++t) {
+            const uint8_t *tracker = g(kTrackers + uint64_t(t) * kTrackerStride);
+            if (get<uint32_t>(tracker + 0x120) != id) continue;
+            const uint32_t rank = get<uint32_t>(tracker + 0x130);
+            if (rank && rank <= 0xff && record[0xb] != uint8_t(rank)) record[0xb] = uint8_t(rank);
+            break;
+        }
+    }
+}
 // ---- public interface -----------------------------------------------------------------------------------
 const uint8_t *package_by_id(uint32_t id) { return find_package(id); }
 

@@ -332,6 +332,16 @@ void Transport::handle(const Address &from, const uint8_t *packet, size_t size, 
     const uint8_t kind = packet[5];
     if (kind == kHello && hosting_) {
         Connection *c = find(from);
+        // A client sends Hello only while it has no connection to us. A Hello from a peer that already
+        // sent data (and not just a late copy of its first Hello) means it restarted its transport, e.g.
+        // it timed out on us, left and joined the party again before our own timeout: its Bye never came.
+        // Drop the old connection so the game layer and the roster start fresh for the new one.
+        if (c && c->heard_data() && now - c->connected_at > kHelloRetry * 4) {
+            const uint8_t slot = c->slot;
+            c->reset();
+            if (on_peer) on_peer(slot, false);
+            c = nullptr;
+        }
         if (!c) {
             const uint8_t want = size > kHeader ? packet[kHeader] : 0;   // the slot asked for (0 = any)
             if (want >= 1 && want <= kMaxPeers && !peers_[want].connected) c = &peers_[want];
@@ -343,6 +353,7 @@ void Transport::handle(const Address &from, const uint8_t *packet, size_t size, 
             c->slot = uint8_t(c - peers_);
             c->connected = true;
             c->last_heard = now;
+            c->connected_at = now;
             if (on_peer) on_peer(c->slot, true);
         }
         send_control(from, kWelcome, c->slot);

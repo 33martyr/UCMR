@@ -44,7 +44,9 @@ public:
     double last_heard = 0;
     double last_sent = 0;
     bool connected = false;
+    double connected_at = 0;        // when the host accepted this peer's Hello
     void reset() { *this = Connection(); }
+    bool heard_data() const { return any_received_; }   // a data packet came on this connection
 
     void queue(bool reliable, const uint8_t *data, size_t size);
     // Builds the next packet (kind 0) into `out`; false when there is nothing to send.

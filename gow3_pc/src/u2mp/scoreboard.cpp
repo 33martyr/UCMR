@@ -128,29 +128,6 @@ unsigned char *find_page_id(uint32_t id) {
 
 unsigned char *find_page() { return find_page_id(active_page); }
 
-// The local record is built before the local rank is known; take every record's rank from its slot.
-void sync_rank_rows() {
-    constexpr uint64_t kMatchPlayers = 0x1147bd8;
-    constexpr uint64_t kMatchRecords = 0x114b4bc;
-    constexpr uint64_t kRecordStride = 0x80;
-    constexpr uint64_t kTrackers = 0x113b770;
-    constexpr uint64_t kTrackerStride = 0x2c0;
-    uint32_t count = peek_image<uint32_t>(kMatchPlayers);
-    if (count > 10) count = 10;
-    for (uint32_t i = 0; i < count; ++i) {
-        unsigned char *record = image.base + kMatchRecords + uint64_t(i) * kRecordStride;
-        const uint32_t id = peek<uint32_t>(record);
-        if (!id) continue;
-        for (int t = 0; t < 10; ++t) {
-            const unsigned char *tracker = image.base + kTrackers + uint64_t(t) * kTrackerStride;
-            if (peek<uint32_t>(tracker + 0x120) != id) continue;
-            const uint32_t rank = peek<uint32_t>(tracker + 0x130);
-            if (rank && rank <= 0xff && record[0xb] != uint8_t(rank))
-                record[0xb] = uint8_t(rank);
-            break;
-        }
-    }
-}
 
 void set_shown(bool on, const char *reason) {
     if (on == shown) return;
@@ -317,7 +294,7 @@ U2MP_GUEST uint64_t frame_hook(uint64_t a, uint64_t b, uint64_t c) {
     }
 
     const bool want = user_shown || auto_left > 0.0f;
-    if (want) sync_rank_rows();
+    if (playing || want) sync_netstat_ranks();
     const char *reason = want ? (auto_left > 0.0f ? "round results" : "button")
                               : (user_shown ? "button" : "round results");
     set_shown(want, reason);

@@ -76,6 +76,7 @@ void install_hud(int &installed);       // hud.cpp: multiplayer HUD draw, PS3 0x
 void install_medals(int &installed);    // medals.cpp: default icon for medals net.pak lacks
 void hud_weapon_tick();                 // hud.cpp: weapon panel trigger, from the frame (not the HUD draw)
 void install_scoreboard(int &installed); // scoreboard.cpp: in-match scoreboard, PS3 0x4cbf00 / 0x4cbc10
+void sync_netstat_ranks();               // session.cpp: copy current NetStatGame levels from the trackers
 void show_round_results();               // scoreboard.cpp: round/end results page from the session state
 void install_rosternames(int &installed); // rosternames.cpp: player display names in the team lists (NetStatGame +0x3918)
 void install_matchend(int &installed); // matchend.cpp: match-end watch, test time limit (PORT-GAMEPLAY3.md 6)
