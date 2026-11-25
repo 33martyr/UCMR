@@ -741,9 +741,11 @@ every call (PS3 `0x4b0008`): "gathering" = netInfo+0x34 == 1 (frontend3's phase;
 A row at or past the list's end answers nothing. Else, with e = the entry and m = its member:
 - op 1: kind 2 -> m's shown name; kind 0 -> game text c0759450 ("Finding Player..."); kind 1 -> a91680a8
   ("Found Player"); into the row's own 64-byte buffer.
-- op 3: value 2 with m -> image(0x1d, bars, 0, up ? 0x800000FF : 0x80808080) with bars from
+- op 3: value 2 with m -> image(0x1d, bars, 0, colour) with bars from
   `online::peer_rtt(npid)` (<= 49 ms 5, <= 79 4, <= 119 3, <= 199 2, else 1; 0 for this PC or no connection
-  record; up = the peer is active); kind 2 -> the member picture of value; kind 0 and value 0 -> image(0x10, 0)
+  record) and colour from the link state `online::peer_link_state(npid)` (`peer_rules::bars_colour`, spec
+  parity-i-connection.md I5: inactive 0x800000FF, pending 0x80FF0000, active 0x8000FF00, dead / none / this PC
+  0x80808080); kind 2 -> the member picture of value; kind 0 and value 0 -> image(0x10, 0)
   (searching).
 - op 10: sub index 0, selector 0 and kind 2 -> result 1.
 - op 17: kind 2 whose party id is at position i of the party-id list -> u32 +0x3c = {0x1020E0E0, 0x102000E0,

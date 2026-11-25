@@ -25,6 +25,7 @@
 #include "gamenet.h"
 #include "net.h"
 #include "online.h"
+#include "peer_rules.h"
 #include "progression.h"
 #include "roster_wire.h"
 #include "session_api.h"
@@ -1444,7 +1445,7 @@ bool start_transport() {
     transport.admit = admit_peer;
     transport.on_timeout = [](uint8_t slot) {   // PS3 NpNetUpdate's silent-peer drop (spec parity-e-flow2.md 2.2)
         const char *name = slot < kSlots && members[slot].used ? members[slot].name.c_str() : "?";
-        log("%s has left : timed out (nothing heard for %.0f s)", name, net::kTimeoutSeconds);
+        log("*************** %s has left : timed out (nothing heard for %.0f s)", name, net::kTimeoutSeconds);
     };
     blocked.clear();
     gamenet::set_transport(&transport);
@@ -2683,7 +2684,9 @@ U2MP_GUEST void mm_roster_query(uint8_t *q) {
             uint32_t rtt_ms = 0;
             bool up = false;
             const bool known = m->net_id != my_id && online::peer_rtt(e.npid, rtt_ms, up);
-            put_image(q, 0x1d, known ? bars_of(rtt_ms) : 0, 0, int32_t(up ? 0x800000FFu : 0x80808080u));
+            // PS3 colours the bars by the link state (spec parity-i-connection.md I5); own row, LAN, no record: grey
+            const int32_t state = known ? online::peer_link_state(e.npid) : -1;
+            put_image(q, 0x1d, known ? bars_of(rtt_ms) : 0, 0, int32_t(peer_rules::bars_colour(state)));
         } else if (e.kind == kPresent && m) {
             member_image(q, *m, picture);
         } else if (e.kind == kOpenSlot && picture == 0) {

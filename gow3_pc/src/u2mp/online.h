@@ -182,6 +182,9 @@ bool in_own_party(const std::string &npid);          // this PC or a member of o
 uint64_t own_party_id();                             // our party room while it has 2+ members, else 0
 uint64_t member_party_id(const std::string &npid);   // the party id a match room member published (+0), 0 none
 bool peer_rtt(const std::string &npid, uint32_t &rtt_ms, bool &up);   // false: no connection record
+// The link state to that player (U2O_PEER_* of u2_online_abi.h: the matchmaking rows' bar colour, PS3 0x4e8f1c);
+// -1 when there is no connection record or no state was reported yet.
+int32_t peer_link_state(const std::string &npid);
 // The match room's slot count (custom or matchmaking); without one the size a matchmaking room of the chosen
 // playlist gets (matchmaking page) or 10. 0 when online matchmaking is off.
 int mm_slots();

@@ -53,6 +53,7 @@
 #include "frontend3.h"
 #include "online.h"
 #include "online_link.h"
+#include "peer_rules.h"
 #include "progression.h"
 #include "session_api.h"
 #include "u2_online_abi.h"
@@ -324,6 +325,8 @@ struct Peer {
     std::string npid;
     int32_t state = -1;
     uint32_t rtt_us = 0;
+    bool was_active = false;    // this link was up at some point (a dead link that never was: "unreachable", I4)
+    bool ended_by_us = false;   // we asked the online program to end the link (its death is not "unreachable")
 };
 
 bool started = false;          // Multiplayer entered with online on (the transport runs over the link)
@@ -429,7 +432,10 @@ enum class Mm { Idle, Searching, Joining, Checking, Creating, Hosting, Joined, F
 Mm mm_state = Mm::Idle;
 uint64_t mm_search_req = 0;
 uint32_t mm_playlist_index = 0;
-std::vector<uint64_t> mm_bad_rooms;   // rooms that did not work out this session (PS3: dead-peer ring 0x4e8978)
+std::vector<uint64_t> mm_bad_rooms;   // rooms that did not work out this session (our own, by room id)
+// PS3 0x4e8978 (spec parity-i-connection.md I4): players whose link died unreachable; no new link to them, their
+// rooms are skipped, a listed party owner is left at once. Emptied when online multiplayer is entered (start).
+peer_rules::UnreachableList unreachable;
 MmCriteria mm_criteria;               // the pass running
 std::vector<U2oRoomExt> mm_found;     // its search result: the next room is picked from it (PS3 state 6)
 uint64_t mm_room_id = 0;              // the room being joined / checked
@@ -556,10 +562,50 @@ public:
     }
 } link;
 
+// A new link state of a peer (event or poll). PS3 0x4e9618 lists a peer whose link died "unreachable" (spec
+// parity-i-connection.md I4); the online program gives no reason, so a link that died before it was ever active and
+// that we did not end stands for it (spec question 2).
+void note_peer_state(Peer &p, int32_t s, uint32_t rtt_us) {
+    const int32_t old = p.state;
+    p.state = s;
+    p.rtt_us = rtt_us;
+    if (old == U2O_PEER_DEAD && s != U2O_PEER_DEAD) p.was_active = p.ended_by_us = false;   // a new link (PS3: a new record)
+    if (s == U2O_PEER_ACTIVE) p.was_active = true;
+    if (s != U2O_PEER_DEAD || old == U2O_PEER_DEAD || p.npid.empty() || p.npid == my_npid) return;
+    if (!peer_rules::dead_means_unreachable(p.was_active, p.ended_by_us)) return;
+    unreachable.add(p.npid);
+    log("online: peer %s: the link died before it was ever up: unreachable, not tried again until Multiplayer is entered "
+        "again (%zu of %zu listed; the online program gives no reason, so this is the PC stand-in for PS3's unreachable)",
+        p.npid.c_str(), unreachable.size(), peer_rules::UnreachableList::kSlots);
+}
+
+// PS3 connect by online id (0x4e9e98): refused at once for a player on the unreachable list.
+int connect_peer(const std::string &npid, const uint8_t ip[4], uint16_t port) {
+    if (unreachable.contains(npid)) return -1;
+    const int i = peer_index(npid, true);
+    if (i >= 0) {
+        Peer &p = peers[size_t(i)];
+        p.ended_by_us = false;
+        if (p.state != U2O_PEER_ACTIVE && p.state != U2O_PEER_PENDING) p.was_active = false;   // a new link
+    }
+    return api.peer_connect(npid.c_str(), ip, port);
+}
+
+void disconnect_peer(const std::string &npid) {
+    const int i = peer_index(npid, false);
+    if (i >= 0) peers[size_t(i)].ended_by_us = true;
+    api.peer_disconnect(npid.c_str());
+}
+
 void connect_member(const U2oMember &m, uint16_t my_member_id, uint64_t room) {
     const std::string npid = npid_text(m.npid);
     if (npid.empty() || m.id == my_member_id || npid == my_npid) return;
     peer_index(npid, true);
+    if (unreachable.contains(npid)) {
+        log("online: peer %s (%s) in room %llx: on the unreachable list, not connecting (PS3 0x4e9e98 refuses it)",
+            npid.c_str(), m.name, (unsigned long long)room);
+        return;
+    }
     const bool no_address = !m.ip[0] && !m.ip[1] && !m.ip[2] && !m.ip[3];
     if (no_address) {
         const uint64_t r = api.peer_address(npid.c_str());
@@ -567,7 +613,7 @@ void connect_member(const U2oMember &m, uint16_t my_member_id, uint64_t room) {
             m.name, (unsigned long long)room, (unsigned long long)r);
         return;
     }
-    const int r = api.peer_connect(npid.c_str(), m.ip, m.port);
+    const int r = connect_peer(npid, m.ip, m.port);
     log("online: peer %s (%s) in room %llx: connecting to %s (u2o_peer_connect %d)", npid.c_str(), m.name,
         (unsigned long long)room, masked(m.ip, m.port).c_str(), r);
 }
@@ -830,6 +876,7 @@ void mm_pick() {
         const int dr = int(x.int_attr[A_TIER - A_KEY]) - session::rank();
         const bool close_rank = dr <= kTierSpan && dr >= -kTierSpan;
         if (mm_bad(x.room_id) || free_slots < party || room_by_id(x.room_id)) continue;
+        if (unreachable.contains(npid_text(x.owner_npid))) continue;   // PS3 state 6 (0x4b14d4): owner unreachable
         if (mm_criteria.rank_only && !close_rank) continue;
         // PS3 scored by distance (no location on PC: every room is at distance 0); the fullest room wins, so
         // players gather.
@@ -1313,7 +1360,7 @@ void mm_search_done(const U2oEvent &e) {
         // PS3 "%s, %i players %8.2f km": no location on PC, so no distance either
         log("online: matchmaking: %s, %u players (room %llx, %u slots, rank %u)%s", x.owner_name, unsigned(x.cur_members),
             (unsigned long long)x.room_id, unsigned(x.max_slot), unsigned(x.int_attr[A_TIER - A_KEY]),
-            mm_bad(x.room_id) ? " (failed before)" : "");
+            mm_bad(x.room_id) ? " (failed before)" : unreachable.contains(npid_text(x.owner_npid)) ? " (owner unreachable)" : "");
         mm_found.push_back(x);
     }
     mm_pick();
@@ -1330,8 +1377,13 @@ void mm_check_tick(double t) {
         mm_room_failed("the room is gone");
         return;
     }
+    if (unreachable.contains(owner->npid)) {
+        mm_room_failed("the owner is on the unreachable list");
+        return;
+    }
     uint32_t rtt_us = 0;
     const int s = api.peer_state(owner->npid.c_str(), &rtt_us);
+    if (const int i = peer_index(owner->npid, false); i >= 0) note_peer_state(peers[size_t(i)], s, rtt_us);
     if (s == U2O_PEER_DEAD) {
         mm_room_failed("the link to the owner failed");
         return;
@@ -1407,11 +1459,15 @@ void party_owner_tick(double t) {
         party_owner_down_since = 0;
         return;
     }
-    if (!party_owner_seen_up) return;   // the first contact has kJoinTimeout (waiting_host)
-    if (!party_owner_down_since) party_owner_down_since = t;
-    if (t - party_owner_down_since <= kPartyHostLost) return;
-    log("online: party: Couldn't talk to the party host %s (no link for %.0f s): leaving the party", o->name.c_str(),
-        kPartyHostLost);
+    if (unreachable.contains(o->npid)) {   // PS3 state 6 (0x4c49fc): a listed owner is left at once
+        log("online: party: Couldn't talk to the party host %s (on the unreachable list): leaving the party", o->name.c_str());
+    } else {
+        if (!party_owner_seen_up) return;   // the first contact has kJoinTimeout (waiting_host)
+        if (!party_owner_down_since) party_owner_down_since = t;
+        if (t - party_owner_down_since <= kPartyHostLost) return;
+        log("online: party: Couldn't talk to the party host %s (no link for %.0f s): leaving the party", o->name.c_str(),
+            kPartyHostLost);
+    }
     const bool our_host = host_npid == o->npid;
     party_owner_tracked.clear();
     leave_room(party_room, "the party host is unreachable");
@@ -1838,7 +1894,7 @@ void on_event(const U2oEvent &e) {
             mm_host_gone("the host left the room", false);
         const bool elsewhere = (r != &party_room && in_room(party_room, npid)) || (r != &match_room_ && in_room(match_room_, npid));
         if (!elsewhere && !npid.empty()) {
-            api.peer_disconnect(npid.c_str());
+            disconnect_peer(npid);
             log("online: peer %s disconnected (in none of our rooms now)", npid.c_str());
         }
         if (r == &party_room) publish_blob(party_room, false);
@@ -1885,18 +1941,23 @@ void on_event(const U2oEvent &e) {
             break;
         }
         peer_index(npid, true);
-        const int r = api.peer_connect(npid.c_str(), e.ip, e.port);
+        if (unreachable.contains(npid)) {
+            log("online: peer %s: address %s, on the unreachable list: not connecting", npid.c_str(), masked(e.ip, e.port).c_str());
+            break;
+        }
+        const int r = connect_peer(npid, e.ip, e.port);
         log("online: peer %s: address %s, connecting (u2o_peer_connect %d)", npid.c_str(), masked(e.ip, e.port).c_str(), r);
         break;
     }
     case U2O_EV_PEER_STATE: {
         const std::string npid = npid_text(e.npid);
-        const int i = peer_index(npid, true);
-        if (i >= 0) {
-            peers[size_t(i)].state = int32_t(e.state);
-            peers[size_t(i)].rtt_us = e.rtt_us;
-        }
         log("online: peer %s: %s, rtt %u ms", npid.c_str(), peer_state_name(e.state), e.rtt_us / 1000);
+        // Run-time check (spec parity-i-connection.md question 2): the ABI names no reason for a dead link; if the
+        // program ever fills one in, it shows here (the unreachable rule does not use it).
+        if (e.state == U2O_PEER_DEAD && (e.error || e.cause))
+            log("online: peer %s: dead with error %d, cause %u (not described by the ABI)", npid.c_str(), e.error, e.cause);
+        const int i = peer_index(npid, true);
+        if (i >= 0) note_peer_state(peers[size_t(i)], int32_t(e.state), e.rtt_us);
         if (waiting_host && e.state == U2O_PEER_DEAD) {
             Room *r = room_by_id(waiting_room);
             const Member *o = r ? r->member(r->owner_id) : nullptr;
@@ -2135,6 +2196,10 @@ net::Link *start() {
     if (!load()) return nullptr;
     if (const char *n = std::getenv("UNCHARTED_U2MP_NPID"); n && *n) my_npid = std::string(n).substr(0, 16);
     if (!link_opened || link_state == U2O_FAILED || link_state == U2O_OFF) open_link();
+    if (!started && unreachable.size()) {   // PS3 NetInit (0x4e9d28): a new online session starts with an empty list
+        log("online: Multiplayer entered: the unreachable list (%zu) is emptied", unreachable.size());
+        unreachable.clear();
+    }
     started = true;
     waiting_host = following_leader = false;
     switch_at = 0;
@@ -2235,6 +2300,11 @@ void frame() {
             host_deadline = std::min(host_deadline, t + admit_limit);
         }
     }
+    if (waiting_host && unreachable.contains(host_npid)) {   // PS3 0x4e9e98: no link to a listed player
+        log("online: the room owner %s is on the unreachable list: the join fails at once (room %llx)", host_npid.c_str(),
+            (unsigned long long)waiting_room);
+        owner_not_reached("room owner unreachable");
+    }
     if (waiting_host && t >= host_deadline) {
         log("online: the room owner did not let us in in time (%s): leaving room %llx",
             admit_armed ? "admit limit after the link was up" : "link limit", (unsigned long long)waiting_room);
@@ -2273,9 +2343,8 @@ void frame() {
             uint32_t rtt = 0;
             const int s = api.peer_state(p.npid.c_str(), &rtt);
             if (s == U2O_PEER_INACTIVE && p.state < 0) continue;
-            p.state = s;
-            p.rtt_us = rtt;
             log("online: peer %s: %s, rtt %u ms", p.npid.c_str(), peer_state_name(uint32_t(s)), rtt / 1000);
+            note_peer_state(p, s, rtt);
         }
     }
 }
@@ -2358,7 +2427,7 @@ void on_transport_closed(const char *why) {
     leave_room(match_room_, why ? why : "closed");
     leave_room(party_room, why ? why : "closed");
     for (const Peer &p : peers)
-        if (p.state == U2O_PEER_ACTIVE || p.state == U2O_PEER_PENDING) api.peer_disconnect(p.npid.c_str());
+        if (p.state == U2O_PEER_ACTIVE || p.state == U2O_PEER_PENDING) disconnect_peer(p.npid);
     for (Peer &p : peers) p.state = -1;
     started = false;
     start_hidden = false;
@@ -2963,6 +3032,11 @@ bool peer_rtt(const std::string &npid, uint32_t &rtt_ms, bool &up) {
     rtt_ms = peers[size_t(i)].rtt_us / 1000;
     up = peers[size_t(i)].state == U2O_PEER_ACTIVE;
     return true;
+}
+
+int32_t peer_link_state(const std::string &npid) {
+    const int i = npid.empty() ? -1 : peer_index(npid, false);
+    return i < 0 ? -1 : peers[size_t(i)].state;
 }
 
 // The match room's real slot count (parity H1: 3 for a co-op custom game, the playlist's maximum in matchmaking);

@@ -42,7 +42,7 @@ Connection records (np-connection-manager, 32 records, 1.4) bind a peer's online
 one packet+message layer object each.
 
 Ours: `net.cpp` is our own datagram transport (UDP on LAN, the online program's link online; hello / welcome / bye,
-its own sequence and ack, 0.1 s keepalive, 10 s timeout). Inside it, `gamenet.cpp` re-creates the PS3 packet layer
+its own sequence and ack, 0.1 s keepalive, 20 s timeout since parity-e 2.2). Inside it, `gamenet.cpp` re-creates the PS3 packet layer
 (header, window, ack processing) around the PS4 build's message layer, which survived intact (PS4 `0x60a110` unpack,
 `0x60ac70` pack, `0x60b780` delivered, `0x60b8f0` lost, `0x60ba10` reset, `0x609fc0` queue; TRANSPORT-INTERFACE 1, 7).
 The PS3 connection manager is replaced by the online program's peers (`online.cpp`, `u2_online_abi.h`: peer states
@@ -144,11 +144,14 @@ Both count 1/300 s.
   (liveness is net.cpp's `last_heard`, stamped for every datagram, so the visible result is the same).
 - No per-frame expiry pass; the PS4 type-12 vtable is believed to use the shared "never expires" method
   (TRANSPORT-INTERFACE 1.1), so stale snapshots are never dropped.
-- `session.cpp mm_roster_query`: bars from `online::peer_rtt` (`bars_of`, PS3 thresholds) and colour `0x800000FF`
-  when the peer is active, `0x80808080` otherwise.
-- `online.cpp`: `mm_bad_rooms` (rooms that failed this session, by room id) stands in for the unreachable list;
-  party owner check `kPartyHostLost` 5 s (F11 b).
-- `net.cpp`: 10 s silence timeout for every peer (`parity-e-flow2.md` 2.2 asks for 20 s).
+- `session.cpp mm_roster_query`: bars from `online::peer_rtt` (`bars_of`, PS3 thresholds); colour from the link
+  state `online::peer_link_state` through `peer_rules::bars_colour` (I5, done 2026-11-25): inactive `0x800000FF`,
+  pending `0x80FF0000`, active `0x8000FF00`, dead / no record / own row / LAN `0x80808080`.
+- `online.cpp`: the unreachable list `unreachable` (`peer_rules::UnreachableList`, 32 slots; I4, done 2026-11-25)
+  beside `mm_bad_rooms` (rooms that failed this session, by room id, our own); party owner check `kPartyHostLost`
+  5 s (F11 b), at once for a listed owner.
+- `net.cpp`: 20 s silence timeout for every peer (`net::kTimeoutSeconds`, done with `parity-e-flow2.md` 2.2; owner
+  decision: every mode), log line `*************** <name> has left : timed out` (I6).
 
 ## 3. Items to implement
 
@@ -218,6 +221,8 @@ Source on PC: the online program's peer state "dead". If it cannot tell "unreach
 our own disconnect), use "dead without ever having been active" as the unreachable case and say so in the log
 (question 2).
 
+**Done 2026-11-25** (section 8).
+
 ### I5. Connection state colours in the matchmaking rows (PS3 `0x4e8f1c`, used by `0x4bfac8`) - MISSING (correction to `parity-b-menus.md` 2 / 11)
 
 `parity-b-menus.md` assumed the status function returns only 0 or -1. It returns the signaling state (1.4), and the row
@@ -235,10 +240,14 @@ bars have the wrong colour and pending ones look like dead ones. Fix in `session
 state from `online.cpp` (a getter next to `peer_rtt`). The byte order of the word on PS4 is the open point of
 `parity-b-menus.md` 2 (same for all four values). LAN rows: no peer state -> as today.
 
+**Done 2026-11-25** (section 8).
+
 ### I6. Silent-peer timeout (PS3 `0x4651b4`) - MISSING, specified in `parity-e-flow2.md` 2.2
 
-20 s without any datagram (ours 10 s), never for a connection that has received nothing yet; one log line
+20 s without any datagram (ours was 10 s when this spec was written), never for a connection that has received nothing yet; one log line
 `*************** <name> has left : timed out`. Not repeated here.
+
+**Done** (with `parity-e-flow2.md` 2.2; the log prefix 2026-11-25, section 8).
 
 ## 4. PLATFORM items and what replaces them
 
@@ -283,13 +292,17 @@ state from `online.cpp` (a getter next to `peer_rtt`). The byte order of the wor
    TRANSPORT-INTERFACE 1.4) and what the update does in each branch were not traced in this group (row `0x442558`
    belongs to group E). I1 only restores the reachable state.
 2. Can the online program report *why* a peer went dead (unreachable vs terminated by the peer vs timeout)? If not,
-   I4 uses "dead before ever active" as the unreachable case.
+   I4 uses "dead before ever active" as the unreachable case. **State 2026-11-25:** the ABI documents no reason
+   field for `U2O_EV_PEER_STATE`, so the stand-in is used; online.cpp logs `dead with error %d, cause %u` whenever
+   the program fills either field in a dead event, so a future reason shows in the log.
 3. Integrity on LAN: PS3 signed and encrypted its P2P datagrams. Should the LAN transport get a per-session message
    authentication tag so a stray or forged datagram cannot reach the PS4 unpack? (Not a visible PS3 behaviour; owner
    decision.)
 4. I3: confirm on PS4 that the type-12 vtable's expiry slot is the shared "never" method and that the time stamp is the
    first payload word; if the PS4 slot already expires snapshots, only the per-frame pass is missing.
-5. I5: the colour byte order on PS4 (same open point as `parity-b-menus.md` 2).
+5. I5: the colour byte order on PS4 (same open point as `parity-b-menus.md` 2). `parity-b-menus.md` 11.4 reads the
+   PS4 0x1d drawer (`0x5c0eba`): bits 16-23 / 8-15 / 0-7 red / green / blue, 24-31 alpha, so the PS3 words keep their
+   meaning written as the same 32-bit values (inactive blue, pending red, active green); check it on screen.
 
 ## 7. Status table
 
@@ -297,7 +310,7 @@ state from `online.cpp` (a getter next to `peer_rtt`). The byte order of the wor
 |---|---|---|---|
 | 0x464cb8 | packet header read: sequence / ack acceptance, ack field, delivered / lost per record | COVERED | gamenet.cpp `receive_peer` (same rules; 1.2) |
 | 0x465138 | packet header write (has-messages bit, 11-bit seq, 10-bit ack, 32-bit field) | COVERED | gamenet.cpp `send_peer` |
-| 0x4651b4 | "silent for more than T s" test (T = 20 s at its caller) | MISSING | I6 = parity-e 2.2 (net.cpp 10 s today) |
+| 0x4651b4 | "silent for more than T s" test (T = 20 s at its caller) | COVERED | I6 = parity-e 2.2: net.cpp `kTimeoutSeconds` 20 s, session.cpp `on_timeout` log |
 | 0x465218 | read packet: stamp last receive, header, unpack if new with messages | COVERED | net.cpp `last_heard` + gamenet.cpp `receive_peer` (stamp order: I1 note) |
 | 0x4652cc | write packet: window (ack-only above 30 in flight), new record, pack | MISSING | I1 (ours ack-only at 30) |
 | 0x465484 | module static: a word set to -1 | PLATFORM | no visible effect |
@@ -339,20 +352,20 @@ state from `online.cpp` (a getter next to `peer_rtt`). The byte order of the wor
 | 0x4db7d4 | P2P UDP socket: encryption, signature, non-blocking, bind port 3658 / vport 1 | PLATFORM | online program link; integrity delta 4, question 3 |
 | 0x4dba48 | recvfrom (P2P port fixed, receive time stamped, byte counters) | PLATFORM | net.cpp `pump` |
 | 0x4dbc98 | per-frame socket update: due delayed sends, per-second bandwidth history | PLATFORM | none needed (simulator off) |
-| 0x4e8978 | is an online id on the unreachable list (32 slots) | MISSING | I4 (ours: bad rooms by room id) |
+| 0x4e8978 | is an online id on the unreachable list (32 slots) | COVERED | I4: online.cpp `unreachable` (peer_rules.h `UnreachableList`), `note_peer_state` feed |
 | 0x4e8a50 | clear one connection record | PLATFORM | gamenet.cpp `detach` |
 | 0x4e8afc | connection manager shutdown: reset all, end signaling, destroy context | PLATFORM | online program / `gamenet.cpp detach` |
 | 0x4e8c8c | release a record (reference count; at 0 reset + end signaling) | PLATFORM | online program keeps a peer link while any room needs it |
 | 0x4e8e90 | connection quality 1..5 from round-trip ms | COVERED | session.cpp `bars_of` + online.cpp `peer_rtt` |
-| 0x4e8f1c | signaling state of a record (0 / 1 / 2, -1) | MISSING | I5 (four colours; ours two) |
+| 0x4e8f1c | signaling state of a record (0 / 1 / 2, -1) | COVERED | I5: online.cpp `peer_link_state` -> session.cpp `mm_roster_query` (`peer_rules::bars_colour`, four colours) |
 | 0x4e9060 | activate signaling to a record's peer | PLATFORM | online program `peer_connect` |
 | 0x4e92c4 | constant "no" answer used by the net page update | COVERED | always false on PS3 too; no behaviour |
 | 0x4e92d0 | find a record by peer address and port | PLATFORM | net.cpp `find` |
 | 0x4e94c8 | peer address and port of a record | PLATFORM | net.cpp `peer_address` |
 | 0x4e954c | "every live record is over the lag limit" | COVERED | PS4 `0x5f14d0` inline + gamenet.cpp counters (reachability: I1) |
-| 0x4e9618 | signaling callback: dead / established / net-info events | PLATFORM | online.cpp peer events; unreachable feed is I4 |
-| 0x4e9d28 | connection manager init: own id, signaling context, 32 records, empty unreachable list | PLATFORM | online program open; list reset is I4 |
-| 0x4e9e98 | connect by online id (unreachable refusal, shared record, new record) | PLATFORM | online.cpp `connect_member`; refusal part I4 |
+| 0x4e9618 | signaling callback: dead / established / net-info events | PLATFORM | online.cpp peer events; unreachable feed: I4 `note_peer_state` |
+| 0x4e9d28 | connection manager init: own id, signaling context, 32 records, empty unreachable list | PLATFORM | online program open; list reset: I4 `online::start` on Multiplayer entry |
+| 0x4e9e98 | connect by online id (unreachable refusal, shared record, new record) | PLATFORM | online.cpp `connect_member` / `connect_peer`; refusal: I4 |
 | 0x4ea438 | extended signaling events: peer activated / deactivated / mutual | PLATFORM | online program accepts incoming peers; online.cpp peer events |
 | 0x4eae30 | NP error code to name (log text) | PLATFORM | online program's own error logs |
 | 0x4ebf7c | NetCtl init + system network dialog | PLATFORM | parity-d bootstrap sign-in prompt; launcher / online program |
@@ -361,5 +374,28 @@ state from `online.cpp` (a getter next to `peer_rtt`). The byte order of the wor
 | 0x4ec120 | pick the NP communication id (retail NPWR00462, beta NPWR00795) | COVERED | online.cpp `kCommunicationId` "NPWR00462_00" |
 | 0x4ec184 | NP / NP2 init with two 128 KB pools | PLATFORM | online program |
 
-Counts: COVERED 30, PLATFORM 29, MISSING 6 (I1 `0x4652cc`, I2 `0x467438`, I3 `0x467d20`, I4 `0x4e8978`, I5
-`0x4e8f1c`, I6 `0x4651b4` = parity-e 2.2).
+Counts: COVERED 33, PLATFORM 29, MISSING 3 (I1 `0x4652cc`, I2 `0x467438`, I3 `0x467d20`: done on another branch in
+gamenet.cpp, rows updated at its merge). Before I4 - I6: COVERED 30, MISSING 6.
+
+## 8. Implementation of I4 - I6 (2026-11-25, branch `u2mp-ps3-parity-3`)
+
+| Item | Status | Where / what |
+|---|---|---|
+| I4 | done | `peer_rules.h` `UnreachableList` (32 slots, the 33rd overwrites the oldest, duplicates kept); online.cpp `unreachable`. **Feed:** `note_peer_state` (every peer state from `U2O_EV_PEER_STATE`, the 10 s poll and the matchmaking check's own poll) lists a player when its link turns dead without ever having been active and without us having ended it (`disconnect_peer` marks our own ends; `connect_peer` / a state after "dead" start a new link). **Uses:** `connect_peer` / `connect_member` / the address event make no link to a listed player (PS3 `0x4e9e98` refusal); `mm_pick` skips rooms whose owner is listed (`(owner unreachable)` in the search log); `mm_check_tick` fails a room whose owner is listed; the frame fails a transport join to a listed owner at once (`owner_not_reached("room owner unreachable")`, no 20 s wait); `party_owner_tick` leaves a listed party owner at once (else 5 s, F11 b). **Reset:** `online::start` on Multiplayer entry (not on `host_own_party`, which runs inside the same online session). |
+| I5 | done | online.cpp `peer_link_state` (cached `U2O_PEER_*`, -1 none); session.cpp `mm_roster_query` colours the bars with `peer_rules::bars_colour`: inactive `0x800000FF`, pending `0x80FF0000`, active `0x8000FF00`, else grey. |
+| I6 | done | Already in place from parity-e 2.2: net.h `kTimeoutSeconds` 20 s in every mode; a connection exists only after a Hello / Welcome was received, so "never for a connection that received nothing" holds by construction; tested in `test_u2mp_net.cpp` ("silent peer"). Changed now: the session.cpp log line `*************** <name> has left : timed out (nothing heard for 20 s)`. |
+
+Tests: `gow3_pc/tests/test_u2mp_peer_rules.cpp` (target `u2mp-peer-rules-test`): list order, overwrite, duplicates,
+clear, the "dead before active" rule, the four colours.
+
+Remaining differences from PS3:
+
+- "Unreachable" is a stand-in (question 2): a player who quits or whose program closes while its link is still
+  pending is listed too, and a link that was up once and then becomes unreachable is not listed. The online program
+  reports no reason; online.cpp logs one if it ever sends `error` / `cause` with a dead state.
+- PS3 listed only peers that had a connection record; ours lists any peer the online program reports (all peers of
+  our rooms, as on PS3 in practice).
+- I6 on the host: PS3 kicked the silent member from the match room; the ABI has no kick call, so our host drops the
+  player from the party / session (the others see the normal "left" path) while the room service keeps the
+  membership until that player's own PC leaves (it times out the host in turn).
+- `mm_bad_rooms` (by room id, any failure) is our own addition and stays.

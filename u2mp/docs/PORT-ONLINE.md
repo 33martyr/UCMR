@@ -106,6 +106,9 @@ and the transport reopens as a client of the room owner (`session::online_reopen
 reaches the owner (hello / welcome over the link): the owner in its custom game lobby sends the follow
 (JOINING -> CLIENT_LOBBY); a party room / an owner not in a lobby: back to PAGE_MULTIPLAYER (NET_SM 18) as
 a party member. 20 s without reaching the owner, or the owner's peer DEAD: leave the room, own party again.
+An owner on the unreachable list (a player whose link died before it was ever up, spec parity-i-connection.md
+I4) fails the join at once; no link is made to listed players, matchmaking skips their rooms, a listed party
+owner is left at once; the list is emptied when Multiplayer is entered.
 
 **Party follows its leader.** A leader with members who joins another room sends `{kOnlineMessage 7, op 1,
 u64 room}` to its party, waits 0.3 s, then switches. Members join the same room and switch to its owner;
@@ -135,7 +138,7 @@ All online lines start with `u2mp: online:`. In order of a test:
 | custom host | `online: creating the custom game room ...`, `online: created custom game room <id> ...`, `online: Start Match goes on (match room <id>)`, `net state 3 -> 10`, `-> 16`, `online: custom game room <id>: state 0x53 = 1` |
 | join list | `online: Invites -> join list ...`, `online: join list: searching world W for key 0x90102`, one `online: join list: room ...` per room, `online: join list: N room(s) listed` |
 | join | `online: joining custom game room <id> of <owner> (...)`, `online: joined custom game room <id>: ...` + `online:   member ...` lines, `online: peer <npid> (...) in room <id>: connecting to a.b.x.x:p`, `online: the room owner is ...`, `online: transport switch: joining the room owner over the online link` |
-| peers | `online: peer <npid>: pending / active, rtt N ms` (event), then every 10 s `online: peer <npid>: active, rtt N ms` |
+| peers | `online: peer <npid>: pending / active, rtt N ms` (event), then every 10 s `online: peer <npid>: active, rtt N ms`; `online: peer <npid>: the link died before it was ever up: unreachable, ...` (listed, I4); `online: peer <npid>: dead with error E, cause C` (only if the program reports a reason) |
 | transport | client: `party: joined the host as net id N`, `online: transport switch done: reached the owner of room <id>, our net id N`; host: `party: peer in slot S joined`, `online: transport: net id N connected ...`, `online: slot S joined while the lobby is up: sending the follow` |
 | lobby | client: `following the host into the match`, `online: the leader's match room <id>: already a member` or `online: joining the leader's match room ...` |
 | member data | `online: member data 0x59 to ... room <id>: party room ..., rank R, team T (request N)`, then `online: member data 0x59 on room <id> done`; on the other PC `online: member data of <name> in room <id>: ...` |
