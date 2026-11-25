@@ -3869,6 +3869,29 @@ extern "C" U3X_FN void u3x_guest_load_pages(uintptr_t base, void *s) {
     u3h_show(base, s, PAGE_LOADING, 0);
 }
 
+// Does the guest already have a net player record for the match host (the handshake's "made one before ConnectionDone"
+// test, v7.259)? The game's find-or-make (0x72eca0) keys a record on the member id (member +0x2c, written to record
+// +0x1e4) and the sub index (record +0x1e8, 0 for a remote primary player). The records are NGM +0x390 + i * 0x9c0
+// (v7252::record), so NGM +0x574 in the game's own code is record +0x1e4. A test at record +0x574 never matches.
+// The guest then calls find-or-make again on the owner's second StartConnection (matchmaking: settings #2 at 0x30),
+// and find-or-make finds the host's existing record and makes it again: character released, record cleared. The
+// helper then writes team -1 and info 0 on it. On the guest the host then has no team (not on the scoreboard;
+// net-stats.cpp UpdatePlaces asserts "player.m_team < kMaxTeams" and the guest crashes on the first kill), is not
+// ready, and gets almost nothing sent to it (the owner sees the guest frozen).
+// host_id = the host's member id (host member +0x2c). true = an in-use record of that player is there and not gone,
+// and find-or-make must not be called.
+extern "C" U3X_FN bool u3x_host_record_there(uintptr_t base, uint32_t host_id) {
+    constexpr uintptr_t NGM = 0x17cb060, FIRST = 0x390, SIZE = 0x9c0;
+    constexpr uintptr_t R_IN_USE = 0xe1, R_ID = 0x1e4, R_SUB = 0x1e8, R_GONE = 0x5e4;
+    for (uintptr_t i = 0; i < 10; i++) {
+        const uintptr_t r = base + NGM + FIRST + i * SIZE;
+        if (at<uint8_t>(r + R_IN_USE) && !at<uint8_t>(r + R_GONE) && at<uint32_t>(r + R_ID) == host_id &&
+            at<uint32_t>(r + R_SUB) == 0)
+            return true;
+    }
+    return false;
+}
+
 #pragma clang section text=".text.ext" rodata=".rodata.ext"   // v7.253: back to the file's default (region B), not ""
 // ===== end of contributor section =====
 // (keep these three lines unchanged: they separate the contributor section from the parts appended below)
