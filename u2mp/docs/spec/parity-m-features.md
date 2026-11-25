@@ -300,7 +300,7 @@ loading screen). Behaviour as built: `gameplay.md` 1.4.
 | 4. M2 rule 5: sounds | DONE (CHECK) | `d9b465e1` on open, `2f118f31` on close, button only, through `0x3dd780` / `0x9b5c20`; logged once each. Silent if no loaded bank has them (open question 9). |
 | 5. M2 rule 4: dim | OPEN | The PS4 menu dim fields are unknown (open question 4): logged once when a dimmed entry draws, nothing dimmed. |
 | 6. M2 rule 8: pages from match states | PARTLY, opt-in | States 3 -> entry 2, 4 -> entry 3, 5 -> entry 0 (round sub-state unknown: PS3 shows entry 3 when it is 3), cinema only 3 / 4, only while in the match and when the page is loaded, only with `UNCHARTED_U2MP_SCOREBOARD_STATES=1`: it is not known whether PS4 keeps a stale state 3 after the match (that would draw RESULTS over the lobby). NGM state changes are logged so a run shows it. Our round-end timers still come first (stand-in for the request bytes). Request bytes and DC switch `e68ae001`: open question 6. |
-| 7-10 (M6, M7, M9, M10 b) | not started | Checks first, as written in their sections (open questions 7, 8; M10 b unidentified tunable). |
+| 7-10 (M6, M7, M9, M10 b) | specified | Resolved by static reading in `parity-n-remaining.md`: M6 = N1 (one inverted booster condition, no separate name element), M7 = N2 (rows covered, toggle missing; same item as J5), M9 = N3 (PS3 button on the no-save main menu; our overlay removes it), M10 b = N4 (not a setting, no visible effect). |
 
 Remaining visible differences from PS3: no background dim; pause / menu pages do not hide the hint; co-op down
 state does not open the board; result pages come from our timers (12 s / 60 s) unless the state rules are turned on;

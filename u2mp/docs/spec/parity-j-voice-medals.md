@@ -247,6 +247,11 @@ player through `voice::toggle_mute`, never for the local player.
 
 **Pending** (scoreboard.cpp, as J4). `voice::toggle_mute` already refuses the local player.
 
+**Correction (2026-11-25, `parity-n-remaining.md` N2):** `0xb04c828b` / `0xb48d9f3c` are the ids of LIST_MUTEPLAYERS0 / 1
+on PAGE_MULTIPLAYER_MUTE_PLAYERS (pause menu, Mute Players), not a scoreboard action; the scoreboard's own team lists
+have no id. PS4 `0x5ed0ca` / `0x5ed076` sit in the catch-all menu callback `0x5ecb80`. The PC rule (register host
+callbacks for the two ids; record net id -> `voice::toggle_mute`) is N2 3.4.
+
 ### J6. Voice volume back to full on each online start (PS3 `0x4e71d8`)
 
 PS3 creates the speaker port at volume 1.0 in every NetInit, so the slider shows 20 again each time online
@@ -278,6 +283,11 @@ hooked. voice.cpp `log_mouth_state` checks the setter's bytes when the audio ope
 mouth follows voice lines only, not the microphone (PS3 parity J7 off: channel setter 0x473010 present|differs, ...)`.
 To finish: confirm the caller and the channel in game (for example by forcing a value through one call site), then
 match the scale (question 5).
+
+**Resolved by static reading (2026-11-25, `parity-n-remaining.md` N5):** the local player's caller is `0x714db6` in
+`0x714a70` (= PS3 `0x51b3e8`, same order of work); `0x94bb3775` is the facial talking animation layer (the setter
+plays `facial-talking-calm` `0x55c118a9` on it, weight min(v / 5, 1)); PS4 put 0 where PS3 had the microphone
+(`0x714d9e` `vxorps` + `vmaxss`). PC rule, patch bytes and the proposed loudness scale: N5 6.3.
 
 ### J8. No talking icon for the local player (PS3 rows `0x4bcb38`, scoreboard `0x4c9de8` / `0x4c7c70`)
 
@@ -321,7 +331,11 @@ marks our own sending, and `toggle_mute` ignores the local id.
    shipping.
 6. J1: the purpose of PS4 reader `0x66644b` (inside `0x666310`..) was not traced; it only reads the level.
 7. J1: on a client the game's readers light only for the host (star topology: no connection record for the other
-   clients). Relayed records would fix it but change PS4 event routing; owner's call.
+   clients). Relayed records would fix it but change PS4 event routing; owner's call. **Proposed rule (2026-11-25,
+   `parity-n-remaining.md` N6):** point the four readers (`0x55b4d8`, `0x5b2cbf`, `0x66644b`, `0x66c4d9`) at a separate
+   PC level table listing every remote member; the real records and SendNetEvent stay untouched.
+8. J7 (question 5): caller and channel answered in `parity-n-remaining.md` N5; the loudness factor stays a proposal
+   (N open question 1).
 
 ## 6. Status table
 
