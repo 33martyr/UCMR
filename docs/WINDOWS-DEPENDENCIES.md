@@ -2,7 +2,8 @@
 
 **Goal:** one source tree that builds and runs on **both Windows and Linux**. Windows stays fully supported with no
 behaviour change; Linux is added beside it. The CI builds a Windows package (`UCMR_windows.zip`) **and** a Linux
-package (AppImage and/or tarball) from the same commit, runs the same tests on both, and one release carries both.
+package (a tarball first, an AppImage later) from the same commit, runs the same tests on both, and one release
+carries both.
 
 For every dependency below the target is **a shared code path** (standard C++ that works on both) or **one small
 platform function with the Windows and the Linux body side by side** behind `#ifdef _WIN32` (AGENTS.md, "Portable
@@ -11,6 +12,36 @@ code"). Never "replace Windows with Linux": the Windows body stays as it is toda
 Snapshot: release 0.10.169 (commit `81badc48`). Counts come from a token scan of every tracked file (Win32/CRT names
 followed by `(`, Windows headers, types, wide-string constructs, `.exe`/MSYS2 names), so they include comments and
 `CloseHandle`-style bookkeeping; they size the work, they are not exact call counts. Nothing was compiled on Linux.
+
+## Decisions (owner, 2026-11-25)
+
+| Question | Decision |
+|---|---|
+| Goal | One source tree, **two packages from every commit**: the Windows zip as today and a Linux package. Windows keeps working exactly as before. |
+| First Linux package | **Tarball** (`UCMR_linux.tar.gz`) with the same folder layout as the Windows zip, so the launcher can keep writing into its own folder. An AppImage comes later (it is read-only; its data folder has to move outside it first). |
+| Online sign-in token on Linux | A **private file with mode 0600** next to the other settings. Windows keeps DPAPI. No keyring dependency (works on any distro and on Steam Deck game mode). |
+| U3 helper PC side | **One shared backend**: the runtime exports a small table of host functions (sockets, time, files, ...) and the helper's single PC backend calls them on both Windows and Linux, instead of a third, Linux-only backend. |
+| The earlier draft's code (`launcher/native/port.h`, `sha256.h` and edits in 9 files) | **Taken over** into this work and checked against this map, so nothing is done twice. |
+
+## How to help
+
+This is a large job and contributions are welcome. To keep two people from changing the same files:
+
+1. **Pick one row** of §4 (one file or one small group of files) or one phase item of §13, and say which one you take
+   on the project's Discord or in a GitHub issue before you start.
+2. **Read** `AGENTS.md` ("Portable code") and `CONTRIBUTING.md`: C++20 only (no new C, no Python), the standard
+   library first, and every OS call that has no portable form goes into **one small platform function** with the
+   Windows and the Linux body side by side behind `#ifdef _WIN32`. Use the platform layer in §12 instead of writing a
+   new one.
+3. **Windows must not change.** Keep the Windows body exactly as it is today (move it into the platform function as
+   is); the Windows CI build and its tests must stay green.
+4. **One focused pull request per row**, from your fork, rebased on the latest `main`. In the PR say which row(s) of
+   this document it covers, how you built it on Windows, and whether it compiled on Linux (any distro; Ubuntu 22.04 is
+   what CI will use).
+5. **Update this file** in the same PR: mark the row done (or "Linux body is a stub"), so the next person sees the
+   current state.
+6. Not yet open for outside work: the U3 helper's PC backend (§4.10, phase 5) and the online programs. They depend on
+   the shared host-function table and on code outside this repository; the maintainers do those.
 
 Contents
 
@@ -599,7 +630,7 @@ in both CI jobs.
 | 2. Processes | `port::spawn`; `core.cpp`, `play.cpp`, `start.cpp`, `updater.cpp`, `dctools/proc.cpp`, `importer/common.cpp`, `u3import.cpp` (links), recipe `.exe` mapping, `wmain`→`main` | `u3import`/`u3fix`/`u2import` run on both; an import test on a fixture runs in both jobs |
 | 3. Window + package | `launcher-qt` CMake/file names/`QStandardPaths`; `package_linux.sh` (tarball); Linux branch of `build_ffmpeg.sh`; README-Linux | Linux tarball artifact from every push |
 | 4. Runtime | one `gow3-probe` CMake target for both; tests out of `if (WIN32)`; fix unguarded `pokes.cpp`, `session.cpp`, `u2_online_abi.h`, `u3voice.h`; check every POSIX body in `probe.c`/`runtime_*.c` against current Windows features (exec watch, restart command, scheduling, native TSC); `gow3:` Windows additions in shadPS4 get Linux bodies; case-insensitive base mount | the game boots on Linux in CI smoke tests that need no game files (runtime tests, loader tests) |
-| 5. Online and helper | helper PC backend for Linux (or the runtime host-function table for both); online programs with BSD sockets + token store decision | U3 MP/LAN on Linux; Windows helper behaviour unchanged |
+| 5. Online and helper | the runtime host-function table and one helper PC backend over it, used on both systems; online programs with BSD sockets and the `0600` token file on Linux (DPAPI stays on Windows) | U3 MP/LAN on Linux; Windows helper behaviour unchanged |
 | 6. Linux bodies for Windows-only features | `runtime_isa` on `ucontext_t`, hang watchdog (`ptrace`), Add to Steam on Linux, `.desktop` shortcuts, display info, profiler, DLSS (optional) | feature parity list shrinks |
 | 7. Releases | release job attaches `UCMR_windows.zip` + `UCMR_linux.tar.gz` (+ AppImage with a movable data root); updater picks its asset by OS; `recomplauncher.json` gains the Linux program name and `system.linux` | one tag, both packages |
 
@@ -613,9 +644,8 @@ side, no behaviour change on Windows, the simplest form that does the full job.
 - Counts are token-based (comments included); `helper-source` counts include BearSSL.
 - Submodules under `gow3_pc/gpu/third_party` (FSR-Vulkan, xbyak, ...) were not scanned (not tracked files).
 - How RecompLauncher chooses a release asset per OS (only its JSON schema was read).
-- Decisions for the owner: the Linux package form first (tarball vs AppImage), where AppImage data lives, the online
-  token store on Linux (Secret Service vs `0600` file), whether `gow3gpu` becomes static on Linux, and whether the U3
-  helper gets a runtime host-function table (one PC backend) or a third backend.
+- Decided (see "Decisions" at the top): tarball first, `0600` token file, one shared helper backend over a runtime
+  host-function table. Still open: where an AppImage keeps its data, and whether `gow3gpu` becomes static on Linux.
 - Legal/licensing of bundling SDL3/Qt/FFmpeg in an AppImage follows the same license files as the Windows package;
   not reviewed in detail.
 
@@ -628,5 +658,5 @@ helper's PC backend, the online programs, the ABI/TLS/exception work, libraries,
 RecompLauncher, case sensitivity, and the "Windows and Linux from one tree" framing. Counts here are from release
 0.10.169 and differ from the draft in places (for example `system.cpp` 53 sites here, `u2mp` now mostly portable). The
 draft's code changes (`port.h`, `session_value.cpp`, `updates.cpp`, `gamepads.cpp`, the `.so` file name in
-`launcher-qt`) are not on `main` yet. Suggested merge: keep this file as the inventory and reference, fold the draft's
-`port.h` API into §12 and its per-file tiers into §13 phase 1–2, and keep one document.
+`launcher-qt`) are not on `main` yet. The owner decided to take that draft over into this work: this file stays the
+one inventory and reference, the draft's `port.h` API is folded into §12 and its per-file tiers into §13 phases 1–2.
