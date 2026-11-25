@@ -105,7 +105,7 @@ popup) -> STARTCINEMA `0x432ea4` (play the "replay" task).
 | delete confirmed `7bb3c875` | `0x433588` | `5e41f0` | pop + message only | replaced |
 | UPLOAD `140271ff` | `0x433240` | `5e42d0` | PROGRESS_CANCEL | replaced (no server) |
 | STARTCINEMA `dba0d3e6` | `0x432ea4` | `5e45a0` | PlayTask only, no file open | replaced |
-| send to friend `fe0e7de7`, `6b2970e2` | `0x43402c`, `0x433554` | `5e4510`, `5e4520` | ret | left |
+| send to friend `fe0e7de7`, `6b2970e2` | `0x43402c`, `0x433554` | `5e4510`, `5e4520` | ret | replaced in remaining.cpp: send picks an online RPCN friend and sends the whole file through the online program; receive reports the films friends sent (no film server) |
 
 ## 4. Playback: TaskManagerReplay
 
@@ -124,7 +124,8 @@ RePlay `5e3ac0`, RePlaying `5e3c00`, Resetting `5e3d40`, Leave `5e3e80` (PS3 `0x
 
 - RePlay::Enter `5e9630` (= `0x435be8`): NET_SM = 28 (REPLAY), ClearStats, stream reset, **loops
   `pump(cinema); usleep(1000)` until `stream.bytes != 0`** (PS3 opened the file first with
-  `0x4638cc(cinema, 1)`; PS4 dropped that call, so without an open file it spins forever), reads
+  `0x4638cc(cinema, 1)`; PS4 dropped that call, so without an open file it spins forever; cinema.cpp
+  puts the open back in front of it, parity L-C1), reads
   tag (not 5 -> GoLeave via vtable +0x168), game index -> SetNetGame, clock values -> `+0x69c`,
   `+0x6a0`, ClearNetPlayers, rebuilds the 10 trackers from the header players, copies the header
   overrides to ngm+0x21b4, AssignTeams `640fc0`, resets the net clock to the recorded start.
@@ -133,7 +134,11 @@ RePlay `5e3ac0`, RePlaying `5e3c00`, Resetting `5e3d40`, Leave `5e3e80` (PS3 `0x
   `CreateNetEventByType 0x6180f0(type)`, `ev->Read(stream)`, `ev->Apply(ev, NULL)`, release.
   So recorded events are fed back through the normal event code as local events.
 - RePlaying::Enter `5e89d0` (= `0x4348f0`): "multi-player-cinema", StartNetGame `647a50`,
-  CameraControlCinema. Exit `5e8740`: PS3 `0x436028` also called finish `0x464464` (dropped).
+  CameraControlCinema. Exit `5e8740`: PS3 `0x436028` also closed the film unless the next state is
+  Resetting (the close was dropped; we close only in replay Leave::Enter and before the next open).
+- The film loops: at its end marker (time 0) and on Restart (`682c6868`) the task goes back to RePlay, whose
+  Enter reopens it from the start; a recorded round reset goes RePlaying -> Resetting -> RePlaying in the same
+  file.
 - NET_SM 28 writers: `5e9630` (and the dead `5e9d30`).
 
 ## 5. What cinema.cpp installs
@@ -149,8 +154,9 @@ values (= image base + expected function), and the 20 bytes of the query case.
 | slot `100abd0` WaitReady::Exit `5f2830` | vtable slot | attach the 128 KB buffer, run the original, open the file (PS3 `0x4638cc(…,0)`) |
 | `5f0ea0` ShowResults::Enter (ret) | replace | finish (PS3 `0x443e40` -> `0x464464`) |
 | slot `100a9c8` online Leave::Enter `5f00d0` | vtable slot | finish, then original (PS3 `0x445608` -> `0x464464`) |
-| slot `100a7a0` RePlaying::Exit, slot `100a6d8` replay Leave::Enter | vtable slots | close the replay file |
-| menus | see section 3 | refresh / load / protect / delete / start (opens the file before PlayTask) |
+| slot `100a7d8` RePlay::Enter `5e9630` | vtable slot | reopen the selected film from its start, then the original (PS3 `0x4638cc(…,1)`); a failed reopen gives an empty film (time 0) so the task leaves |
+| slot `100a6d8` replay Leave::Enter | vtable slot | close the replay file |
+| menus | see section 3 | refresh / load / protect / delete / start (checks the file opens before PlayTask) |
 
 Recording is on unless `UNCHARTED_U2MP_CINEMA=0`.
 
@@ -167,6 +173,8 @@ Recording is on unless `UNCHARTED_U2MP_CINEMA=0`.
 - Events whose Read/Write are still stubs record and replay empty (see blocker 1).
 - Duration is wall-clock seconds between WaitReady::Exit and finish (PS3 used a game timer).
 - `0x104f1b9` (local/server list flag) is forced to 1; the server list stays empty.
+- The film loop (reopen in RePlay::Enter, file kept open through Resetting) is tested on a fake image only
+  (rewrite test, L-C1a..h); not yet seen in the game.
 
 ## 7. Theater HUD (PS3 0x8af620): ported in a simplified layout (PORT-HUD.md 7.3); the trace below
 

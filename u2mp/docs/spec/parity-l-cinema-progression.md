@@ -30,30 +30,35 @@ replaces it (named), with the listed deltas. MISSING = player-visible PS3 behavi
 |---|---|---|---|
 | `1731a0` | trophy manager: read the unlock state of the own trophy list into a one-byte-per-trophy cache | PLATFORM | PS4 trophy manager (`0xb894a8` family, cache read by `0x661a50`) + runtime `trophy_unlock_state` |
 | `173290` | trophy manager: check another title's trophy list (NPWR00449): 1 error, 3 none unlocked, 4 some unlocked, 5 one of its trophies 44..47 unlocked; result kept in the manager | PLATFORM (no equivalent) | sent from the menu code `0x427e28`; not multiplayer; open question 4.4 |
-| `1735b8` | trophy manager thread: commands 0 init (context, handle, register; one register error ends the thread), 1 unlock trophy n then refresh the cache, 2 refresh, 3 the check above | PLATFORM, delta MISSING | PS4 manager does the same for its own list; multiplayer awards: 2.2 (L-T1) |
+| `1735b8` | trophy manager thread: commands 0 init (context, handle, register; one register error ends the thread), 1 unlock trophy n then refresh the cache, 2 refresh, 3 the check above | PLATFORM | PS4 manager does the same for its own list; multiplayer awards (L-T1, 2.2) dropped by the owner: PC has no trophies |
 | `1739f0` | trophy manager term (stop thread, drop handle/context/queue, trophy term) | PLATFORM | PS4 manager / runtime |
 | `173b88` | trophy manager init (zero fields, event queue of 127, port) | PLATFORM | PS4 manager / runtime |
 | `433c54` | replay Leave::Update: back to the menus once 150 frames passed with nothing loading | COVERED | PS4 `0x5e5490` |
 | `43402c` | send a film to a friend: system message (subject "Check out this Uncharted 2 cinema file!", tag "Cinema File") carrying the sender's server folder and the film's server name; failure only logged ("Error %x sending cinema message") | PLATFORM | remaining.cpp `cinema_send` (`0x5e4510`) -> online.cpp `send_cinema`; deltas 2.3 |
 | `434324` | download thread: copy the chosen server film into the local folder (page text "Downloading to Local Files..."), then refresh | PLATFORM (no equivalent) | no film server; 2.3 |
-| `434608` | replay Resetting::Enter (150-tick fade, reset the net game's round state, a roster flag) | COVERED | PS4 `0x5e5b00`; needs 2.1 (file stays open) |
+| `434608` | replay Resetting::Enter (150-tick fade, reset the net game's round state, a roster flag) | COVERED | PS4 `0x5e5b00`; the file stays open through it (L-C1) |
 | `4346cc` | replay Resetting::Exit | COVERED | PS4 `0x5e5ad0` |
 | `434848` | replay Leave::Enter (speeds 1.0, close menus, end the net game, clear "quit") | COVERED | PS4 `0x5e5520` + E9 close |
 | `4348f0` | RePlaying::Enter ("multi-player-cinema", start net game, cinema camera, clock reset unless resuming after Resetting, re-find the followed player by name) | COVERED | PS4 `0x5e89d0` |
 | `434e50` | upload thread: copy the chosen local film to the player's server folder, then add it to the server list | PLATFORM (no equivalent) | no film server; 2.3 |
 | `4350ac` | RePlay::Update: pump; once every player is loaded wait the settle time, then go RePlaying | COVERED | PS4 `0x5e9420` |
 | `4355d0`, `4355e0` | static init / term of the module's globals (compiler) | COVERED | PS4 static init `0x5ef970` |
-| `4355f0` | RePlaying event handler: the theater controls (play, pause, slower, faster, restart, follow next player, free camera, HUD) and three queries | COVERED | PS4 handler (all 13 ids, e.g. `0x5e904a`); restart needs 2.1 |
-| `435be8` | RePlay::Enter: net state REPLAY, reset the stream, **open the selected film from its start**, wait for data, check tag 5, set the game, rebuild the players from the header, reset the clock | MISSING | PS4 `0x5e9630` lost the open; cinema.cpp opens in the wrong place: 2.1 (L-C1) |
+| `4355f0` | RePlaying event handler: the theater controls (play, pause, slower, faster, restart, follow next player, free camera, HUD) and three queries | COVERED | PS4 handler (all 13 ids, e.g. `0x5e904a`); Restart reopens the film through E21 (L-C1) |
+| `435be8` | RePlay::Enter: net state REPLAY, reset the stream, **open the selected film from its start**, wait for data, check tag 5, set the game, rebuild the players from the header, reset the clock | COVERED (L-C1 done) | PS4 `0x5e9630` lost the open; cinema.cpp E21 (slot `0x100a7d8`) reopens the film before it; E8 removed: 2.1 |
 | `4c5e08` .. `4c7820` (7 rows) | NetPlayerData HDD copy, TUS slot write, Publish, FetchTusData, term, TUS init, Connect | as parity-a | COVERED 4 (`4c5e08`, `4c6298`, `4c6d18`, `4c7820`), PLATFORM 3 (`4c5f48`, `4c65f8`, `4c6e18`); never write TUS slots 1/2 of NPWR00462 in our format (parity-a 2.6) |
 | `4e3648` | net stat game vtable slot returning 16 (PS4 `0x673900` returns 32) | COVERED | parity-a open question 6; extra fact: PS3 vtable `0xd71f98`, slot 9 (+0x24) |
 
-Counts (26 rows): COVERED 14, PLATFORM 11 (5 with an equivalent, 3 without, 3 NetPlayerData as parity-a; one of
-them, `1735b8`, carries the MISSING delta L-T1), MISSING 1 (L-C1).
+Counts (26 rows): COVERED 15 (with `435be8`, done as L-C1), PLATFORM 11 (5 with an equivalent, 3 without, 3
+NetPlayerData as parity-a), MISSING 0. The delta L-T1 of `1735b8` is dropped for good (owner, 2026-11-25: PC
+has no trophies; trophy code stays untouched).
 
 ## 2. Behaviour to implement
 
-### 2.1 L-C1: a film opens from its start on every entry into RePlay (MISSING; PS3 `435be8`, `436028`, `437fb0`)
+### 2.1 L-C1: a film opens from its start on every entry into RePlay (DONE; PS3 `435be8`, `436028`, `437fb0`)
+
+Implemented in `cinema.cpp` (E21, E8 removed so the install count stays 20; `cinema.md` 4.5-4.7, 5) and tested on
+the fake image by the new-only scenarios L-C1a..h of `gow3_pc/tests/u2mp_rewrite/test_cinema.cpp`. Not yet seen
+in the game.
 
 PS3 facts (what the player sees):
 
@@ -68,11 +73,11 @@ PS3 facts (what the player sees):
   waits until the first data arrived. PS4 `0x5e9630` zeroes bits (+8) and bytes (+0x10) and then calls the pump
   and sleeps 1 ms in a loop until bytes != 0; the open is gone.
 
-What our runtime does today (static analysis, not run): E19 opens the film and fills the stream before
-PlayTask; RePlay::Enter then zeroes the counters and the next pump appends data from the middle of the file, so
-the tag check reads mid-stream data and leaves the film (a film shorter than the first fill hits end of file and
-the wait loop never ends). E8 closes the film on every RePlaying::Exit, so the end of a film, Restart and every
-recorded round reset end in the endless wait loop.
+What our runtime did before L-C1 (static analysis, not run): E19 opened the film and filled the stream before
+PlayTask; RePlay::Enter then zeroed the counters and the next pump appended data from the middle of the file, so
+the tag check read mid-stream data and left the film (a film shorter than the first fill hit end of file and
+the wait loop never ended). E8 closed the film on every RePlaying::Exit, so the end of a film, Restart and every
+recorded round reset ended in the endless wait loop.
 
 Behaviour required:
 
@@ -96,7 +101,10 @@ Behaviour required:
 Nothing else changes: the PS4 code keeps the speeds, cameras, followed player (re-found by name on RePlaying
 entry) and the settle wait of RePlay::Update (900 ticks of the clock it reads).
 
-### 2.2 L-T1: multiplayer trophies (PLATFORM delta MISSING; PS3 `1735b8`, `4c5268`, stat updaters)
+### 2.2 L-T1: multiplayer trophies (DROPPED; PS3 `1735b8`, `4c5268`, stat updaters)
+
+Dropped for good by the owner (2026-11-25): PC has no trophies. Nothing below is implemented and no trophy code
+is changed; the text stays as a record of the PS3 behaviour.
 
 PS3 facts:
 
@@ -162,6 +170,10 @@ in-game error when sending failed (only a log line); ours shows a notice, which 
 - L-C1f quit from PAGE_PAUSE_CINEMA: Leave, file closed (E9), back to the cinema list after 150 frames.
 - L-C1g film removed while looping (reopen fails): "cannot reopen" log, Leave, no spin.
 - L-C1h start with an unreadable film: stays on PAGE_CINEMA, no task (unchanged E19).
+- The stream side of L-C1a..h runs in the rewrite test (`run.sh cinema cinema.cpp cinema_store.cpp`, new-only
+  scenarios "L-C1 ..."; a fake RePlay::Enter zeroes the counters, pumps and reads the tag). The camera kept by
+  name (d), the 150-frame return (f) and multi-round content (e, open question 5) are game side: check in game.
+- L-T1a..e: dropped with L-T1 (2.2).
 - L-T1a one competitive match completed: slot for trophy 46 becomes 1; the multiplayer store marks 46 once;
   no PS4 list change ("Runtime: trophy ... earned" must not appear for it).
 - L-T1b the same row reached again (second match): no popup, no log.
@@ -170,6 +182,8 @@ in-game error when sending failed (only a log line); ours shows a notice, which 
 - L-T1e career saved and reloaded: slots 90..111 unchanged; already earned trophies not requested again.
 
 ## 4. Open questions
+
+Questions 1 and 2 are closed: L-T1 is dropped (PC has no trophies).
 
 1. Which trophy ids does `*net-trophies*` hold in the net data the import installs (PS3 GOTY / net-patch9):
    PS3 46..70 as assumed? Check one match with a stock runtime: does boot.log show
