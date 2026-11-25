@@ -95,6 +95,11 @@ RegistryResult build_registry(const std::string &ps4_text, const std::map<std::s
                               const std::function<bool(const std::string &)> &have_pak,
                               const std::function<bool(const std::string &)> &have_actor,
                               const std::function<bool(const std::string &)> &have_bank, const std::set<std::string> &failed_paks);
+// the PS3 pak22.txt levels the registry and the import (`known`) lack whose packages the PS4 game or overlay all has
+void add_shipped_levels(RegistryResult &r, const std::string &ps3_pak22_txt, const std::set<std::string> &known,
+                        const std::function<bool(const std::string &)> &have_pak,
+                        const std::function<bool(const std::string &)> &have_actor,
+                        const std::function<bool(const std::string &)> &have_bank);
 std::pair<std::string, std::vector<std::string>> build_banks_txt(const std::string &ps4_text, const std::vector<std::string> &new_banks);
 std::vector<std::string> package_file_names(const std::string &pkg);
 

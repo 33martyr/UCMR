@@ -11,6 +11,10 @@
 //   * the package-ts lines most retail multiplayer levels carry (the texture streaming of the retail textures the
 //     converted levels reuse);
 //   * no entry for a level with a package the import could not convert, nor for one none of whose packages exists.
+// Levels PS3's pak22.txt defines that neither the PS4 file nor the import has, although the PS4 game (or the overlay)
+// ships every package they name, are added the same way without package-ts lines (add_shipped_levels): retail leaves
+// out co-op levels whose -ingame paks it ships, e.g. gompa-sound-const-coop, which gompa-wide-coop's level list loads
+// (without the entry LoadLevels waits for it forever).
 // banks.txt: the PS4 list plus the imported banks it lacks, in name order, with the file's own line ends.
 #include "u2import.hpp"
 
@@ -177,6 +181,28 @@ RegistryResult build_registry(const std::string &ps4_text_in, const std::map<std
         if (!d.empty()) r.dropped[name] = d;
     }
     return r;
+}
+
+void add_shipped_levels(RegistryResult &r, const std::string &ps3_pak22_txt, const std::set<std::string> &known,
+                        const std::function<bool(const std::string &)> &have_pak,
+                        const std::function<bool(const std::string &)> &have_actor,
+                        const std::function<bool(const std::string &)> &have_bank) {
+    const Parsed defined = parse(r.text);
+    const Parsed ps3 = parse(ps3_pak22_txt);
+    for (const std::string &name : ps3.order) {
+        if (defined.levels.count(name) || known.count(name)) continue;
+        const std::vector<Line> &lines = ps3.levels.at(name);
+        std::vector<std::string> pk;
+        for (const Line &l : lines)
+            if (l.first == "package") pk.push_back(l.second);
+        if (pk.empty() || !std::all_of(pk.begin(), pk.end(), have_pak)) continue;
+        std::string txt;
+        for (const Line &l : lines) txt += l.first + " " + l.second + "\n";
+        std::vector<Line> d;
+        r.text += level_block(name, txt, have_pak, have_actor, have_bank, {}, d);
+        r.added.push_back(name);
+        if (!d.empty()) r.dropped[name] = d;
+    }
 }
 
 std::pair<std::string, std::vector<std::string>> build_banks_txt(const std::string &ps4_text, const std::vector<std::string> &new_banks) {

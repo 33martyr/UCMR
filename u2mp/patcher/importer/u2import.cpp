@@ -1320,7 +1320,14 @@ void Importer::registries() {
             failed.insert(b.substr(0, b.size() - 4));
         }
     }
-    const RegistryResult r = build_registry(text, lt, have_pak, have_actor, have_bank, failed);
+    RegistryResult r = build_registry(text, lt, have_pak, have_actor, have_bank, failed);
+    for (const Entry *e : ps3->candidates("pak22.txt")) {   // the newest PS3 pak22.txt
+        const Bytes b = e->read();
+        std::set<std::string> known;
+        for (const auto &[k, v] : lt) known.insert(k);
+        add_shipped_levels(r, std::string(b.begin(), b.end()), known, have_pak, have_actor, have_bank);
+        break;
+    }
     const fs::path p = out_path("pak22_ps4.txt");
     if (!a.only.empty() && lt.empty())
         lg("pak22_ps4.txt: unchanged (--only run without level rows)");

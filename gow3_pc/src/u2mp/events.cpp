@@ -12,6 +12,7 @@
 #include <atomic>
 #include <climits>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <initializer_list>
 #include <mutex>
@@ -276,6 +277,23 @@ U2MP_GUEST void write_npc_deal_damage(void *ev, BitStream *bs) {
 // 47 NetEventEvent: a script message with up to 15 typed arguments on the wire, 7 kept.
 constexpr size_t kArgSlots = 0x38, kArgStride = 0x18, kMaxKeptArgs = 7;
 
+// Diagnostics (co-op objective events, 2026-11-25): every type-47 script message both ways, with the
+// argument types as they are on the wire. Types other than 1/2/3/6 arrive as 0 on the receiver.
+void log_event47(const char *dir, uint32_t target, uint32_t message, uint32_t sender, uint32_t count,
+                 const uint32_t *types, const uint32_t *raw, bool ok) {
+    static int logged = 0;
+    if (logged >= 400) return;
+    ++logged;
+    char args[16 * 24] = "";
+    size_t used = 0;
+    for (uint32_t i = 0; i < count && i < 16 && used < sizeof args - 24; ++i) {
+        const bool kept = types[i] == 1 || types[i] == 2 || types[i] == 3 || types[i] == 6;
+        used += size_t(std::snprintf(args + used, sizeof args - used, " %u:%08x%s", types[i], raw[i], kept ? "" : "(dropped)"));
+    }
+    log("net event 47 %s: target %08x message %08x sender %08x, %u arg(s):%s%s", dir, target, message, sender, count,
+        args, ok ? "" : " [read failed]");
+}
+
 U2MP_GUEST void read_event(void *ev, BitStream *bs) {
     Reader in{*bs};
     uint32_t target = 0, message = 0, sender = 0, count = 0;
@@ -285,10 +303,13 @@ U2MP_GUEST void read_event(void *ev, BitStream *bs) {
     in.raw(count, 4);
     uint64_t values[16] = {};
     uint32_t types[16] = {};
+    uint32_t wire_types[16] = {}, wire_raw[16] = {};   // diagnostics: what came, before the type filter
     for (uint32_t i = 0; in.ok && i < count; ++i) {
         uint32_t type = 0, raw = 0;
         in.raw(type, 4);
         in.raw(raw, 32);
+        wire_types[i] = type;
+        wire_raw[i] = raw;
         if (type == 1) {
             values[i] = raw != 0;
             types[i] = 1;
@@ -297,6 +318,7 @@ U2MP_GUEST void read_event(void *ev, BitStream *bs) {
             types[i] = type;
         }   // anything else decodes to value 0, type 0
     }
+    log_event47("in", target, message, sender, count, wire_types, wire_raw, in.ok);
     if (!in.ok) {
         reset_payload(ev, 47, 0x100);
         return;
@@ -332,6 +354,7 @@ U2MP_GUEST void write_event(void *ev, BitStream *bs) {
     int n = load<int8_t>(ev, 0x30);
     if (n > 8) n = 8;
     out.raw(n < 0 ? 0 : uint32_t(n), 4);
+    uint32_t wire_types[8] = {}, wire_raw[8] = {};
     for (int i = 0; i < n; ++i) {
         const size_t slot = kArgSlots + size_t(i) * kArgStride;
         const uint32_t type = load<uint32_t>(ev, slot + 0x10);
@@ -339,7 +362,11 @@ U2MP_GUEST void write_event(void *ev, BitStream *bs) {
         const uint32_t value = type == 1 ? (load<uint8_t>(ev, slot) != 0 ? 1u : 0u) : load<uint32_t>(ev, slot);
         out.raw(type, 4);
         out.raw(value, 32);
+        wire_types[i] = type;
+        wire_raw[i] = value;
     }
+    log_event47("out", load<uint32_t>(ev, 0xfc), load<uint32_t>(ev, 0x18), load<uint32_t>(ev, 0xf8), n < 0 ? 0 : uint32_t(n),
+                wire_types, wire_raw, true);
 }
 
 // 49 NetEventTerritoryOwn: owner data plus up to 10 ids; the float exists only in game mode 12.
