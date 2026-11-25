@@ -19,7 +19,8 @@
 - [ ] 3. One focused change from my fork, rebased on the latest `main`; the problem, how to reproduce it, what I
       changed and how I tested it are described above.
 - [ ] 4. Tested on the current launcher and game update; both versions are stated above.
-- [ ] 5. New code is C++ (C++20); no new or grown Python or C; C or Python I touched is ported to C++.
+- [ ] 5. New code is C++ (C++20); no new or grown Python or C; C or Python I touched is ported to C++; no new
+      Windows-only dependency (the code works on Linux too, or keeps the Windows part behind one platform function).
 - [ ] 6. Assets come from PS4; a PS3 asset only where PS4 has none.
 - [ ] 7. Helper changes: only files in `u3mp/helper-source/`, on a freshly synced fork.
 - [ ] It doesn't touch the out-of-scope areas (online play / RPCN, the build and release setup).

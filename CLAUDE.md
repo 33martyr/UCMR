@@ -35,3 +35,8 @@ pull request; the maintainer merges it, then builds and ships the next helper ve
 version, never touch the generated block at the end of `u3_lan_profiles.c`, write only between the contributor markers,
 and port only the rows assigned to you (see AGENTS.md, "Helper source: several people at once", and CONTRIBUTING.md,
 section 7).
+
+## Portable code
+
+Always avoid Windows-only dependencies: add code that works on Linux as well (a Linux build is planned). Details:
+"Portable code: no Windows-only dependencies" in AGENTS.md.

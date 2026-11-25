@@ -88,6 +88,15 @@ clearly not practical. Pull requests that add Python, add C, or grow existing Py
 
 If you are using a coding agent, it reads the same rules from [AGENTS.md](AGENTS.md).
 
+### 🐧 Portable code: no Windows-only dependencies
+
+**Always avoid Windows-only dependencies: add code that works on Linux as well.** This prepares for a future Linux
+build. Use the C++ standard library (`<filesystem>`, `<thread>`, `<chrono>`) and the cross-platform libraries the
+project already uses (SDL3, Qt, Vulkan, zlib) instead of Win32 calls. Where an operating-system call is really needed,
+keep it inside one small platform function with a Windows and a Linux version side by side (`#ifdef _WIN32`), not
+spread through the code. Use `std::filesystem::path` for paths (no hard-coded `\` or drive letters), and keep new
+build steps runnable from bash.
+
 ## 🎨 6. Assets: PS4 first, PS3 only when PS4 has none
 
 **Port an asset from the PS3 version only when the PS4 version does not have it.** If PS4 already has the asset
@@ -160,7 +169,8 @@ not merged.
 - [ ] 3. One focused change from my fork, rebased on the latest `main`; the problem, how to reproduce it, what I
       changed and how I tested it are described below.
 - [ ] 4. Tested on the current launcher and game update; both versions are stated below.
-- [ ] 5. New code is C++ (C++20); no new or grown Python or C; C or Python I touched is ported to C++.
+- [ ] 5. New code is C++ (C++20); no new or grown Python or C; C or Python I touched is ported to C++; no new
+      Windows-only dependency (the code works on Linux too, or keeps the Windows part behind one platform function).
 - [ ] 6. Assets come from PS4; a PS3 asset only where PS4 has none.
 - [ ] 7. Helper changes: only files in `u3mp/helper-source/`, on a freshly synced fork.
 - [ ] My contribution is licensed under the GNU GPL v2 or later.
