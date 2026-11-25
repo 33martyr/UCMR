@@ -1174,6 +1174,7 @@ void runtime_memory_gpu_protect(uintptr_t address, uint64_t size, int read, int 
 }
 /* Host view of a guest range, for the GPU backend: the range must be mapped. */
 int runtime_memory_is_mapped(uintptr_t address, uint64_t size) {
+    if (address + size < address) return 0;   /* the range wraps (address -1): never mapped */
     const CachedRegion *c=(runtime_disabled_optimizations & 1) ? NULL : cached_region(address);
     if (c && c->kind!=KIND_RESERVED && size<=c->end-address) return 1;
     read_lock();
