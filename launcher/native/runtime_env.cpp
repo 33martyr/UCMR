@@ -493,8 +493,11 @@ Env build(const Inputs &in, std::vector<std::string> &prints, std::string &captu
     if (u3) env.setdefault("GOW3_MIP_TARGETS", "1");
     // GitHub #161/#253 (2 Nov 2026): water in Uncharted 1 showed as flat dark green. Its reflection uses a depth
     // buffer that is cleared solely through HTILE, so clears on depth images that have been freed must survive.
-    // Only enabled for Uncharted 1 so far.
-    if (u1) env.setdefault("GOW3_HTILE_KEEP_CLEARS", "1");
+    // Uncharted 2 since 25 Nov 2026: the multiplayer map The Temple (treasure-multi, a retail PS4 pak whose water
+    // materials equal the PS3 ones) draws its planar-reflection pools flat black, the same engine and symptom
+    // (u2mp/docs/PORT-RENDER.md, "The Temple: black water"). The 2 Nov runs showed no other change in Uncharted 2.
+    // GOW3_HTILE_KEEP_CLEARS=0 in test-env.txt turns it off.
+    if (u1 || u2) env.setdefault("GOW3_HTILE_KEEP_CLEARS", "1");
     // Console system language, from Advanced -> Language (handled in runtime_services.c). 1 means English (US).
     std::string language = strip(orig(in, "UNCHARTED_LANGUAGE"));
     if (digits_only(language)) env.setdefault("GOW3_LANGUAGE", language);

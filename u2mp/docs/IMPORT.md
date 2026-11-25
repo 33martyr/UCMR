@@ -420,6 +420,10 @@ Result of 2026-11-08 (after the coverage audit; resumed run, 11 s; the Python im
     (`--dlc-ruins`). Whether the DLC backdrop, NPC data and spawners fit the base-game layout is not verified;
     if not, either `--dlc-ruins` becomes the default again or the DLC ruins pieces are left out (then dlc.cpp, which
     takes `ruins-multi-wide` as the map pack 1 marker, needs another marker).
+12. **The Temple's black water** is no conversion fault: the stage pak `treasure-multi` is the retail PS4 one, and
+    its water materials have the PS3 constants, textures and planar-reflection technique exactly (checked
+    2026-11-25), so no converter rule or PS3 water port changes it. It is a renderer case: PORT-RENDER.md, "The
+    Temple: black water".
 
 ## GOTY-only default (user decision, 8 November 2026)
 
