@@ -22,6 +22,7 @@
 #include "frontend6.h"
 #include "online.h"
 #include "session_api.h"
+#include "start_rules.h"
 #include "u2mp_internal.h"
 #include "voice.h"
 
@@ -429,8 +430,8 @@ void ask_leave() {
 // ---- per-frame update (page event 6) ----
 
 // The players a matchmaking room needs before the vote starts (owner rule, issue 104 and 2026-11-25: PS3 timing,
-// our minimum): 2 in every game mode; a playlist of co-op games only (types 4, 8, 9, 12) starts with 1, as solo
-// co-op does outside matchmaking (solocoop.cpp).
+// our minimum, for matchmaking only): 2 in every game mode; a playlist of co-op games only (types 4, 8, 9, 12)
+// starts with 1 (start_rules.h). Custom games have no such minimum.
 // UNCHARTED_U2MP_MM_MIN (1..10) overrides it for tests of small online rooms.
 // TODO: (Tha14): attention to this as matchmaking was not fully tested at this point in time
 int matchmaking_min_players() {
@@ -441,10 +442,8 @@ int matchmaking_min_players() {
     }();
     if (forced) return forced;
     std::vector<int32_t> types;
-    if (!playlist_game_types(types) || types.empty()) return 2;
-    bool coop_only = true;
-    for (const int32_t t : types) coop_only = coop_only && (t == 4 || t == 8 || t == 9 || t == 12);
-    return coop_only ? 1 : 2;
+    if (!playlist_game_types(types)) types.clear();
+    return start::playlist_min_players(types.data(), types.size());
 }
 
 // The criteria rows (PS3 data table b25ab071, one row per search pass: status text, ping limit at +8). The pass

@@ -29,6 +29,7 @@
 #include "progression.h"
 #include "roster_wire.h"
 #include "session_api.h"
+#include "start_rules.h"
 #include "u2mp_internal.h"
 #include "grenades.h"
 #include "unlocks.h"
@@ -2828,11 +2829,9 @@ int type_max_players(int32_t type) {
     return (type >= 0 && type <= 3) || (type >= 5 && type <= 7) || type == 10 || type == 11 ? 10 : 0;
 }
 
-// Players a game type needs. Owner rule (2026-11-25, also matchmaking's minimum): 2 in every game mode, co-op
-// (types 4, 8, 9, 12) 1 (solo co-op, solocoop.cpp). PS3 asked 2 for type 10 and co-op only.
-int type_min_players(int32_t type) { return coop_type(type) ? 1 : 2; }
-
-// Custom game: map packs (this PC, then every member), too many, too few, type 10 on one team.
+// Custom game: map packs (this PC, then every member), too many, too few, type 10 on one team. Too few: a custom
+// game starts with 1 player in every game mode (owner rule 2026-11-25, start_rules.h; the minimum of 2 is for
+// matchmaking only; PS3 asked 2 for type 10 and co-op). Type 10 on one team: only with 2 or more players.
 bool custom_start_ok() {
     Table games = table_of(lookup(kNetGamesId));
     const int16_t game = current_game();
@@ -2849,18 +2848,18 @@ bool custom_start_ok() {
             if (m.used && m.net_id != my_id && !(m.packs & (1u << pack)))
                 return refuse("a party member lacks the map's map pack", kMemberNoMapPack, kCustomInfo);
     if (players > type_max_players(type)) return refuse("too many players for the game type", kTooManyPlayers, kCustomInfo);
-    if (players < type_min_players(type)) return refuse("too few players for the game type", kTooFewPlayers, kTooFewInfo);
-    if (type == 10) {
-        int with_data = 0, team1 = 0, team2 = 0;
-        for (const Member &m : members) {
-            if (!m.used) continue;
-            ++with_data;
-            team1 += m.team == 1;
-            team2 += m.team == 2;
-        }
-        if (team1 == with_data || team2 == with_data)
-            return refuse("every player is on one team", kOneTeam, kOneTeamInfo);
+    if (!start::may_start(start::kCustom, type, players))
+        return refuse("too few players for the game type", kTooFewPlayers, kTooFewInfo);
+    int with_data = 0, team1 = 0, team2 = 0;
+    for (const Member &m : members) {
+        if (!m.used) continue;
+        ++with_data;
+        team1 += m.team == 1;
+        team2 += m.team == 2;
     }
+    if (start::one_team_refused(type, players, with_data, team1, team2))
+        return refuse("every player is on one team", kOneTeam, kOneTeamInfo);
+    if (players == 1) log("Start Match: custom game type %d with 1 player (solo)", int(type));
     return true;
 }
 

@@ -390,8 +390,8 @@ loading screen) and `menu_up()` (the menu state word, shared with the loading-sc
 | 9-12 (M6, M7, M9, M10 b) | DONE (M6, M7, M9: CHECK in game) | Built 2026-11-25 (`parity-n-remaining.md` 10): M6 = N1 (booster condition fixed), M7 = N2 (Mute Players toggle, remaining.cpp), M9 = N3 (overlay version 6 keeps Multiplayer Medals on the no-save main menus), M10 b = N4 (nothing to do). Resolved by static reading in `parity-n-remaining.md`: M6 = N1 (one inverted booster condition, no separate name element), M7 = N2 (rows covered, toggle missing; same item as J5), M9 = N3 (PS3 button on the no-save main menu; our overlay removes it), M10 b = N4 (not a setting, no visible effect). |
 
 Remaining visible differences from PS3: none known from the code (everything of section 10 is built); left are the
-`|SELECT|` glyph picture (3) and the run checks 5 and 16 (test scenarios 11-14). Owner rules that touch this overlay: minimum 2
-players in every mode, 1 in co-op (the "every player out" test then covers the lone co-op player: when that player is out, entry 0 stays up and the hint fades);
+`|SELECT|` glyph picture (3) and the run checks 5 and 16 (test scenarios 11-14). Owner rules that touch this overlay: matchmaking
+minimum 2 players in every mode, 1 in co-op; custom games with 1 player in every mode (the "every player out" test then covers the lone co-op player: when that player is out, entry 0 stays up and the hint fades);
 trophies are out of scope.
 
 ## 10. PS4 facts for the overlay (settled 2026-11-25)

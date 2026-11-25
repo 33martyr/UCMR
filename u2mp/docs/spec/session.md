@@ -779,11 +779,14 @@ Nothing unless hosting (active is not checked). mode = s32 netInfo+0x2c4. PS3 0x
      `a party member lacks the map's map pack`, box 0x58d7fbb3 / 0x13cabc15.
   2. Too many: party > 10 for types 0, 1, 2, 3, 5, 6, 7, 10, 11, > 3 for co-op types 4, 8, 9, 12, > 0 for any
      other type -> reason `too many players for the game type`, box 0x4a936499 / 0x13cabc15.
-  3. Too few: party < 1 for a co-op type (4, 8, 9, 12), < 2 for every other type (owner rule 2026-11-25; PS3: 2 only for type 10 and co-op) -> reason `too few players for the game type`, box
-     0xb90de2b1 / 0xcca3ca1f. **Deliberate difference**: PS3 needs 2 players for the co-op types 4, 8, 9,
-     12; ours starts them with 1 (solo co-op, solocoop.cpp).
-  4. Type 10: when every used member is on team 1, or every one on team 2 (team 0 breaks both; no member
-     counts as one team) -> reason `every player is on one team`, box 0x101c7f10 / 0x5350146e.
+  3. Too few: party < 1 for every game type (owner rule 2026-11-25: the minimum of 2 is for matchmaking only;
+     a custom game starts with 1 player in every game mode; `start_rules.h` `may_start(kCustom, ..)`) -> reason
+     `too few players for the game type`, box 0xb90de2b1 / 0xcca3ca1f (so it never shows). **Deliberate
+     difference**: PS3 needs 2 players for type 10 and the co-op types 4, 8, 9, 12; ours starts every type
+     with 1 (solo co-op and the in-match co-op minimum: solocoop.cpp; solo Elimination: parity-n-inlined.md NI2).
+  4. Type 10 with 2 or more players: when every used member is on team 1, or every one on team 2 (team 0
+     breaks both) -> reason `every player is on one team`, box 0x101c7f10 / 0x5350146e. One player alone
+     (or no member yet) is never refused (`start_rules.h` `one_team_refused`).
   Then `online::hide_for_start(true)`; if `frontend6::leader_starting(false)` returns true, return. Else
   create the match now.
 - mode 3 (cinema): log `Cinema`; `cinema::start_playback()` (BUTTON_MULTIPLAYER_STARTCINEMA's action: the
@@ -1016,7 +1019,8 @@ Teardown and public calls
     the next line at the 21st try); a member without NpId (LAN) -> kicked, not blocked; after any
     close transport the same NpId joins again. Kick From Party blocks the same way (parity group D).
 58. Start Match checks (parity group D): mode 2, type 8 with 4 members -> too many box; 3 -> countdown;
-    type 8 with 1 member -> countdown (solo co-op); type 10 alone -> too few box; type 10 all on team 2 ->
+    type 8 with 1 member -> countdown (solo co-op); any other type alone (type 10 too) -> countdown (custom solo); type 10
+    with 2 members all on team 2 ->
     one-team box; a member whose Info said packs 1 (base only) on a map pack 2 map -> member box; an older
     member (no packs byte) -> countdown; mode 1 with a playlist maximum below the party -> party box; mode 3
     -> `Cinema`, start playback; mode 0 -> log only. Every started countdown calls hide_for_start(true).
@@ -1060,7 +1064,9 @@ Changed behaviour:
   `wait` log `party: waiting in JOINING until the leader says the whole party is in` and no 0x10e (the leader's
   kOpPartyIn posts it through `online_party_in`); else 0x10e {1} as before.
 - `online_reopen` also clears the net id -> NpId map (`npids`); the next roster / kIds fills it.
-- Start Match "too few" (5.x): co-op types 1, every other type 2 (owner rule).
+- Start Match "too few" (5.x): 1 in every game type for a custom game (owner rule 2026-11-25: the minimum of 2
+  is for matchmaking only; custom games start solo in any game mode). Type 10 one-team box only with 2 or more
+  players.
 
 ## Parity group E changes (2026-11-25, spec parity-e-flow2.md 7)
 

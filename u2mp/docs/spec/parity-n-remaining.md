@@ -10,7 +10,8 @@ Sources: PS3 `EBOOT.elf` (headless Ghidra plus a raw PPC word dump for branch se
 (NPUA80698), PS4 `eboot` image, PS4 `dc1/ps4/menu.bin`, PS4 `actor27/ps4/*.pak` (animation names), the imported
 English text banks. Everything below was read from those files; nothing was run in the game.
 
-Owner rules that bound this group (unchanged by it): minimum 2 players in every mode, 1 in co-op; trophies out of
+Owner rules that bound this group (unchanged by it): matchmaking minimum 2 players in every mode, 1 in co-op (custom
+games: 1 in every mode, owner rule 2026-11-25); trophies out of
 scope; dead online services (Twitter posting, Message of the Day) stay hidden. None of the items below touches them.
 
 Status words as in group M: **COVERED**, **PLATFORM**, **MISSING**, **CHECK**.
