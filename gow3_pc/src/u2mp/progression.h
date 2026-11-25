@@ -13,6 +13,8 @@ void install_progression(int &installed);
 // For the session layer to call when the player leaves Multiplayer (before NET_SM drops to 0, after
 // which the game clears the in-memory copy, as PS3 GetVolatileData 0x4c4f74 did).
 void progression_publish();
+// One career publish (progression.md 1.5.4: counter +1, store written) when NetPlayerData is connected, changed or not.
+void progression_publish_career();
 
 // The players this PC met in recent matches (local store), most recently seen first, at most `max`.
 std::vector<std::string> progression_recent_players(size_t max);
@@ -22,5 +24,8 @@ std::string progression_player_summary(const std::string &name);   // Players Me
 bool edit_clan_tag();
 // Per frame of the profile page: takes the clan tag once the text input closes.
 void clan_tag_frame();
+// Every game frame (online::frame): while NET_SM > 1, checks a new clan tag and publishes it after the verdict
+// (PS3 parity A 2.1).
+void clan_tag_check_frame();
 
 }  // namespace u2mp

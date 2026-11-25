@@ -48,6 +48,7 @@
 #include "frontend3.h"
 #include "online.h"
 #include "online_link.h"
+#include "progression.h"
 #include "session_api.h"
 #include "u2_online_abi.h"
 #include "u2mp_internal.h"
@@ -294,9 +295,12 @@ struct BoardView {
     int mode = 0;
     uint64_t req = 0;
     bool loading = false, failed = false;
+    double deadline = 0;       // no answer by then: failed
     uint32_t total = 0;
     std::vector<U2oScore> rows;
 } board_view;
+constexpr double kBoardTimeout = 10;   // PS3's limit on its stats storage requests
+constexpr int kMaxScorePosts = 4;      // PS3's score post slots
 
 // stranger matchmaking (PORT-MATCHMAKING.md 3.3)
 enum class Mm { Idle, Searching, Joining, Creating, Hosting, Joined, Failed };
@@ -469,6 +473,20 @@ void log_room(const char *what, const Room &r) {
 uint64_t request(uint64_t id, Pending p) {
     if (id) pending[id] = std::move(p);
     return id;
+}
+
+// A leaderboard fetch always ends (PS3 parity A 2.4): when the link is down (or `link_lost`) or no answer came within
+// 10 s, it ends as failed; an answer arriving later is not taken.
+void board_expire(bool link_lost = false) {
+    if (!board_view.loading) return;
+    if (!link_lost && link_state == U2O_READY && now() < board_view.deadline) return;
+    log("rankings: board %u: no answer, failed", board_view.board);
+    pending.erase(board_view.req);
+    board_view.req = 0;
+    board_view.loading = false;
+    board_view.failed = true;
+    board_view.total = 0;
+    board_view.rows.clear();
 }
 
 void leave_room(Room &r, const char *why) {
@@ -661,7 +679,7 @@ void join_succeeded(const Pending &p, const U2oRoom &src) {
 
 // ---- pages and notices ---------------------------------------------------------------------------
 constexpr uint32_t kPageMultiplayer = sid("PAGE_MULTIPLAYER"), kPageLobby = sid("PAGE_LOBBY"),
-                   kPageFriends = sid("PAGE_MULTIPLAYER_FRIENDS_LIST"), kPageMatchmaking = sid("PAGE_MULTIPLAYER_MATCHMAKING");
+                   kPageFriends = sid("PAGE_MULTIPLAYER_FRIENDS_LIST");
 
 bool match_running(int32_t s) { return s == kUpdate || s == kReset || s == kReplay || s == kResults || s == kRoundResults; }
 
@@ -776,12 +794,6 @@ void publish_presence(double t) {
     request(id, Pending{Req::Presence, 0, 0, false, "presence"});
     sent_presence = key;
     next_presence = t + kPresencePeriod;
-}
-
-const U2oFriend *friend_by_npid(const std::string &npid) {
-    for (const U2oFriend &f : friend_list)
-        if (npid == npid_text(f.npid)) return &f;
-    return nullptr;
 }
 
 // A cinema file (PS3 0x449ae8 event 20 -> 0x43302c -> thread 0x433360): {"U2CN", key, name[64], size} + the file.
@@ -1034,6 +1046,7 @@ void on_event(const U2oEvent &e) {
     switch (e.kind) {
     case U2O_EV_LINK_LOST:
         log("online: link lost (%s): every room is gone", e.text ? e.text : "no reason given");
+        board_expire(true);
         party_room = Room{};
         match_room_ = Room{};
         pending.clear();
@@ -1340,7 +1353,7 @@ void on_event(const U2oEvent &e) {
                 e.error ? "not kept" : "recorded", e.state);
             break;
         }
-        if (e.request != board_view.req) break;   // an older view
+        if (!board_view.req || e.request != board_view.req) break;   // an older view, or one that timed out
         board_view.loading = false;
         board_view.failed = e.error != 0;
         board_view.total = e.total;
@@ -1445,6 +1458,7 @@ net::Link *start() {
 bool active() { return started; }
 
 void frame() {
+    clan_tag_check_frame();   // runs online and on LAN alike (NET_SM > 1), with or without the online program
     if (!api.on || !link_opened) return;
     const double t = now();
     char text[128] = {};
@@ -1479,6 +1493,7 @@ void frame() {
         if (api.poll(&e) <= 0) break;
         on_event(e);
     }
+    board_expire();
     if (friends_dirty) refresh_friends();
     publish_presence(t);
     expire_invites(t);
@@ -1857,6 +1872,12 @@ bool remove_friend(int i) {
     return id != 0;
 }
 
+std::vector<std::string> friend_npids(size_t max) {
+    std::vector<std::string> out;
+    for (size_t i = 0; i < friend_list.size() && i < max; ++i) out.push_back(npid_text(friend_list[i].npid));
+    return out;
+}
+
 std::string profile_text(int i) {
     const int kind = friend_kind(i);
     const std::string n = friend_name(i);
@@ -2003,18 +2024,28 @@ bool board_request(uint32_t board, int mode, uint32_t start, uint32_t count) {
     board_view.req = api.get_scores(board, mode, start, count);
     board_view.loading = board_view.req != 0;
     board_view.failed = !board_view.req;
+    board_view.deadline = now() + kBoardTimeout;
     request(board_view.req, Pending{Req::ScoreGet, board, 0, false, "scores"});
     log("online: rankings: board %u mode %d from %u (request %llu)", board, mode, start, (unsigned long long)board_view.req);
     return board_view.req != 0;
 }
 
-int board_state() { return board_view.loading ? 1 : board_view.failed ? -1 : 0; }
+int board_state() {
+    board_expire();
+    return board_view.loading ? 1 : board_view.failed ? -1 : 0;
+}
 int board_rows() { return int(board_view.rows.size()); }
 uint32_t board_total() { return board_view.total; }
 const U2oScore *board_row(int i) { return i >= 0 && size_t(i) < board_view.rows.size() ? &board_view.rows[size_t(i)] : nullptr; }
 
 bool record_score(uint32_t board, int64_t score, const char *comment, const uint8_t *info, uint32_t info_len) {
     if (!api.record_score || link_state != U2O_READY) return false;
+    const auto posts = std::count_if(pending.begin(), pending.end(),
+                                     [](const auto &kv) { return kv.second.kind == Req::ScoreRecord; });
+    if (posts >= kMaxScorePosts) {
+        log("rankings: 4 scores pending, score %lld for board %u dropped", (long long)score, board);
+        return false;
+    }
     const uint64_t id = api.record_score(board, score, comment, info, info_len);
     log("online: rankings: recording %lld on board %u (request %llu)", (long long)score, board, (unsigned long long)id);
     request(id, Pending{Req::ScoreRecord, board, 0, false, "record score"});

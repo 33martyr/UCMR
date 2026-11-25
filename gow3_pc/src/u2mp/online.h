@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include "net.h"
 #include "u2_online_abi.h"
@@ -75,6 +76,7 @@ bool friend_add(const std::string &npid);   // send a friend request (or accept 
 bool accept_request(int i);
 bool remove_friend(int i);           // unfriend / decline / cancel
 std::string profile_text(int i);     // View Profile: name, state, presence
+std::vector<std::string> friend_npids(size_t max);   // the NpIds of the first `max` friends of the friend list
 
 // ---- cinema files to and from friends (PS3 fe0e7de7 / 6b2970e2) ----
 bool send_cinema(const std::string &npid);   // the selected cinema of the cinema page
@@ -83,10 +85,13 @@ int cinema_received();                       // files friends sent us this sessi
 // ---- rankings (RPCN score boards; PS3 NP Score) ----
 bool linked();                       // the online link is up (also outside Multiplayer)
 bool board_request(uint32_t board, int mode, uint32_t start, uint32_t count);   // mode 0 ranks, 1 friends, 2 me
-int board_state();                   // 1 loading, 0 ready, -1 failed
+// 1 loading, 0 ready, -1 failed. A fetch never waits forever: the link going down or 10 s without an answer
+// ends it as failed (PS3 parity A 2.4).
+int board_state();
 int board_rows();
 uint32_t board_total();
 const U2oScore *board_row(int i);
+// At most 4 posts wait for an answer at once (PS3's 4 score slots); a fifth is dropped, not queued.
 bool record_score(uint32_t board, int64_t score, const char *comment, const uint8_t *info = nullptr, uint32_t info_len = 0);
 
 // ---- stranger matchmaking (frontend3.cpp; PS3 0x4b0a58 search / join / create) ----
