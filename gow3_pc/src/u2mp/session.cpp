@@ -19,6 +19,7 @@
 #include <string>
 #include <vector>
 
+#include "cinema.h"
 #include "frontend3.h"
 #include "frontend6.h"
 #include "gamenet.h"
@@ -93,6 +94,13 @@ constexpr uint32_t kPageLobby = 0xb99a3235;
 constexpr uint32_t kMessageBoxPage = 0x719e9fec;
 constexpr uint64_t kHostCreateHandler = 0x6093f0;
 constexpr uint32_t kWaitText = 0x69deab50;
+constexpr uint32_t kNoNetworkText = 0x88a082af;   // BUTTON_MULTIPLAYER: no network (PS3 bootstrap 0x438bc8)
+// Start Match message boxes (PS3 0x43aab0): body / second text.
+constexpr uint32_t kPartyTooBig = 0x58b7e078, kPartyTooBigInfo = 0x3a586923;
+constexpr uint32_t kNoMapPack1 = 0x0e39fdf3, kNoMapPack2 = 0x2341ea7b, kMemberNoMapPack = 0x58d7fbb3,
+                   kCustomInfo = 0x13cabc15;
+constexpr uint32_t kTooManyPlayers = 0x4a936499, kTooFewPlayers = 0xb90de2b1, kTooFewInfo = 0xcca3ca1f;
+constexpr uint32_t kOneTeam = 0x101c7f10, kOneTeamInfo = 0x5350146e;
 constexpr uint32_t kNetPackage = 0x4240ef2e;
 constexpr uint32_t kNetU2mpPackage = 0x5e516de8;
 constexpr uint32_t kIconTalking = 0xffa98ec5;
@@ -155,6 +163,7 @@ struct Member {
     uint8_t team = 0;
     uint32_t import_notice = 0;
     std::string tag = {};   // the clan tag the member published (kInfo / kTags), "" none; ours is read live
+    uint8_t packs = 0xff;   // host: the map packs the member has (dlc_packs bits, kInfo); 0xff = not told (older PC)
 };
 
 Member members[kSlots];
@@ -186,8 +195,8 @@ bool lobby_returning = false;
 void *online_state = nullptr;
 double lobby_grace = 0.0;
 std::map<uint32_t, std::string> npids;   // net id -> NpId (ordered, so the smallest id is found first)
-// Host: online ids kicked as griefers in this hosted session -> refused Hellos since. Lives as long as
-// the transport (close_transport clears it), like PS3's block on the match room.
+// Host: online ids kicked in this hosted session (Kick From Party, griefer kick) -> refused Hellos since. Lives
+// as long as the transport (close_transport clears it), like PS3's block on the room.
 std::map<std::string, unsigned> blocked;
 int closed_frames = 0;
 uint8_t *clock_object = nullptr;
@@ -495,24 +504,47 @@ uint8_t *keep_net_package() {
     return request_package_internal("net");
 }
 
+// The weapons and animation packages the PS3 game loaded on entering Multiplayer (PS3 0xe155d0).
+constexpr const char *kPreloadNames[] = {
+    "beretta-pistol", "beretta-pistol-magazine", "colt-defender-pistol", "colt-defender-magazine",
+    "desert-eagle", "desert-eagle-magazine", "dragunov-magazine", "dragunov-rifle", "fn-fal-clip",
+    "fn-fal-rifle", "m4-rifle", "m4-rifle-magazine", "shotgun", "spas12-shotgun", "machine-gun",
+    "machine-gun-clip", "rpg", "anim-proto-multiplayer", "anim-proto-shield", "anim-proto-carry-objects",
+    "m32-grenade-launcher"};
+
 void preload_packages() {
     const char *env = std::getenv("UNCHARTED_U2MP_PRELOAD");
     if (env && std::strcmp(env, "0") == 0) return;
-    // The weapons and animation packages the PS3 game loaded on entering Multiplayer.
-    static const char *const names[] = {
-        "beretta-pistol", "beretta-pistol-magazine", "colt-defender-pistol", "colt-defender-magazine",
-        "desert-eagle", "desert-eagle-magazine", "dragunov-magazine", "dragunov-rifle", "fn-fal-clip",
-        "fn-fal-rifle", "m4-rifle", "m4-rifle-magazine", "shotgun", "spas12-shotgun", "machine-gun",
-        "machine-gun-clip", "rpg", "anim-proto-multiplayer", "anim-proto-shield", "anim-proto-carry-objects",
-        "m32-grenade-launcher"};
     int requested = 0, present = 0, missing = 0;
-    for (const char *name : names) {
-        if (find_package(sid(name))) ++present;
-        else if (request_package_internal(name)) ++requested;
-        else ++missing;
+    for (const char *name : kPreloadNames) {
+        if (uint8_t *pkg = find_package(sid(name))) {
+            pkg[0x18] |= 0x40;   // kept for Multiplayer again (the teardown cleared it last time)
+            ++present;
+        } else if (request_package_internal(name)) {
+            ++requested;
+        } else {
+            ++missing;
+        }
     }
     log("package preload (PS3 0xe155d0): %d requested, %d already present, %d not created", requested, present,
         missing);
+}
+
+// Multiplayer teardown (PS3 0x4386d0): the "net" packages and the preload list lose the "keep for multiplayer"
+// flag our requests set (package +0x18 bit 0x40); absent ones are skipped. The game's own release of a package
+// request on PS4 is not known (spec parity-d-flow1.md question 6): the flag is cleared, nothing is called.
+void release_packages() {
+    int released = 0;
+    auto release = [&](uint32_t id) {
+        uint8_t *pkg = find_package(id);
+        if (!pkg || !(pkg[0x18] & 0x40)) return;
+        pkg[0x18] &= uint8_t(~0x40);
+        ++released;
+    };
+    release(kNetPackage);
+    if (const char *extra = extra_net_package()) release(sid(extra));
+    for (const char *name : kPreloadNames) release(sid(name));
+    log("leaving multiplayer: %d package(s) no longer kept for Multiplayer", released);
 }
 
 void request_actor_package(const char *actor) {
@@ -583,6 +615,7 @@ void send_info() {
     push_skin(villain);
     sent_tag = local_tag();
     push_skin(sent_tag.c_str());   // the clan tag: one more length-prefixed string (older hosts stop before it)
+    b.push_back(uint8_t(dlc_packs()));   // the map packs we have, for the host's Start Match check (PS3 member data)
     send_raw(0, b, -1);
 }
 
@@ -710,7 +743,14 @@ void on_info(uint8_t from, const uint8_t *d, size_t size) {
     }
     // The clan tag (newer clients; an older one sends none and shows untagged).
     m.tag.clear();
-    if (at < size && at + 1 + d[at] <= size) m.tag = cut(std::string(reinterpret_cast<const char *>(d + at + 1), d[at]), 4);
+    if (at < size && at + 1 + d[at] <= size) {
+        m.tag = cut(std::string(reinterpret_cast<const char *>(d + at + 1), d[at]), 4);
+        at += 1 + d[at];
+    } else {
+        at = size;
+    }
+    // The member's map packs (newer clients; an older one is not checked).
+    m.packs = at < size ? d[at] : 0xff;
     refresh_sessions();
     broadcast_roster();
     broadcast_teams();
@@ -940,14 +980,14 @@ void on_peer(uint8_t slot, bool joined) {
 }
 
 // ---- transport start ----------------------------------------------------------------------------------
-// Host: a Hello from a blocked online id gets no slot, the same way a full party turns it away.
+// Host: a Hello from a blocked (kicked) online id gets no slot, the same way a full party turns it away.
 bool admit_peer(const net::Address &from) {
     if (blocked.empty()) return true;
     const std::string npid = online::npid_at(from);
     const auto it = npid.empty() ? blocked.end() : blocked.find(npid);
     if (it == blocked.end()) return true;
     if (it->second++ % 20 == 0)   // Hellos repeat every 0.5 s: one line per 10 s
-        log("party: refused a join from %s (kicked as a griefer; %u tries)", npid.c_str(), it->second);
+        log("party: refused a join from %s (kicked from this session; %u tries)", npid.c_str(), it->second);
     return false;
 }
 
@@ -1038,7 +1078,7 @@ void unregister_handler() {
 }
 
 // ---- teardown -----------------------------------------------------------------------------------------
-void teardown(bool pop) {
+void teardown(bool pop, bool leaving = true) {
     log("leaving multiplayer");
     unregister_handler();
     for (int s = 0; s < kSlots; ++s) gamenet::detach(uint8_t(s));
@@ -1049,11 +1089,18 @@ void teardown(bool pop) {
     clear_session(kPartySession);
     clear_session(kMatchSession);
     put<int32_t>(g(kNetInfo) + 0x2c4, 0);
-    put<int16_t>(ngm() + 0x1ca0, -1);
     guest<void(U2MP_GUEST *)(void *)>(kClearNetPlayers)(ngm());
     progression_publish();
     set_net_sm(0);
     clear_members();
+    // PS3 0x4386d0's releases: the kept packages, then the net game level preload (PS3 0x4a12e8(ngm, 0, 1, 0)),
+    // with the net game still current as on PS3; our own "no net game" comes after them.
+    // A cinema transfer has nothing to abort on PC: online::send_cinema hands the whole file over in one call.
+    if (leaving) {
+        release_packages();
+        frontend6::preload_net_game(false, true, false);
+    }
+    put<int16_t>(ngm() + 0x1ca0, -1);
     if (pop) guest<void(U2MP_GUEST *)(void *)>(kPopPage)(menu());
 }
 
@@ -1148,7 +1195,7 @@ void frame_work() {
         client_leave_requested = false;
         if (active) {
             log("party: leaving the match room and returning to the Multiplayer menu");
-            teardown(false);
+            teardown(false, false);   // still in Multiplayer: the packages stay kept
             set_net_sm(3);
             show_page(kPageMultiplayer);
         }
@@ -1906,8 +1953,11 @@ U2MP_GUEST void button_multiplayer(void *, void *, void *) {
     netpatch_load();
     if (!active) {
         if (!start_transport()) {
-            g(kNetInfo)[0x1c] = 1;
-            show_page(kPageMultiplayer);
+            // PS3 0x438bc8 without a network: message box 0x88a082af / OK over the main menu, not in Multiplayer.
+            log("Multiplayer could not start: network message, staying in the main menu");
+            close_transport();
+            online::on_transport_closed("Multiplayer could not start");
+            game_message_box(kNoNetworkText, 0);
             return;
         }
         active = true;
@@ -2118,19 +2168,95 @@ U2MP_GUEST void mm_roster_query(uint8_t *q) {
     }
 }
 
+// ---- Start Match checks (PS3 0x43aab0): each failure shows its message box and nothing starts ----------
+// Players in the party, this PC included (PS3 0x4d24a8: 1 with no room).
+int party_size() {
+    int n = 0;
+    for (const Member &m : members) n += m.used;
+    return n ? n : 1;
+}
+
+bool refuse(const char *why, uint32_t body, uint32_t second) {
+    log("Start Match: %s", why);
+    game_message_box(body, second);
+    return false;
+}
+
+// Matchmaking: the party must fit the playlist's maximum party size.
+bool matchmaking_start_ok() {
+    const int32_t max = playlist_max_party(get<uint32_t>(g(kNpd) + 0x104));
+    if (max <= 0 || party_size() <= max) return true;
+    return refuse("the party is larger than the playlist allows", kPartyTooBig, kPartyTooBigInfo);
+}
+
+// Players a game type takes: 10 for the competitive types, 3 for co-op, 0 for an unknown type.
+int type_max_players(int32_t type) {
+    if (coop_type(type)) return 3;
+    return (type >= 0 && type <= 3) || (type >= 5 && type <= 7) || type == 10 || type == 11 ? 10 : 0;
+}
+
+// Players a game type needs: 2 for type 10 and co-op on PS3. Deliberate difference: co-op starts with 1 player
+// here (solo co-op, solocoop.cpp), so the PS3 "too few players" box never blocks a co-op type.
+int type_min_players(int32_t type) {
+    if (coop_type(type)) return 1;
+    return type == 10 ? 2 : 1;
+}
+
+// Custom game: map packs (this PC, then every member), too many, too few, type 10 on one team.
+bool custom_start_ok() {
+    Table games = table_of(lookup(kNetGamesId));
+    const int16_t game = current_game();
+    if (!games.records || game < 0 || game >= games.count) return true;   // no game chosen: nothing to check
+    const int32_t type = get<int32_t>(games.records + game * 0x90 + 0x0c);
+    const int players = party_size();
+    bool local_ok = true;
+    const int32_t pack = dlc_net_game_pack(game, local_ok);
+    if (!local_ok)
+        return refuse("this PC lacks the map's map pack", pack == 1 ? kNoMapPack1 : kNoMapPack2, kCustomInfo);
+    // Only when this PC plays the map pack version (Ruins falls back to the base map without map pack 1).
+    if ((pack == 1 || pack == 2) && (dlc_packs() & (1u << pack)))
+        for (const Member &m : members)
+            if (m.used && m.net_id != my_id && !(m.packs & (1u << pack)))
+                return refuse("a party member lacks the map's map pack", kMemberNoMapPack, kCustomInfo);
+    if (players > type_max_players(type)) return refuse("too many players for the game type", kTooManyPlayers, kCustomInfo);
+    if (players < type_min_players(type)) return refuse("too few players for the game type", kTooFewPlayers, kTooFewInfo);
+    if (type == 10) {
+        int with_data = 0, team1 = 0, team2 = 0;
+        for (const Member &m : members) {
+            if (!m.used) continue;
+            ++with_data;
+            team1 += m.team == 1;
+            team2 += m.team == 2;
+        }
+        if (team1 == with_data || team2 == with_data)
+            return refuse("every player is on one team", kOneTeam, kOneTeamInfo);
+    }
+    return true;
+}
+
 U2MP_GUEST void button_start_match(void *, void *, void *) {
     if (!hosting) return;
-    int32_t mode = get<int32_t>(g(kNetInfo) + 0x2c4);
-    if (mode == 1 && matchmaking::installed()) {
-        if (!frontend6::leader_starting(true)) matchmaking::leader_start();
-        return;
-    }
-    if (mode == 1) {
+    const int32_t mode = get<int32_t>(g(kNetInfo) + 0x2c4);
+    if (mode == 1) {   // matchmaking
+        if (!matchmaking_start_ok()) return;
+        online::hide_for_start(true);
+        if (matchmaking::installed()) {
+            if (!frontend6::leader_starting(true)) matchmaking::leader_start();
+            return;
+        }
         pick_matchmaking_game();
-    } else if (frontend6::leader_starting(false)) {
-        return;   // the "Starting in" popup creates the match when it runs out
+        create_match_now();
+    } else if (mode == 2) {   // custom game
+        if (!custom_start_ok()) return;
+        online::hide_for_start(true);
+        if (frontend6::leader_starting(false)) return;   // the "Starting in" popup creates the match when it runs out
+        create_match_now();
+    } else if (mode == 3) {   // cinema: play the selected recording (PS3: as Replay 0x43a3dc)
+        log("Cinema");
+        cinema::start_playback();
+    } else {
+        log("Start Match: page mode %d: nothing to start", int(mode));
     }
-    create_match_now();
 }
 
 U2MP_GUEST void leave_multiplayer(void *, void *, void *) { teardown(true); }
@@ -2245,10 +2371,21 @@ void create_match() {
     if (active && hosting) create_match_now();
 }
 
+// Kick From Party (PS3 0x439cf8) and the griefer kick both kick with the block flag: the kicked player's online
+// id is refused on later joins until this PC stops hosting.
 bool kick(uint32_t net_id) {
     if (!active || !hosting || net_id < 2 || net_id > 11 || !members[net_id - 1].used) return false;
+    std::string npid;
+    net::Address a;
+    if (transport.peer_address(uint8_t(net_id - 1), a)) npid = online::npid_at(a);
     log("party: kicking %s (net id %u)", members[net_id - 1].name.c_str(), net_id);
     send_raw(int(net_id - 1), {kKick}, -1);
+    if (npid.empty()) {
+        log("party: net id %u has no online id: kicked, not blocked", net_id);
+    } else {
+        blocked.emplace(npid, 0u);
+        log("party: %s blocked from joining again until this session ends", npid.c_str());
+    }
     return true;
 }
 
@@ -2261,17 +2398,7 @@ bool kick_griefer(uint32_t net_id) {
         kicked = true;   // the transport closes on the next frame, outside the event Apply
         return true;
     }
-    std::string npid;
-    net::Address a;
-    if (net_id >= 2 && net_id <= 11 && transport.peer_address(uint8_t(net_id - 1), a)) npid = online::npid_at(a);
-    if (!kick(net_id)) return false;
-    if (npid.empty()) {
-        log("party: net id %u has no online id: kicked, not blocked", net_id);
-    } else {
-        blocked.emplace(npid, 0u);
-        log("party: %s blocked from joining again until this session ends", npid.c_str());
-    }
-    return true;
+    return kick(net_id);
 }
 
 bool member_address(uint32_t net_id, net::Address &out) {

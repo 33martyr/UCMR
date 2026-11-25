@@ -497,7 +497,7 @@ Profile (no PAGE_FRIENDACTIONS page); no skill prefix (no board). Where each ite
 | 2 matchmaking rows | done | session.cpp `mm_roster_query` / `mm_list` (11.6), online.cpp `in_own_party`, `own_party_id`, `member_party_id` (member data +0 kept per room member), `peer_rtt`, `mm_slots`; `mm_member_at` for the row popup |
 | 3 friends list | done | menus.cpp `query_friends_online`, online.cpp sorted `friend_list`, `friend_view`, `friend_index` |
 | 4 friend card | done, partly | menus.cpp `query_friend_card` (cond 38 stub replaced) and `friend_card_lines` (View Profile); the co-op difficulty text and the variation are left out: their text ids / net game record field are not in this spec |
-| 5 presence | done | online.cpp PresenceData version 2 (48 bytes, within the ABI's 128), version 1 still read; invites of 32 bytes still taken |
+| 5 presence | done | online.cpp PresenceData version 2 (48 bytes, within the ABI's 128), version 1 still read (since parity group D: version 3, 80 bytes, adds the ticker stats); invites of 32 bytes still taken |
 
 PC differences that remain: "Finding Player..." / "Found Player" rows only with stranger matchmaking online (LAN
 gathers the party only); the open-slot count is the matchmaking room's size (10 on PC rooms, PS3 the playlist

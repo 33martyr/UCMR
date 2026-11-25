@@ -104,6 +104,17 @@ const char *extra_net_package();
 int32_t playlist_pick_type();
 // ShowPage(menu manager, page id, 0) in the guest.
 void show_page(uint32_t page);
+// remaining.cpp: the game's message box with body text `body`, the OK button and second text `second` (0 none),
+// both game text ids (PS3 0x42a3e8); logs an id the text banks lack.
+void game_message_box(uint32_t body, uint32_t second);
+// dlc.cpp: the map packs present on this PC as bits (1 << pack: bit 1 map pack 1, bit 2 map pack 2; bit 0 the
+// base game, always set).
+uint32_t dlc_packs();
+// dlc.cpp: the map pack of the *net-games* record's map (0 base, 1 / 2 map pack), -1 unknown; `local_ok` says
+// whether this PC can play that map (false when the pack is absent here; Ruins falls back to the base map).
+int32_t dlc_net_game_pack(int32_t index, bool &local_ok);
+// menus.cpp: the playlist's maximum party size, 0 when not known (no check).
+int32_t playlist_max_party(uint32_t id);
 // True when the function at `offset` is a stripped stub: ret, then alignment padding.
 inline bool is_ret_stub(uint64_t offset) {
     static const unsigned char stub[] = {0xc3, 0x66, 0x66, 0x66, 0x66};

@@ -674,6 +674,8 @@ int add_received(const uint8_t *data, size_t size, const std::string &wanted) {
     return 1;
 }
 
+void start_playback() { start_cinema(nullptr); }
+
 }  // namespace cinema
 
 // ---------------------------------------------------------------------------------------------

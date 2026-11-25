@@ -572,8 +572,13 @@ U2MP_GUEST void vote_row(uint8_t *arg) {
     log("matchmaking: voted for net game %d", vote_game(choice));
 }
 
+// The leader cancels the "Starting in" countdown (PS3 0x439a88 / 0x439b04): tell the party, show the party
+// room again, back one page.
 U2MP_GUEST void leader_back(void *, void *, void *) {
-    if (session::is_host()) session::send_message(-1, {kMsgLeaderBack});
+    if (session::is_host()) {
+        session::send_message(-1, {kMsgLeaderBack});
+        online::hide_for_start(false);
+    }
     pop_page();
 }
 

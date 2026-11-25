@@ -37,6 +37,10 @@ bool host_change_expected();
 void on_transport_closed(const char *why);
 // A session message of type session kOnlineMessage (from transport slot `from`).
 void on_message(uint8_t from, const uint8_t *data, size_t size);
+// Party leader, Start Match (PS3 0x43aab0 / 0x4d5338): true hides (closes) the owned party room from the
+// countdown on, false shows it again (the leader cancelled, 0x439a88 / 0x439b04). The match's own hide takes
+// over once it runs; leaving matchmaking or the transport closing also ends this hide.
+void hide_for_start(bool on);
 
 // ---- menus ----
 // BUTTON_MULTIPLAYER_INVITES while online: opens the join list (PAGE_MULTIPLAYER_JOIN) and searches.
@@ -96,6 +100,16 @@ bool friend_view(int i, FriendView &v);      // false: row i is no friend (a req
 int friend_index(const std::string &name);   // the row of that friend (or request) now, -1 none
 const char *request_state(int i);            // a request row's state text ("" for other rows)
 void refresh_friend_list();                  // fetch the list and presence again (the list's op 8)
+
+// ---- PAGE_MULTIPLAYER's friends stats ticker (PS3 0x446c60 / 0x43b30c / 0x43b290, spec parity-d-flow1.md 2.10) ----
+// One ticker text: a random category (0 cash .. 6 time played), then up to 5 random friends (of the first 101)
+// whose presence is this build's multiplayer with stats (presence version 3). No such friend: the heading only.
+// The PS4 call that puts a text into the ticker control is not known yet, so nothing shows it so far.
+std::string stats_ticker_text();
+// The ticker's pieces, for tests: one friend entry appended to `out` (false, `out` unchanged, when it would reach
+// 511 characters), and the time played text ("Nd Nh Nm", "Nh Nm", "Nm").
+bool ticker_append_entry(std::string &out, const std::string &name, int category, uint64_t value);
+std::string ticker_time(uint64_t seconds);
 
 // ---- cinema files to and from friends (PS3 fe0e7de7 / 6b2970e2) ----
 bool send_cinema(const std::string &npid);   // the selected cinema of the cinema page

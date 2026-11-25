@@ -772,6 +772,10 @@ bool playlist_game_types(std::vector<int32_t> &types) {
     return !types.empty();
 }
 
+// PS3 kept a maximum party size in each playlist record (+0x1c), checked by Start Match (parity-d-flow1.md
+// 2.2). The PS3 values are not known to this port, so no playlist limits the party (0).
+int32_t playlist_max_party(uint32_t) { return 0; }
+
 int32_t playlist_index(uint32_t id) {
     for (int k = 0; k < built; ++k) {
         if (playlists[k].id() != id) continue;

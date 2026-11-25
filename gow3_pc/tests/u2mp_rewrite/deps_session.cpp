@@ -307,7 +307,32 @@ int mm_slots() {
     hx::rec("online::mm_slots");
     return 0;
 }
+// parity group D: Start Match room hide
+void hide_for_start(bool on) { hx::rec("online::hide_for_start %d", on ? 1 : 0); }
 }  // namespace online
+// parity group D: Start Match checks, teardown releases, cinema mode, start failure box
+void game_message_box(uint32_t body, uint32_t second) { hx::rec("game_message_box 0x%x 0x%x", body, second); }
+uint32_t dlc_packs() {
+    hx::rec("dlc_packs");
+    return 7;
+}
+int32_t dlc_net_game_pack(int32_t index, bool &local_ok) {
+    hx::rec("dlc_net_game_pack %d", index);
+    local_ok = st.dlc_off.count(index) == 0;
+    return 0;
+}
+int32_t playlist_max_party(uint32_t id) {
+    hx::rec("playlist_max_party 0x%x", id);
+    return 0;
+}
+namespace cinema {
+void start_playback() { hx::rec("cinema::start_playback"); }
+}  // namespace cinema
+namespace frontend6 {
+void preload_net_game(bool request, bool keep_menu, bool flags_only) {
+    hx::rec("frontend6::preload_net_game %d %d %d", request ? 1 : 0, keep_menu ? 1 : 0, flags_only ? 1 : 0);
+}
+}  // namespace frontend6
 #endif
 
 // ---- the entry table for test_session.cpp ---------------------------------------------------------------

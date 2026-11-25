@@ -424,7 +424,8 @@ In this order:
 
 #### 3.4.7 Leader back-out callbacks `0x5eba80`, `0x5eba30`
 
-Both identical: if `session::is_host()`, send(-1, [0x16]). Then pop (always).
+Both identical: if `session::is_host()`, send(-1, [0x16]) and `online::hide_for_start(false)` (the party
+room shows again, PS3 0x439a88 / 0x439b04; parity group D 2.2 item c). Then pop (always).
 
 #### 3.4.8 `matchmaking::installed()`
 
@@ -543,7 +544,7 @@ guest functions that record calls; a fake session (host or member, member count,
 14. on_peer_joined: not running / not host / page not on top (nothing); phase 1 (start only); phase 2
     active (options with ticks left); phase 2 inactive; phase 3 (result).
 15. on_migrated true / false.
-16. Leader back-out as host (send 0x16 + pop) and member (pop only).
+16. Leader back-out as host (send 0x16, hide_for_start(false), pop) and member (pop only).
 
 ---
 

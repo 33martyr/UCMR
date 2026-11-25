@@ -111,17 +111,37 @@ bool session_is_host(uint64_t session) {
     return load_at<uint64_t>(s, 0x10) == 0 || load_at<uint32_t>(s, 0xb00) == load_at<uint32_t>(s, 0xb04);
 }
 
-// The game's one-button message box with text `text`; it needs the descriptor the menu manager owns.
-void message_box(uint32_t text) {
+// The game's one-button message box with text `text` and an optional second text (word 6 of the block at
+// box +0x40, PS3 0x42a3e8's arg4); it needs the descriptor the menu manager owns.
+void message_box(uint32_t text, uint32_t second = 0) {
     uint8_t *box = load_at<uint8_t *>(menu_manager(), 0x17d0);
     if (!box) return;
     store_at<uint32_t>(box, 0x08, text);
-    const uint32_t words[7] = {0, 0xc6467f2d, 0x11d8e78a, 0, 0x1519fa3d, 0, 0};
+    const uint32_t words[7] = {0, 0xc6467f2d, 0x11d8e78a, 0, 0x1519fa3d, second, 0};
     std::memcpy(box + 0x40, words, sizeof words);
     show_page(kPageMessageBox);
 }
 
 void pop_page() { reinterpret_cast<void(U2MP_GUEST *)(void *)>(image_ptr(fPopPage))(menu_manager()); }
+
+// The page id at stack position i (menu manager +0x9d0, top index at +0x1010); 0 when there is none.
+uint32_t page_at(int32_t i) {
+    const uint8_t *page = load_at<uint8_t *>(menu_manager(), 0x9d0 + 8 * uint64_t(i));
+    return page ? load_at<uint32_t>(page, 0x10) : 0;
+}
+
+// Go to `page`: back to it when it is on the page stack (the pages above it are popped), else it is opened.
+void go_to_page(uint32_t page) {
+    const int32_t top = load_at<int32_t>(menu_manager(), 0x1010);
+    int32_t at = -1;
+    for (int32_t i = 0; top >= 0 && top <= 0x40 && i <= top; ++i)
+        if (page_at(i) == page) at = i;
+    if (at < 0) {
+        show_page(page);
+        return;
+    }
+    for (int32_t i = top; i > at; --i) pop_page();
+}
 
 // The game's popup: a title, a page and up to eight {text, callback} options, laid out as the
 // game reads them (19 words). Kept in static storage so it stays valid however long the game
@@ -177,12 +197,6 @@ bool register_callback(uint32_t id, MenuCallback fn) {
     store_at<uint64_t>(entry, 0x10, 0);
     store_at<uint32_t>(menu, 0x18ec, count + 1);
     return true;
-}
-
-// Appends one of our own texts; a missing text must not crash, so it then adds nothing.
-std::string with_own_text(std::string base, uint32_t id) {
-    if (const char *t = own_text(id)) base += t;
-    return base;
 }
 
 // ---- B1: level record package (0x644130) ---------------------------------------------------------------
@@ -486,20 +500,21 @@ U2MP_GUEST void kick_from_party(void *, void *, void *) {
         log("Kick From Party: net id %u not kicked", g_selected_member);
 }
 
+// PS3 0x439bf0 / 0x439d60: flip the member's muted flag, nothing shown (the row's muted icon follows voice.cpp).
+// The member must exist and not be this PC.
 U2MP_GUEST void mute_member(void *, void *, void *) {
-    if (!voice::enabled()) {
-        message_box(kTextVoice);
-        return;
-    }
     std::string name;
-    if (!session::member_name(g_selected_member, name)) return;
-    const bool muted = voice::toggle_mute(g_selected_member);
-    text_set_player(with_own_text(name + ": ", muted ? kTextMuted : kTextUnmuted).c_str());
-    message_box(kTextPlayer);
+    if (g_selected_member == session::local_id() || !session::member_name(g_selected_member, name)) return;
+    voice::toggle_mute(g_selected_member);
 }
 
+// PS3 0x439c7c: hand the party to the member, then PAGE_LOBBY. Our failure box is a PC addition (LAN has no
+// promote, or the member is not in the room).
 U2MP_GUEST void promote_leader(void *, void *, void *) {
-    if (g_selected_member != 0 && online::promote(g_selected_member)) return;
+    if (g_selected_member != 0 && online::promote(g_selected_member)) {
+        go_to_page(kPageLobby);
+        return;
+    }
     message_box(kTextLeader);
 }
 
@@ -714,6 +729,16 @@ void show_notice(const char *text) {
     if (!text || !*text) return;
     text_set_player(text);
     message_box(kTextPlayer);
+}
+
+void game_message_box(uint32_t body, uint32_t second) {
+    for (uint32_t id : {body, second}) {
+        if (!id) continue;
+        const char *t = reinterpret_cast<const char *(U2MP_GUEST *)(void *, uint32_t)>(image_ptr(fTextFind))(
+            image_ptr(0x1066660), id);
+        if (!t || !*t) log("message box: text %08x is not in the game's text banks", id);
+    }
+    message_box(body, second);
 }
 
 void cinema_pick_friend() { pick_friend_for_cinema(); }

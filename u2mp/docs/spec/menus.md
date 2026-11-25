@@ -41,6 +41,7 @@ Who calls into these files:
 | `void install_menus(int &installed)` | `u2mp_internal.h` | `install.cpp`, after `install_remaining`, before `install_menuimages` |
 | `void install_menuimages(int &installed)` | `u2mp_internal.h` | `install.cpp`, right after `install_menus` |
 | `int32_t playlist_pick_type()` | `u2mp_internal.h` | `session.cpp` (Start Match in matchmaking mode, netInfo mode 1) |
+| `int32_t playlist_max_party(uint32_t id)` | `u2mp_internal.h` | `session.cpp` (Start Match's party size check, parity group D 2.2): the playlist's maximum party size (PS3 playlist record +0x1c); always 0 = "no limit known", the PS3 values are not known to this port |
 | `bool playlist_game_types(std::vector<int32_t> &types)` | `frontend3.h` | `frontend3.cpp` (`pick_vote_games`: the vote's two games) |
 | `const char *extra_net_package()` | `u2mp_internal.h` | `session.cpp` (`keep_net_package`: requests the package by that name before "net"), and menuimages itself |
 | `uint8_t *menu_net_material(uint32_t id)` | `frontend3.h` | `loading.cpp` (loading screen cards, edges, title back) |

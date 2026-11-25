@@ -100,11 +100,13 @@ enum : uint8_t { kOpFollowRoom = 1,     // leader -> party: {u64 room id}: I joi
                  kOpPromote = 2 };      // leader -> party: {u64 room id, npid}: that player leads now (PS3 GrantRoomOwner)
 // Presence data (RPCN presence of this game, what friends' lists read): "U2MP", what we do, which room.
 // Version 1 is the first 32 bytes; version 2 (48 bytes) adds what the PS3 friends list and friend card show
-// (spec parity-b-menus.md 5). A version 1 reader takes the head and rejects the version; this reader takes both
-// (a version 1 friend reads as "in this game's multiplayer, no details").
+// (spec parity-b-menus.md 5); version 3 (80 bytes) adds the career stats PAGE_MULTIPLAYER's friends ticker shows
+// (parity-d-flow1.md 2.10). A version 1 reader takes the head and rejects the version; a version 2 reader takes
+// the first 48 bytes of version 3. This reader takes all three (a version 1 friend reads as "in this game's
+// multiplayer, no details", a version 1 or 2 friend has no stats).
 constexpr uint32_t kPresenceMagic = 0x504d3255u;
-constexpr uint8_t kPresenceVersion = 2;
-constexpr uint32_t kPresenceV1Size = 32;
+constexpr uint8_t kPresenceVersion = 3;
+constexpr uint32_t kPresenceV1Size = 32, kPresenceV2Size = 48;
 struct PresenceData {
     uint32_t magic;
     uint8_t version, state, members, max;
@@ -120,8 +122,12 @@ struct PresenceData {
     int16_t net_game;   // *net-games* index of the game being played or set up, -1 none
     uint16_t pad3;
     uint64_t match_end; // the running match's end, Unix UTC seconds; 0 none
+    // version 3: NetPlayerData career values (headshots: not known to this port, 0)
+    uint32_t cash, kills, wins, losses, deaths, headshots, seconds;
+    uint32_t pad4;
 };
-static_assert(sizeof(PresenceData) == 48, "presence data");
+static_assert(sizeof(PresenceData) == 80, "presence data");
+static_assert(sizeof(PresenceData) <= sizeof(U2oFriend::data), "presence data fits the ABI's 128 bytes");
 // State: kPresMenu = this game but not in Multiplayer (version 2 readers: single player); kPresCinema = cinema
 // mode (version 2).
 enum : uint8_t { kPresMenu = 0, kPresParty = 1, kPresCustom = 2, kPresMatchmaking = 3, kPresMatch = 4,
@@ -291,6 +297,7 @@ double next_rtt_log = 0, next_blob_check = 0;
 double join_page_deadline = 0;  // reached a host from the join list: no follow in 3 s -> back to PAGE_MULTIPLAYER
 int32_t last_net_state = -1;
 bool in_match = false;
+bool start_hidden = false;      // the leader pressed Start Match: the party room is hidden until the match runs
 
 // identity, friends, invites, presence (ABI 2)
 std::string online_name;       // the RPCN online name (Login reply), once the link is ready
@@ -587,11 +594,13 @@ uint64_t create_room(uint32_t kind) {
     return id;
 }
 
-void set_hidden(Room &r, bool on) {
+void set_hidden(Room &r, bool on, bool starting = false) {
     // PS3 Hide 0x4d5338: flag filter CLOSED | HIDDEN, attr both or none.
     const uint64_t id = api.set_room_internal(r.id, kFlagClosed | kFlagHidden, on ? kFlagClosed | kFlagHidden : 0, nullptr, 0);
     log("online: %s room %llx %s (request %llu)", kind_name(r.kind), (unsigned long long)r.id,
-        on ? "hidden and closed (match running)" : "shown and open again (lobby)", (unsigned long long)id);
+        on ? (starting ? "hidden and closed (Start Match)" : "hidden and closed (match running)")
+           : "shown and open again (lobby)",
+        (unsigned long long)id);
     request(id, Pending{Req::SetInternal, r.id, r.kind, false, on ? "hide" : "show"});
     r.hidden = on;
 }
@@ -740,16 +749,17 @@ void back_to_multiplayer_page() {
 }
 
 // ---- friends, presence, invites (ABI 2; PS3 NP Basic, PORT-MATCHMAKING.md 1.10 / 3.6) -------------
-// A friend's presence data of this game (version 1 or 2; the version 2 fields stay 0 for a version 1 friend).
+// A friend's presence data of this game (version 1, 2 or 3; the fields a lower version lacks stay 0).
 bool presence_data(const U2oFriend &f, PresenceData &d) {
     d = PresenceData{};
     if (!f.online || !f.same_game || f.data_len < kPresenceV1Size) return false;
     std::memcpy(&d, f.data, std::min<size_t>(f.data_len, sizeof d));
-    if (d.magic != kPresenceMagic || d.version < 1 || (d.version >= 2 && f.data_len < sizeof d)) return false;
-    if (d.version == 1) {
-        std::memset(reinterpret_cast<uint8_t *>(&d) + kPresenceV1Size, 0, sizeof d - kPresenceV1Size);
-        d.net_game = -1;
-    }
+    if (d.magic != kPresenceMagic || d.version < 1 || (d.version == 2 && f.data_len < kPresenceV2Size) ||
+        (d.version >= 3 && f.data_len < sizeof d))
+        return false;
+    const uint32_t have = d.version == 1 ? kPresenceV1Size : d.version == 2 ? kPresenceV2Size : uint32_t(sizeof d);
+    std::memset(reinterpret_cast<uint8_t *>(&d) + have, 0, sizeof d - have);
+    if (d.version == 1) d.net_game = -1;
     return true;
 }
 bool presence_of(const U2oFriend &f, PresenceData &d) { return presence_data(f, d); }
@@ -861,6 +871,13 @@ void presence_now(PresenceData &d, std::string &status) {
         d.difficulty = G<uint8_t>(kNgm + 0x21c4);
         d.net_game = G<int16_t>(kNgm + 0x1ca0);
         if (d.state == kPresMatch) d.match_end = match_end_now();
+        // The career values the friends ticker shows (NetPlayerData Data, spec progression.md).
+        d.cash = G<uint32_t>(kNpd + 0xd8);
+        d.kills = G<uint32_t>(kNpd + 0x184);
+        d.deaths = G<uint32_t>(kNpd + 0x188);
+        d.wins = G<uint32_t>(kNpd + 0x18c);
+        d.losses = G<uint32_t>(kNpd + 0x190);
+        d.seconds = G<uint32_t>(kNpd + 0x198);
     }
 }
 
@@ -1494,6 +1511,7 @@ void room_state() {
     const bool ended = in_match && !match_running;
     const bool began = !in_match && match_running;
     in_match = match_running;
+    if (began) start_hidden = false;   // the match's own hide takes over (and ends with the match)
     if (began && link_state == U2O_READY && match_room_.owned()) {
         // PS3 HostRank 0x4d4868 (the remote players in slot order) + HostMigrate: who takes the room over
         // (lowest member id first: the order every PC assumes when RPCN is slow to move the room, migration_tick)
@@ -1514,7 +1532,10 @@ void room_state() {
     send_succession(party_room);   // the party room's owner order, whenever its members change
     for (Room *r : {&party_room, &match_room_}) {
         if (!r->owned()) continue;
-        if (r->hidden != match_running) set_hidden(*r, match_running);   // 0x4d5338: closed during the match
+        // 0x4d5338: closed during the match, and the party room from the leader's Start Match on (0x43aab0)
+        const bool starting = r == &party_room && start_hidden && !match_running;
+        const bool hide = match_running || starting;
+        if (r->hidden != hide) set_hidden(*r, hide, starting);
     }
     if (match_room_.owned()) {
         if (s == kServerLobby && !match_room_.lobby_started) {   // 0x465fe8: the lobby task started
@@ -1724,6 +1745,7 @@ void on_transport_closed(const char *why) {
         if (p.state == U2O_PEER_ACTIVE || p.state == U2O_PEER_PENDING) api.peer_disconnect(p.npid.c_str());
     for (Peer &p : peers) p.state = -1;
     started = false;
+    start_hidden = false;
     waiting_host = following_leader = false;
     switch_at = 0;
     match_waiting = false;   // the match is gone with the transport: nothing to finish
@@ -2121,6 +2143,7 @@ void mm_research() {
 
 void mm_leave() {
     mm_state = Mm::Idle;
+    start_hidden = false;   // back in the party without a match: the party room shows again
     if (!started || !match_room_.id || match_room_.kind != kKindMatchmaking) return;
     const bool stranger = !match_room_.owned() && !(party_room.id && in_room(party_room, host_npid));
     leave_room(match_room_, "left matchmaking");
@@ -2241,5 +2264,88 @@ bool send_cinema(const std::string &npid) {
 }
 
 int cinema_received() { return cinemas_received; }
+
+// ---- Start Match room hide (PS3 0x43aab0 / 0x439a88 / 0x439b04 -> 0x4d5338) --------------------------------
+void hide_for_start(bool on) {
+    if (!started || start_hidden == on) return;   // LAN: no room to hide
+    start_hidden = on;
+    log("online: Start Match: the party room is %s", on ? "hidden for the countdown" : "shown again (cancelled)");
+    room_state();   // at once, not on the next frame
+}
+
+// ---- friends stats ticker (PS3 0x446c60, 0x43b30c, 0x43b290) ------------------------------------------------
+namespace {
+constexpr size_t kTickerLimit = 511;   // 0x43b290: an append must leave the text below 511 characters
+constexpr int kTickerFriends = 5, kTickerScan = 101;
+constexpr uint32_t kTickerCategory[7] = {0xc0cd1b00u, 0x49f5e231u, 0xb9602dbbu, 0x966fa9aeu,
+                                          0xcd3394e9u, 0x99e71e1bu, 0x780b62e0u};
+constexpr uint32_t kCurrencyPrefix = 0x9b5b3c66u;
+
+const char *ticker_game_text(uint32_t id) {
+    const char *t = guest<const char *(U2MP_GUEST *)(void *, uint32_t)>(0xcddc00)(image.base + 0x1066660, id);
+    return t ? t : "";
+}
+
+bool ticker_append(std::string &out, const std::string &s) {
+    if (out.size() + s.size() >= kTickerLimit) return false;
+    out += s;
+    return true;
+}
+
+uint64_t ticker_value(const PresenceData &d, int category) {
+    switch (category) {
+    case 0: return d.cash;
+    case 1: return d.kills;
+    case 2: return d.wins;
+    case 3: return d.losses;
+    case 4: return d.deaths;
+    case 5: return d.headshots;
+    case 6: return d.seconds;
+    default: return 0;
+    }
+}
+}  // namespace
+
+std::string ticker_time(uint64_t seconds) {
+    const uint64_t days = seconds / 86400, hours = seconds / 3600 % 24, minutes = seconds / 60 % 60;
+    char b[64];
+    if (days) std::snprintf(b, sizeof b, "%llud %lluh %llum", (unsigned long long)days, (unsigned long long)hours,
+                            (unsigned long long)minutes);
+    else if (seconds >= 3600) std::snprintf(b, sizeof b, "%lluh %llum", (unsigned long long)hours, (unsigned long long)minutes);
+    else std::snprintf(b, sizeof b, "%llum", (unsigned long long)minutes);
+    return b;
+}
+
+bool ticker_append_entry(std::string &out, const std::string &name, int category, uint64_t value) {
+    std::string v;
+    if (category == 0) v = std::string(ticker_game_text(kCurrencyPrefix)) + std::to_string(value);
+    else if (category >= 1 && category <= 5) v = std::to_string(value);
+    else if (category == 6) v = ticker_time(value);
+    else v = "Unknown Value!";
+    const size_t before = out.size();
+    if (ticker_append(out, name) && ticker_append(out, ": |@CFFF0C828|") && ticker_append(out, v) &&
+        ticker_append(out, "|@CFF999999|     "))
+        return true;
+    out.resize(before);
+    return false;
+}
+
+std::string stats_ticker_text() {
+    const int category = std::rand() % 7;
+    std::string out = std::string("|@CFFFFFFFF|") + ticker_game_text(kTickerCategory[category]) + ":|@CFF999999|      ";
+    if (!linked()) return out;
+    std::vector<std::pair<std::string, uint64_t>> pool;
+    for (size_t i = 0; i < friend_list.size() && i < size_t(kTickerScan); ++i) {
+        PresenceData d;
+        if (presence_of(friend_list[i], d) && d.key == room_key() && d.state != kPresMenu && d.version >= 3)
+            pool.emplace_back(npid_text(friend_list[i].npid), ticker_value(d, category));
+    }
+    for (int n = 0; n < kTickerFriends && !pool.empty(); ++n) {
+        const size_t pick = size_t(std::rand()) % pool.size();
+        if (!ticker_append_entry(out, pool[pick].first, category, pool[pick].second)) break;
+        pool.erase(pool.begin() + std::ptrdiff_t(pick));
+    }
+    return out;
+}
 
 }  // namespace u2mp::online
