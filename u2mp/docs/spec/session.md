@@ -1059,3 +1059,57 @@ Changed behaviour:
   kOpPartyIn posts it through `online_party_in`); else 0x10e {1} as before.
 - `online_reopen` also clears the net id -> NpId map (`npids`); the next roster / kIds fills it.
 - Start Match "too few" (5.x): co-op types 1, every other type 2 (owner rule).
+
+## Parity group E changes (2026-11-25, spec parity-e-flow2.md 7)
+
+New session message types (older peers ignore them, 4.2 "12..0x0f ignored" no longer holds for 12..15):
+
+| type | name | direction | layout after the type byte |
+|---|---|---|---|
+| 12 | ClockSync | client -> host / host -> client | `{0, u64 client steady us}` request; `{1, u64 echo, u32 host game clock}` reply |
+| 13 | PartyUp | client -> host / host -> client | `{0, u64 party, u8 size}` pressed (PS3 0x11a); `{1, u64 party room}` join (0x119); `{2}` back (0x118) |
+| 14 | Reserve | client -> host / host -> client | `{0, u64 room, u8 n, n x {u8 len, npid}}` request (0x100); `{1, u8 ok}` reply (0x101) |
+| 15 | LeaderLeave | host -> clients | nothing: the custom-game leader leaves, leave with it (0x117) |
+
+- **Silent peer (2.2).** `transport.on_timeout` logs `%s has left : timed out (nothing heard for 20 s)` with the
+  member's name before the normal "left" path; `net::kTimeoutSeconds` is 20 s in every mode (owner decision).
+- **Net clock (2.3).** Client, per frame (`clock_sync_frame`): while fewer than 8 samples and connected, a ClockSync
+  request every 20..120 ms (LCG, steady clock in us). Host: answers at once with the echo and `own_ticks()`. Client:
+  sample = round trip, offset = int32(host - own ticks) + half the round trip in ticks (300/s); after 8, the 4 with
+  the smallest round trip are averaged and the game clock (`0x1116180+0x204`) moves by the rounded average; log
+  `net clock: 8 samples, best 4 round trips %.1f..%.1f ms: clock moved by %+d ticks to the host's`. Restarts
+  (`net clock: synchronising again (%s)`) when a host is joined, at match setup (EstablishConnection entered), after
+  a coarse type 9 correction and when the transport closes. Type 9 (1 s, > 150 ticks) stays as the coarse fallback.
+  Not done: PS3 then cleared a per-tracker timing field (PS3 tracker +0x22c); its PS4 offset is not known.
+- **Slot manager (2.6), host of an online match room.** `slots_frame`: a new `online::match_room()` while hosting
+  starts a table (capacity `online::mm_slots()`, else 10; log `slot manager: room %llx, %d slots`) and reserves the
+  present players (our NpId + transport members) as one party. `reserve_party`: players without a reservation need
+  free slots = capacity - reservations - present players without one (outside the request); expired reservations of
+  absent players go first (`slot manager: Timeout User %s (party %u)`); all or nothing (`failed to reserve %d slot(s)
+  for a party of %zu (%d free)`); a new party id per request (`adding user` / `updating user %s: party %u`), expiry
+  now + 10 s; a request whose players all hold reservations only renews the hold. Reserve requests name the room
+  (others ignored: `request for room %llx ignored`); the reply goes to the sender. `admit_peer`: a Hello from an NpId
+  without a reservation is refused while no slot is free (`slot manager: %s refused: every slot is taken or
+  reserved`, every 20th try). Member left: `removing user`. The client sends a request when it reaches the owner of a
+  match room it joined (`online::take_led_party()` + our NpId); a refusal calls `online::reservation_refused()`.
+  Not done: the party ids are not written to the trackers (see parity-e-flow2.md 7, 2.6).
+- **Party Up (2.4).** `party_up_frame` (frame work): the wait popup is up when the top page is `0x471007a1` and
+  PAGE_MULTIPLAYER_POSTGAME `0x6b7378ea` is in the page stack. First frame: log, give-up = now + 15 s, the press
+  (party = `online::party_room_id()`, size `online::party_size()`; LAN: party 1, size = member count) goes to the
+  host (or is noted there). Host: 4 s after the first press, parties in press order are merged while the group stays
+  below 6 players (size = max(told size, pressed players)); a group of 2+ parties sends "join" with the first party's
+  room to the players of the other parties; everyone else gets "back". Answer: join = `online::party_up_join(room)`;
+  back = `online::mm_host_gone(.., false)` when a stranger hosts our matchmaking room; both then post mailbox 0x118
+  with the u64 at match session +0x10 (POSTGAME's consumer: pop, NET_SM 19, PAGE_MULTIPLAYER_MATCHMAKING). 15 s
+  without an answer: back. Log lines start with `party up:`.
+- **Voluntary leave (2.5).** Leave state entered with the leave byte `0x104f1c0` set = voluntary. Host in a custom
+  game (netInfo +0x2c4 == 2): LeaderLeave to all before kLobby. Client: LeaderLeave posts mailbox 0x117 with its own
+  netInfo +0x60 u64 (Playing::Update's consumer) and marks "asked by the leader". A client's own voluntary leave
+  (not asked): after the existing teardown, `host_own_party()` leads a party of its own (online link or UDP port,
+  never UNCHARTED_U2MP_JOIN; log `party: left the party with the match (PS3 Leave::Enter): leading a party of our
+  own`).
+- **Players Met (2.9).** Playing entered (every match and round start): the names (+0x20) of the used, not excluded
+  trackers other than the local one go to `progression_note_met`.
+- **Version text (2.11).** Page handler, once per frame clock, NET_SM != 0 and package `menu-temple` in state 7
+  with flag 0x80: `hud_menu_text(1140, 60, 0.4, "%i.%02i.%03i")` of 1, bits 16..23 and bits 0..15 of netInfo +0
+  (0 there: PS3's 0x0009004e, "1.09.078").

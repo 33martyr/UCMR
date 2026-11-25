@@ -5,13 +5,16 @@
 // game-facing side (which events go where) is in a separate file; this one only moves messages.
 //
 // Wire format (little-endian), one UDP datagram = one packet, at most kMaxPacket bytes:
-//   u32 magic 'U2MP'   u8 version   u8 kind (0 data, 1 hello, 2 welcome, 3 bye, 4 ping)
+//   u32 magic 'U2MP'   u8 version   u8 kind (0 data, 1 hello, 2 welcome, 3 bye, 4 ping, 5 pong)
 //   u16 sequence       u16 ack      u32 ack_bits   (bit i: sequence ack-1-i was received)
 //   u8 flags (bit 0: the ack fields are valid; clear until the sender has received a packet)
 //   messages: { u8 channel (0 unreliable, 1 reliable), u16 reliable id (channel 1 only),
 //               u16 length, payload }...
 // Reliable messages are resent in every packet until a packet carrying them is acknowledged,
 // and delivered in order (by reliable id). Unreliable ones are sent once.
+// Ping / pong (PS3 NetConnectionUpdate's 10 s ping, spec parity-e-flow2.md 2.3): the header, then the
+// sender's clock as an f64; the pong echoes it. Every connection pings every kPingSeconds and keeps the last
+// round trip. Older peers ignore both kinds (they still count as "heard").
 #pragma once
 #include <utility>
 #include <cstdint>
@@ -26,7 +29,10 @@ constexpr size_t kMaxPacket = 1400;           // the game's 1200-byte packets pl
 constexpr size_t kMaxPeers = 10;              // Uncharted 2 multiplayer: 10 players
 constexpr uint32_t kMagic = 0x504d3255;       // "U2MP"
 constexpr uint8_t kVersion = 1;
-constexpr double kTimeoutSeconds = 10.0;
+// A peer that sent nothing (no data, no keepalive) for this long is dropped: PS3's silent-peer limit of the
+// matchmaking check (spec parity-e-flow2.md 2.2); owner decision: in every mode, custom games too.
+constexpr double kTimeoutSeconds = 20.0;
+constexpr double kPingSeconds = 10.0;
 
 struct Address {
     uint32_t ip = 0;      // network byte order
@@ -45,6 +51,8 @@ public:
     double last_sent = 0;
     bool connected = false;
     double connected_at = 0;        // when the host accepted this peer's Hello
+    double last_ping = 0;           // when our last ping went out (0: none yet)
+    int rtt_ms = -1;                // the last ping's round trip in milliseconds, -1 none yet
     void reset() { *this = Connection(); }
     bool heard_data() const { return any_received_; }   // a data packet came on this connection
 
@@ -104,8 +112,12 @@ public:
     bool connected() const;
     // The address of the peer in `slot` (slot 0 = the host when we are a client); false when nobody is there.
     bool peer_address(uint8_t slot, Address &out) const;
+    // The last measured round trip to the peer in `slot` in milliseconds; -1 when none yet or nobody is there.
+    int rtt_ms(uint8_t slot) const;
     Deliver on_message;
     PeerEvent on_peer;
+    // Called just before on_peer(slot, false) when the peer is dropped for silence (kTimeoutSeconds).
+    std::function<void(uint8_t slot)> on_timeout;
     // Host: asked before a new peer gets a slot; false turns the Hello away as if the party were full.
     std::function<bool(const Address &from)> admit;
     uint16_t bound_port() const { return port_; }

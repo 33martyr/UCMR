@@ -122,7 +122,7 @@ static void rejoin_same_address() {
             now += 0.016;
         }
         // The host goes quiet for the client (only the client pumps): it times out without a Bye.
-        for (int i = 0; i < 12 && first.connected(); ++i) {
+        for (int i = 0; i < 22 && first.connected(); ++i) {   // kTimeoutSeconds is 20 s
             now += 1.0;
             first.pump(now);
         }
@@ -180,11 +180,58 @@ static void refused_join() {
     std::printf("refused join: %d Hellos refused, then joined %d\n", asked - 1, joined);
 }
 
+// 5. Silent-peer limit (spec parity-e-flow2.md 2.2): a client that stops pumping is still there after 19 s of
+//    silence and dropped after 20 s, with the timeout callback before the peer event. The 10 s ping (2.3) has
+//    measured a round trip by then.
+static void silent_peer_and_ping() {
+    Transport host, client;
+    CHECK(host.host(0));
+    Address to;
+    CHECK(Address::parse("127.0.0.1:" + std::to_string(host.bound_port()), 0, to));
+    CHECK(client.join(to));
+    int left = 0, timed_out = 0;
+    bool order_ok = true;
+    host.on_peer = [&](uint8_t slot, bool in) {
+        if (!in && slot == 1) {
+            order_ok = order_ok && timed_out == 1;
+            ++left;
+        }
+    };
+    host.on_timeout = [&](uint8_t slot) { timed_out += slot == 1; };
+    double now = 1.0;
+    for (int i = 0; i < 200 && !client.connected(); ++i) {
+        client.pump(now);
+        host.pump(now);
+        now += 0.016;
+    }
+    CHECK(client.connected());
+    for (int i = 0; i < 20; ++i) {   // both sides pump: pings go out at once and come back
+        client.pump(now);
+        host.pump(now);
+        now += 0.016;
+    }
+    CHECK(host.rtt_ms(1) >= 0 && client.rtt_ms(0) >= 0);
+    const double silent_from = now;
+    while (now < silent_from + 19.0) {   // the client goes quiet
+        host.pump(now);
+        now += 0.25;
+    }
+    CHECK(left == 0 && timed_out == 0);
+    while (now < silent_from + 21.0) {
+        host.pump(now);
+        now += 0.25;
+    }
+    CHECK(left == 1 && timed_out == 1 && order_ok);
+    CHECK(host.rtt_ms(1) == -1);
+    std::printf("silent peer: kept 19 s, dropped after 20 s (timeout %d, left %d); rtt measured\n", timed_out, left);
+}
+
 int main() {
     lossy_link();
     loopback();
     rejoin_same_address();
     refused_join();
+    silent_peer_and_ping();
     std::printf(failures ? "u2mp net: %d FAILED\n" : "u2mp net: all passed\n", failures);
     return failures ? 1 : 0;
 }

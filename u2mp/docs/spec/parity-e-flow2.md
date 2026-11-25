@@ -425,11 +425,11 @@ co-op exclusion is in session.cpp).
 | 43bc0c | ResettingReady / Active destructor | COVERED | PS4 destructors |
 | 43bc30 | "Save Game Stats" thread body (SQS upload, thread exit) | PLATFORM | progression.cpp local stats (3.2) |
 | 43bc80 | ResettingReady::Enter | COVERED | PS4 5f0fc0 |
-| 43bcbc | add remote players to Players Met + save | MISSING | 2.9 (progression.cpp records at Leave only) |
+| 43bcbc | add remote players to Players Met + save | COVERED | 2.9: session.cpp `note_players_met` at every Playing entry -> progression.cpp `progression_note_met` |
 | 43bd28 | WaitReady::Enter | COVERED | PS4 5f2d90 |
 | 43bd68 | TaskManagerOnline task factory | COVERED | PS4 TaskManagerOnline |
-| 43bdd0 | NpNetUpdate: handshake, timeouts, voice gating, clock requests | MISSING | 2.1, 2.2, 2.3; rest PLATFORM 3.1 (net.cpp, gamenet.cpp, session.cpp) |
-| 43cdb8 | NetConnectionUpdate: recv/send, ping, clock sync | MISSING | 2.3; rest PLATFORM 3.1 (net.cpp) |
+| 43bdd0 | NpNetUpdate: handshake, timeouts, voice gating, clock requests | COVERED | 2.1 voice.cpp `update_gating`; 2.2 net.cpp 20 s + session.cpp log; 2.3 session.cpp ClockSync; rest PLATFORM 3.1 |
+| 43cdb8 | NetConnectionUpdate: recv/send, ping, clock sync | COVERED | 2.3 session.cpp ClockSync, net.cpp 10 s ping / pong; rest PLATFORM 3.1 |
 | 43d5d8 | match listener slot 5: kicked | COVERED | PS4 5e9f20 |
 | 43d610 | match listener slot 1: joined | COVERED | PS4 5e9db0 |
 | 43d660 | match listener slot 0: created | COVERED | PS4 5e9d90 |
@@ -438,21 +438,21 @@ co-op exclusion is in session.cpp).
 | 43d9e0 | match listener slot 3: member left (log, slot release, PlayerLeft) | COVERED | session.cpp player_left; slot release in 2.6 |
 | 43dad8 | match listener slot 2: member added, connect, open channel | PLATFORM | net.cpp / session.cpp peer events (3.1) |
 | 43dcd8 | NetEventConnectionDone apply: connection established | PLATFORM | gamenet attach marks connected (3.1) |
-| 43df00 | Party Up wait popup handler (post-match regroup) | MISSING | 2.4 (PS4 5ec4e0 = ret) |
+| 43df00 | Party Up wait popup handler (post-match regroup) | COVERED | 2.4 session.cpp `party_up_frame` / `party_up_group` (PS4 5ec4e0 stays ret) |
 | 43e680 | "Joining Party..." popup handler (wait for 0x10c, join) | PLATFORM | online::join_friend (3.3) |
 | 43e99c | NET_SM -> START_MATCHMAKING | COVERED | PS4 5eba40 + frontend3.cpp |
 | 43ea8c | PAGE_MULTIPLAYER_LEAVING_GAME | COVERED | PS4 5eb7d0 + session.cpp |
 | 43ec08 | ShowResults::Enter | COVERED | gameplay3.cpp; voice reset in 2.1; stats PLATFORM |
 | 43edc8 | PreResetting::Enter (NET_SM 27) | COVERED | PS4 5f13f0 |
 | 43f5e8 | LIST_PLAYERSMET row | COVERED | remaining.cpp B11 |
-| 43f830 | LIST_FRIENDS row popup | MISSING | 2.8 (remaining.cpp B9) |
+| 43f830 | LIST_FRIENDS row popup | COVERED | 2.8 remaining.cpp B9 (no Join / Invite for a party member) |
 | 43ff60 | Join Party action (0x0ace8463) | PLATFORM | online::join_friend (3.3) |
 | 4400bc | invite wait page (party room ready -> invite dialog) | PLATFORM | online::invite_friend (3.3) |
 | 440130 | ResettingReady::Update | COVERED | PS4 5f0ec0 |
 | 440334 | match listener slot 6: owner changed ("New host") | COVERED | PS4 5e9f30 via session.cpp / online.cpp |
 | 440478 | LoadLevels::Update (host left -> leave) | COVERED | PS4 5f2dc0 |
 | 4405c4 | LoadLevels::Enter | COVERED | PS4 5f2e50 |
-| 440620 | BUTTON_MULTIPLAYER_PLAYER0..9 popup | MISSING | 2.7 (remaining.cpp B8) |
+| 440620 | BUTTON_MULTIPLAYER_PLAYER0..9 popup | COVERED | 2.7 remaining.cpp `match_player_row` |
 | 440948 | BUTTON_MULTIPLAYER_INVITES (PSN invite inbox) | PLATFORM | remaining.cpp B18 join list (3.3) |
 | 4409c4 | WaitReady::Update (start time, HostMigrate, host left) | COVERED | PS4 5f26d0; migration PLATFORM 3.5 |
 | 440c38 | message channel writer (net-time stamp) | PLATFORM | net.cpp (3.1) |
@@ -462,7 +462,7 @@ co-op exclusion is in session.cpp).
 | 4413a0 | PreResetting::Update | COVERED | PS4 5f1390 |
 | 441440 | BUTTON_CLANTAG (on-screen keyboard) | PLATFORM | clantag.cpp (3.4) |
 | 4416e0 | EstablishConnection::Enter (net players per member) | COVERED | PS4 5f3050 + session.cpp fill_net_players |
-| 4417f0 | BUTTON_MULTIPLAYER_PARTY_PLAYER0..9 popup | MISSING | 2.7 (Unmute label) |
+| 4417f0 | BUTTON_MULTIPLAYER_PARTY_PLAYER0..9 popup | COVERED | 2.7 remaining.cpp `player_options` (Unmute label) |
 | 441b88 | Leave::Update | COVERED | PS4 5eff30 |
 | 441d78 | pause gate for the per-frame pause state | COVERED | engine (open question 6) |
 | 441dd8 | "in a running net match" query | COVERED | engine callers |
@@ -479,25 +479,63 @@ co-op exclusion is in session.cpp).
 | 4443f8 | PAGE_MULTIPLAYER_PLAYER_OPTIONS (keyboard poll) | PLATFORM | remaining.cpp B23 + clantag.cpp (3.4) |
 | 444660 | Playing::Enter (NET_SM 26, StartNetGame) | COVERED | PS4 5f23e0; Players Met part = 2.9 |
 | 445020 | PAGE_MULTIPLAYER_CONNECTING | PLATFORM | session.cpp skips it (3.2) |
-| 445608 | Leave::Enter | MISSING | 2.5 (PS4 5f00d0 has the normal path) |
+| 445608 | Leave::Enter | COVERED | 2.5 session.cpp LeaderLeave (0x117), `host_own_party`; PS4 5f00d0 the normal path |
 | 4465c8 | PAGE_MULTIPLAYER (Callback_Multiplayer) | COVERED | PS4 5eb1a0 + session.cpp |
-| 446c60 | lobby ticker builder | MISSING | 2.10 (group D 2.10) |
-| 447248 | per-frame net page update (ticker refresh, version text) | MISSING | 2.10, 2.11 |
+| 446c60 | lobby ticker builder | MISSING | 2.10: text built (online.cpp, own entry first); the PS4 call that shows it is not known |
+| 447248 | per-frame net page update (ticker refresh, version text) | MISSING | 2.11 version text done (session.cpp `draw_version_text`); 2.10 refresh needs the ticker control |
 | 447a5c | NetInit thread | PLATFORM | netinit.cpp, netpatch.cpp, online.cpp (3.2) |
 | 4496ac | heartbeat reply parser | PLATFORM | none; party size shown (3.2) |
 | 449ae8 | NP Basic event handler | PLATFORM | online.cpp (3.2) |
 | 449e88 | NdiNetUpdate per frame | PLATFORM | session.cpp frame work (3.1) |
-| 4d987c | slot manager: remove user | MISSING | 2.6 |
-| 4d9a78 | slot manager: remove a list of users | MISSING | 2.6 |
-| 4d9af0 | slot manager: party id of a user | MISSING | 2.6 (PS4 AssignTeams writes a constant) |
-| 4d9be8 | slot manager: add / update user (10 s expiry) | MISSING | 2.6 |
-| 4da168 | slot manager: reserve a party as one group | MISSING | 2.6 |
-| 4da278 | slot manager: answer reservation requests 0x100 -> 0x101 | MISSING | 2.6 (online.cpp checks free slots only) |
-| 4da3f8 | slot manager: init with capacity | MISSING | 2.6 |
+| 4d987c | slot manager: remove user | COVERED | 2.6 session.cpp `release_reservation` |
+| 4d9a78 | slot manager: remove a list of users | COVERED | 2.6 session.cpp `reserve_party` (all or nothing before adding) |
+| 4d9af0 | slot manager: party id of a user | MISSING | 2.6: ids kept in the table, not fed to AssignTeams (patch site bytes not in the spec, 7) |
+| 4d9be8 | slot manager: add / update user (10 s expiry) | COVERED | 2.6 session.cpp `reserve_party` |
+| 4da168 | slot manager: reserve a party as one group | COVERED | 2.6 session.cpp `reserve_party`, `slots_frame` (own party) |
+| 4da278 | slot manager: answer reservation requests 0x100 -> 0x101 | COVERED | 2.6 session.cpp `on_reserve` (Reserve message), `admit_peer` |
+| 4da3f8 | slot manager: init with capacity | COVERED | 2.6 session.cpp `slots_frame` |
 | 4da434 | empty function | COVERED | none |
 | 4da438 | static initialiser body | COVERED | none |
 | 4da474 | static initialiser | COVERED | none |
 | 4da484 | bitstream read helper of NetCharacter state code | COVERED | snapshot path (netanim.md) |
 | 4da504 | optional-byte read helper (default 75) of NetCharacter state code | COVERED | snapshot path (netanim.md) |
 
-Counts: COVERED 51, PLATFORM 18, MISSING 17.
+Counts: COVERED 65, PLATFORM 18, MISSING 3 (before the implementation: 51 / 18 / 17).
+
+## 7. Implementation (2026-11-25, branch `u2mp-ps3-parity-2`)
+
+Owner decisions: open question 1 = **20 s silent-peer limit in every mode** (custom games too); question 5 = **add
+the version text** as PS3 does; minimum players stay 2 in every mode, 1 in co-op (group F); the lobby keeps the party
+size where PS3 showed the daily player count (question 2). The three script values PS3 held during results are
+skipped (meaning unknown).
+
+| Item | Status | Where / what |
+|---|---|---|
+| 2.1 | done | voice.cpp `update_gating` (from `voice::frame`): while NGM state `+0x1e80` == 2 and a local tracker exists, every used, not excluded remote tracker (net id `+0x120`, team `+0x134`) gets heard / silenced: teammates always, enemies when both characters are alive (handle `+0x10/+0x18` live, vtable slot 74) and closer than 12 (guest `0x665f70` positions); type 10: living hear the living (enemies within 12), dead hear the dead; netInfo `+0x2c8` set: all silenced. NET_SM 29 (results) and NET_SM < 22 put everyone back. A silenced talker's packets are dropped after the talking-icon time stamp, its buffer is cleared; own mutes and the stranger mute still win. |
+| 2.2 | done | net.h `kTimeoutSeconds` 20 s; `Transport::on_timeout` -> session.cpp log `%s has left : timed out (nothing heard for 20 s)`. |
+| 2.3 | done | session.cpp ClockSync (type 12, see session.md "Parity group E changes"): 8 samples at 20..120 ms, best 4 by round trip, half-RTT correction, game clock moved once per connection setup; net.cpp ping / pong every 10 s per connection, `Transport::rtt_ms(slot)`. |
+| 2.4 | done (PC flow) | session.cpp `party_up_frame` / `party_up_group` / `party_up_answer` (type 13); online.cpp `party_up_join`. The wait popup is recognised by its page (`0x471007a1` over POSTGAME); PS4 `0x5ec4e0` stays `ret`. |
+| 2.5 | done | session.cpp: custom-game leader's voluntary leave sends LeaderLeave (type 15) before kLobby; members post 0x117 (PS4 consumer) and stay; a member's own voluntary leave ends with `host_own_party` (a party of its own; the matchmaking leader too: the party room hands the party on). |
+| 2.6 | partly | session.cpp slot manager (type 14, `slots_frame`, `reserve_party`, `admit_peer`, member left), online.cpp `take_led_party` / `reservation_refused`. **Not done: feeding the party ids to AssignTeams** (below). |
+| 2.7 | done | remaining.cpp `player_options` (Unmute), `match_player_row` (Mute / Unmute, Mute All, Unmute All, no host options, no title), voice.cpp `set_muted`. |
+| 2.8 | done | remaining.cpp `friend_options`. |
+| 2.9 | done | session.cpp `note_players_met` (every Playing entry), progression.cpp `progression_note_met`, progression_store.cpp `note_met`. Compatible with group G: one call with a name list; filtering friends / batching can go into `note_players_met`. |
+| 2.10 | not possible | online.cpp `stats_ticker_text` now puts the local player's entry first (LAN: own entry only). **Missing call:** the PS4 function (or control field) that sets the ticker control's text, and its "visible" / "finished a full scroll" state, are not named by this spec or group D; without them nothing shows the text and the 10 s / full-scroll refresh cannot be wired. |
+| 2.11 | done | session.cpp `draw_version_text` (page handler) -> hud.cpp `hud_menu_text`: "1.09.078" from netInfo +0 (PS4 leaves it 0, so PS3's 0x0009004e stands in) at (1140, 60), scale 0.4, while `menu-temple` is ready. |
+
+**2.6 party ids, not possible from this spec:** the PS4 AssignTeams store loop at `0x640200..0x640245` is named, but
+not its instruction bytes, the register that holds the constant, or a safe hook point. Without them neither a patch
+(it must be byte-checked) nor a wrapper is possible (`replace_function` drops the original; the clean-room rule forbids
+reading the code). Needed: the bytes of the store to tracker `+0x128` (or of the instruction that loads the constant)
+and the register holding the tracker pointer there, so the value can come from a host call `party_id(tracker)` that
+looks the tracker's NpId up in the slot table. Note also: session.cpp `add_tracker` writes the money rank to `+0x128`
+(and `+0x130`) for the score lists; the parity-e spec names `+0x128` the party id. One of the two is wrong and must be
+settled before the patch.
+
+Remaining differences from PS3: the per-tracker timing field PS3 cleared after the clock sync (PS3 `+0x22c`, PS4
+offset unknown); the clock samples use the frame-granular game clock on both sides (error up to a frame); the Party Up
+popup texts are what the PS4 page shows (no "Joining Party..." popup `0xe4e03363`), a match host that did not press
+Party Up still groups (PS3 grouped only in the host's own popup), and the party room is not "made visible again" on
+opening; members a leader told to follow are on their way before the owner's slot reply (PC transport order), so after
+a refusal those who already got a free slot stay and the others fall to the existing "owner not reached" path; the
+ticker is not shown (2.10); AssignTeams still writes the constant (2.6).

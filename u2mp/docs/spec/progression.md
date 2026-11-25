@@ -794,3 +794,10 @@ Build a module image in a temp folder and point `runtime_file_translate` at it.
 - Rank lookup (1.5.6): last = count - 1 is computed without 32-bit wrap, so a count of INT_MIN gives rank 0.
 - Install (1.6): each board id must equal 300 + i and its 4 bytes must lie inside the image (as image.matches
   checks); a too small image fails the board check.
+
+## Parity group E changes (2026-11-25, spec parity-e-flow2.md 2.9)
+
+`progression_note_met(names)` (session.cpp at every Playing entry): `store_api::note_met` adds each name (cut to
+31, not empty, not the local name) to `recent` with no statistics or sets a known one's `last_seen` to now, then the
+same remove-local / sort / cap as `note_match`; when anything changed the store file is written (no NetPlayerData
+publish). The Leave statistics (`note_match`) are unchanged and add up on the same entries.

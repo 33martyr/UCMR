@@ -169,6 +169,17 @@ bool save(const std::string &path, const Store &store, uint64_t now) {
     return !ec;
 }
 
+// Drops the local player if an older file listed them as a remote one, then orders and caps by recency.
+static void trim_recent(Store &store) {
+    if (!store.local_name.empty())
+        store.recent.erase(std::remove_if(store.recent.begin(), store.recent.end(),
+                                          [&](const PlayerStats &p) { return p.name == store.local_name; }),
+                           store.recent.end());
+    std::stable_sort(store.recent.begin(), store.recent.end(),
+                     [](const PlayerStats &a, const PlayerStats &b) { return a.last_seen > b.last_seen; });
+    if (store.recent.size() > kMaxRecent) store.recent.resize(kMaxRecent);
+}
+
 void note_match(Store &store, const std::vector<MatchPlayer> &players, uint64_t now) {
     for (const MatchPlayer &m : players) {
         if (m.name.empty()) continue;
@@ -195,14 +206,26 @@ void note_match(Store &store, const std::vector<MatchPlayer> &players, uint64_t 
         it->rank = m.rank;
         it->last_seen = now;
     }
-    // Drop the local player if an older file listed them as a remote one, then cap by recency.
-    if (!store.local_name.empty())
-        store.recent.erase(std::remove_if(store.recent.begin(), store.recent.end(),
-                                          [&](const PlayerStats &p) { return p.name == store.local_name; }),
-                           store.recent.end());
-    std::stable_sort(store.recent.begin(), store.recent.end(),
-                     [](const PlayerStats &a, const PlayerStats &b) { return a.last_seen > b.last_seen; });
-    if (store.recent.size() > kMaxRecent) store.recent.resize(kMaxRecent);
+    trim_recent(store);
+}
+
+bool note_met(Store &store, const std::vector<std::string> &names, uint64_t now) {
+    bool changed = false;
+    for (const std::string &n : names) {
+        const std::string name = n.substr(0, kNameMax);
+        if (name.empty() || name == store.local_name) continue;
+        auto it = std::find_if(store.recent.begin(), store.recent.end(),
+                               [&](const PlayerStats &p) { return p.name == name; });
+        if (it == store.recent.end()) {
+            store.recent.push_back(PlayerStats{});
+            it = store.recent.end() - 1;
+            it->name = name;
+        }
+        changed = changed || it->last_seen != now;
+        it->last_seen = now;
+    }
+    if (changed) trim_recent(store);
+    return changed;
 }
 
 std::vector<Entry> board(const Store &store, const LocalStats &local, int b) {

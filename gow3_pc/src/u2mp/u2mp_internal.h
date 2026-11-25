@@ -75,6 +75,9 @@ void install_scripttime(int &installed); // scripttime.cpp: net-timer track-grou
 void install_hud(int &installed);       // hud.cpp: multiplayer HUD draw, PS3 0x8aef68 (PORT-HUD.md)
 void install_medals(int &installed);    // medals.cpp: default icon for medals net.pak lacks
 void hud_weapon_tick();                 // hud.cpp: weapon panel trigger, from the frame (not the HUD draw)
+// hud.cpp: white text through the game's DrawText (0xcc9a70) at (x, y) of the 1280x720 canvas; nothing when
+// install_hud did not check DrawText's bytes. The menu version text (session.cpp, spec parity-e-flow2.md 2.11).
+void hud_menu_text(float x, float y, float scale, const char *text);
 void install_scoreboard(int &installed); // scoreboard.cpp: in-match scoreboard, PS3 0x4cbf00 / 0x4cbc10
 void sync_netstat_ranks();               // session.cpp: copy current NetStatGame levels from the trackers
 void show_round_results();               // scoreboard.cpp: round/end results page from the session state

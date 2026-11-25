@@ -779,3 +779,14 @@ None. Nothing is patched and `installed` is not changed.
   undefined.
 - In B6 the npc lookup does not stop at the end node while walking; it only rejects the end node
   as the final result. Keep that.
+
+## Parity group E changes (2026-11-25, spec parity-e-flow2.md 2.7, 2.8)
+
+- B8 party rows: the first option is "Unmute" `0xfa9c4838` while `voice::muted(id)`, else "Mute" `0xffbbac12`
+  (callback `0x6547d63c`); Promote / Kick as before.
+- B8 match rows (`match_player_row`, PS3 0x440620): no title (descriptor title 0), no Kick / Promote. Options:
+  Mute / Unmute (callback `0x7273924c`) unless the row is the local player; "Mute All" `0xd381d5d8` (callback
+  `0x8d703d6c`, registered: `voice::set_muted(id, true)` for every other player of the matchmaking list) unless all
+  of them are muted; "Unmute All" `0x3efad3ba` (callback `0x65be38af`) unless none is. An empty row logs `player
+  options: no player in row %d`; no options: no popup.
+- B9 friends: Join and Invite To Party only when `online::friend_view(r).party_member` is false.

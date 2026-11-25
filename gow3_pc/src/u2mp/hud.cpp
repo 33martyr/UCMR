@@ -30,6 +30,7 @@ namespace {
 // ---------------------------------------------------------------------------------------------
 
 uint64_t abs_of(uint64_t offset) { return reinterpret_cast<uint64_t>(image.base) + offset; }
+bool menu_text_ok = false;   // install_hud checked DrawText's bytes (hud_menu_text)
 
 template <typename T> T load(uint64_t address) {
     T value;
@@ -1077,7 +1078,7 @@ void markers(uint64_t element) {
     float dt = float(global<int32_t>(kClock1Delta)) * kPerTick;
     float fade_in = dt * 4.0f;
     float fade_out = dt * -4.0f;
-    uint32_t mask = global<uint32_t>(kMarkerMask);
+    [[maybe_unused]] uint32_t mask = global<uint32_t>(kMarkerMask);   // read as before; the markers do not use it
     float ha = hud_alpha();
 
     for (int32_t i = 0; i < load<int32_t>(mk) && i < 8; ++i) {
@@ -1537,6 +1538,7 @@ void install_hud(int &installed) {
             return;
         }
     }
+    menu_text_ok = true;   // DrawText's bytes are checked: hud_menu_text may use it
     if (!is_ret_stub(kDrawStub)) {
         log("hud: 0x%llx is not the ret stub, multiplayer HUD not installed", (unsigned long long)kDrawStub);
         return;
@@ -1586,5 +1588,9 @@ void install_hud(int &installed) {
 }
 
 void hud_weapon_tick() { weapon_tick(); }
+
+void hud_menu_text(float x, float y, float scale, const char *text) {
+    if (menu_text_ok) draw_text(x, y, scale, V4{1.0f, 1.0f, 1.0f, 1.0f}, kTextNormal, 999999.0f, 40.0f, text);
+}
 
 }  // namespace u2mp

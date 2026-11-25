@@ -333,9 +333,122 @@ void open_audio() {
     if (!playback && !capture) audio_failed = true;
 }
 
+// ---- in-match voice gating (PS3 NpNetUpdate 0x43bdd0, ShowResults::Enter 0x43ec08; spec parity-e-flow2.md 2.1) --
+// Each remote talker is heard (gain 1) or not (gain 0), recomputed every frame while the match plays; outside
+// play the last values stay, and the results (NET_SM 29) and the lobby side (NET_SM < 22) put everyone back to 1.
+// The player's own mutes and the matchmaking stranger mute are separate and still win.
+std::atomic<bool> silenced[kMaxSpeakers];   // zero (static) = heard
+bool gating_on = false;
+int32_t gating_sm = 0;
+
+constexpr uint64_t kNetSm = 0x14ce97c;
+constexpr uint64_t kNetInfo = 0x104f1c8;
+constexpr uint64_t kVoiceOff = kNetInfo + 0x2c8;   // the "voice off" option (PS3 netInfo +0x2b8)
+constexpr uint64_t kNgm = 0x113b760;
+constexpr uint64_t kNgmState = kNgm + 0x1e80;      // 2 = playing
+constexpr uint64_t kTrackers = kNgm + 0x10;
+constexpr uint64_t kTrackerStride = 0x2c0;
+constexpr uint64_t kPlayerPosition = 0x665f70;     // guest (vec4 *out, tracker *), as visibility.cpp
+constexpr uint64_t kLookup = 0xa15e70;
+constexpr uint32_t kNetGamesId = 0x3b9a067d;
+constexpr float kEnemyRange = 12.0f;
+constexpr int32_t kElimination = 10;
+
+template <typename T> T peek(const uint8_t *p) {
+    T v;
+    std::memcpy(&v, p, sizeof v);
+    return v;
+}
+const uint8_t *game(uint64_t offset) { return image.base + offset; }
+
+int32_t current_game_type() {
+    const int16_t index = peek<int16_t>(game(kNgm + 0x1ca0));
+    const auto *table = reinterpret_cast<const uint8_t *(U2MP_GUEST *)(uint32_t)>(image.base + kLookup)(kNetGamesId);
+    if (!table || index < 0 || index >= peek<int32_t>(table)) return -1;
+    const uint8_t *records = peek<const uint8_t *>(table + 8);
+    return records ? peek<int32_t>(records + 0x90 * uint64_t(index) + 0xc) : -1;
+}
+
+// The tracker's character exists and is alive: its handle (+0x10 slot, +0x18 id) resolves and the character's
+// alive test (vtable slot 74) says so.
+bool character_alive(const uint8_t *tracker) {
+    const uint8_t *slot = peek<const uint8_t *>(tracker + 0x10);
+    const uint32_t id = peek<uint32_t>(tracker + 0x18);
+    if (!slot || !id) return false;
+    uint8_t *character = peek<uint8_t *>(slot);
+    if (!character || peek<uint32_t>(character + 0x44) != id) return false;
+    const uint8_t *vtable = peek<const uint8_t *>(character);
+    const uint64_t fn = vtable ? peek<uint64_t>(vtable + 74 * 8) : 0;
+    const uint64_t base = uint64_t(uintptr_t(image.base));
+    if (fn < base || !image.executable(fn - base, 1)) return false;
+    return reinterpret_cast<uint8_t(U2MP_GUEST *)(void *)>(fn)(character) != 0;
+}
+
+void set_audible(uint8_t id, bool on) {
+    if (!silenced[id].exchange(!on) && !on) {   // just silenced: drop what is already buffered
+        std::lock_guard<std::mutex> lock(play_mutex);
+        if (speakers[id]) speakers[id]->jitter.clear();
+    }
+}
+
+void all_audible(const char *why) {
+    for (uint8_t id = 0; id < kMaxSpeakers; ++id) set_audible(id, true);
+    if (gating_on) log("voice: every player heard again (%s)", why);
+    gating_on = false;
+}
+
+void update_gating() {
+    if (!image.base) return;
+    const int32_t sm = peek<int32_t>(game(kNetSm));
+    if (sm != gating_sm) {
+        if (sm == 29) all_audible("results");   // PS3 ShowResults::Enter: every remote voice at 1.0
+        gating_sm = sm;
+    }
+    if (sm < 22) {
+        if (gating_on) all_audible("lobby");
+        return;
+    }
+    const uint8_t *local = peek<const uint8_t *>(game(kNgm));
+    if (peek<int32_t>(game(kNgmState)) != 2 || !local) return;   // not playing: nothing changes
+    const int32_t type = current_game_type();
+    const bool voice_off = peek<uint8_t>(game(kVoiceOff)) != 0;
+    if (!gating_on) log("voice: in-match gating on (game type %d%s)", int(type), voice_off ? ", voice off" : "");
+    gating_on = true;
+    const bool local_alive = character_alive(local);
+    const int32_t local_team = peek<int32_t>(local + 0x134);
+    const uint32_t local_id = peek<uint32_t>(local + 0x120);
+    alignas(16) float here[4] = {};
+    if (local_alive) reinterpret_cast<uint64_t(U2MP_GUEST *)(float *, const uint8_t *)>(image.base + kPlayerPosition)(here, local);
+    for (int i = 0; i < 10; ++i) {
+        const uint8_t *t = game(kTrackers + uint64_t(i) * kTrackerStride);
+        const uint32_t id = peek<uint32_t>(t + 0x120);
+        if (t == local || id == local_id || !id || id >= kMaxSpeakers || t[0x20] == 0 || t[0x26c] != 0) continue;
+        bool on;
+        if (voice_off) {
+            on = false;
+        } else {
+            const bool alive = character_alive(t);
+            const bool enemy = peek<int32_t>(t + 0x134) != local_team;
+            bool near = false;
+            if (enemy && alive && local_alive) {
+                alignas(16) float there[4] = {};
+                reinterpret_cast<uint64_t(U2MP_GUEST *)(float *, const uint8_t *)>(image.base + kPlayerPosition)(there, t);
+                const float dx = there[0] - here[0], dy = there[1] - here[1], dz = there[2] - here[2];
+                near = dx * dx + dy * dy + dz * dz < kEnemyRange * kEnemyRange;
+            }
+            if (type == kElimination)   // the dead talk among themselves; the living hear the living
+                on = local_alive ? alive && (!enemy || near) : !alive;
+            else                        // teammates always; enemies within 12 m while both characters exist
+                on = !enemy || near;
+        }
+        set_audible(uint8_t(id), on);
+    }
+}
+
 // A member left (or the slot changed hands): forget its stream and mute.
 void forget(uint8_t id) {
     mutes[id] = false;
+    silenced[id] = false;
     std::lock_guard<std::mutex> lock(play_mutex);
     speakers[id].reset();
 }
@@ -368,7 +481,9 @@ void stop() {
         present[id] = false;
         speakers[id].reset();   // no playback callback is left to race with
         mutes[id] = false;
+        silenced[id] = false;
     }
+    gating_on = false;
     gate = Gate{};
 }
 
@@ -385,6 +500,7 @@ void frame() {
         others = others || (here && id != me);
     }
     if (others && !audio_open) open_audio();
+    update_gating();
     if (config.mode == Mode::PushToTalk) {
         const bool *keys = SDL_GetKeyboardState(nullptr);
         ptt_down.store(keys && keys[config.ptt], std::memory_order_relaxed);
@@ -427,6 +543,7 @@ void receive(uint8_t slot, const uint8_t *data, size_t size) {
     if (matchmaking::strangers_muted() && session::party_stranger(speaker)) return;
     const uint16_t sequence = uint16_t(data[1] | data[2] << 8);
     heard_ms[speaker].store(now_ms(), std::memory_order_relaxed);
+    if (silenced[speaker]) return;   // in-match gating: PS3 set this voice's playback volume to 0
     std::lock_guard<std::mutex> lock(play_mutex);
     if (!speakers[speaker]) speakers[speaker] = std::make_unique<Speaker>();
     speakers[speaker]->jitter.push(sequence, data + 3, size - 3);
@@ -449,6 +566,11 @@ bool toggle_mute(uint32_t net_id) {
     }
     log("voice: net id %u %s", net_id, mutes[net_id] ? "muted" : "unmuted");
     return mutes[net_id];
+}
+
+void set_muted(uint32_t net_id, bool on) {
+    if (!net_id || net_id >= kMaxSpeakers || mutes[net_id] == on) return;
+    toggle_mute(net_id);
 }
 
 float volume() {

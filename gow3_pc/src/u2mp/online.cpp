@@ -304,6 +304,7 @@ bool waiting_host = false;     // the transport joins a room owner
 double host_deadline = 0;
 uint64_t waiting_room = 0;
 bool following_leader = false; // the old host closes on purpose (session.cpp host_change_expected)
+std::vector<std::string> led_party;   // the members we last led into another room (take_led_party)
 net::Address switch_owner{};
 double switch_at = 0;          // the leader switches its transport once the follow went out
 double switch_admit = 20.0;    // the admit limit of that switch
@@ -822,6 +823,7 @@ void go_to_owner(const Room &r, uint32_t kind, bool lead_party, double admit) {
         std::vector<uint8_t> b{session::kOnlineMessage, kOpFollowRoom, 0, 0, 0, 0, 0, 0, 0, 0, uint8_t(kind)};
         std::memcpy(b.data() + 2, &r.id, 8);
         session::send_message(-1, b);
+        led_party = session::member_npids();   // asked for at the owner's slot manager (session.cpp 0x100)
         log("online: told the party (%d member(s)) to follow into room %llx", session::member_count() - 1,
             (unsigned long long)r.id);
         switch_owner = addr;
@@ -2600,6 +2602,40 @@ void mm_leave() {
 
 int mm_players() { return match_room_.kind == kKindMatchmaking ? int(match_room_.members.size()) : 0; }
 
+// ---- PS3 parity group E (spec parity-e-flow2.md 2.4, 2.6) ----
+uint64_t party_room_id() { return started ? party_room.id : 0; }
+int party_size() { return started && party_room.id ? std::max<int>(1, int(party_room.members.size())) : 1; }
+
+std::vector<std::string> take_led_party() {
+    std::vector<std::string> out;
+    out.swap(led_party);
+    return out;
+}
+
+bool party_up_join(uint64_t room) {
+    if (!started || !room || room == party_room.id) return false;
+    if (link_state != U2O_READY) return false;
+    // Each player of the group joins by itself (the host told every one of them), so nobody leads others here.
+    const auto blob = member_blob();
+    const uint64_t id = api.join_room(room, blob.data(), uint32_t(blob.size()), 0);
+    log("online: Party Up: joining party room %llx (PS3 0x119): request %llu", (unsigned long long)room,
+        (unsigned long long)id);
+    if (!id) return false;
+    request(id, Pending{Req::JoinList, room, kKindParty, false, "Party Up join"});
+    return true;
+}
+
+void reservation_refused() {
+    if (!started || !match_room_.id || match_room_.owned()) return;
+    if (match_room_.kind == kKindMatchmaking) {   // PS3 JOINING state 9 refusal in matchmaking: the next room
+        mm_host_gone("the room owner has no slots for our party (0x101)", true);
+        return;
+    }
+    leave_room(match_room_, "no slots reserved for our party");
+    join_page_fail("the room owner has no slots for our party (0x101)");
+    own_party("no slots reserved for our party");
+}
+
 // The matchmaking rows (session.cpp, PS3 slot list 0x4b0008).
 bool in_own_party(const std::string &npid) {
     return !npid.empty() && (npid == my_npid || (party_room.id && in_room(party_room, npid)));
@@ -2781,6 +2817,11 @@ bool ticker_append_entry(std::string &out, const std::string &name, int category
 std::string stats_ticker_text() {
     const int category = std::rand() % 7;
     std::string out = std::string("|@CFFFFFFFF|") + ticker_game_text(kTickerCategory[category]) + ":|@CFF999999|      ";
+    // PS3 0x446c60: the local player's own entry comes first (also on LAN, where it is the only one). Headshots:
+    // no NetPlayerData field is known for them (0, as in our presence).
+    static constexpr uint64_t kOwnValue[7] = {0xd8, 0x184, 0x18c, 0x190, 0x188, 0, 0x198};
+    const uint64_t own = kOwnValue[category] ? G<uint32_t>(kNpd + kOwnValue[category]) : 0;
+    ticker_append_entry(out, linked() && !my_npid.empty() ? my_npid : session::local_name(), category, own);
     if (!linked()) return out;
     std::vector<std::pair<std::string, uint64_t>> pool;
     for (size_t i = 0; i < friend_list.size() && i < size_t(kTickerScan); ++i) {

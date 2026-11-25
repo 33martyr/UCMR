@@ -175,6 +175,18 @@ uint64_t member_party_id(const std::string &npid);   // the party id a match roo
 bool peer_rtt(const std::string &npid, uint32_t &rtt_ms, bool &up);   // false: no connection record
 int mm_slots();                      // the size of the match matchmaking fills (room max), 0 when it is off
 
+// ---- PS3 parity group E (session.cpp; spec parity-e-flow2.md 2.4 Party Up, 2.6 slot manager) ----
+uint64_t party_room_id();            // our party room (also a party of one), 0 none
+int party_size();                    // members of our party room, at least 1
+// The NpIds of the members we last told to follow us into another room (cleared by the call): the party a joining
+// leader asks the room owner's slot manager for (PS3 0x100).
+std::vector<std::string> take_led_party();
+// Party Up 0x119: join that party room by ourselves (we lead nobody into it). False: not started, no room, or ours.
+bool party_up_join(uint64_t room);
+// The room owner's slot manager refused our party (PS3 0x101 "not reserved"): matchmaking goes to the next room;
+// a custom game join fails (JOINING pops, NET_SM 18) and we go back to a party of our own.
+void reservation_refused();
+
 }  // namespace u2mp::online
 
 namespace u2mp {

@@ -19,6 +19,9 @@ void progression_publish_career();
 // The players this PC met in recent matches (local store), most recently seen first, at most `max`.
 std::vector<std::string> progression_recent_players(size_t max);
 std::string progression_player_summary(const std::string &name);   // Players Met: View Profile
+// Match and round start (PS3 Playing::Enter 0x444660, spec parity-e-flow2.md 2.9): the remote players go into Players
+// Met at once (known ones move to the top) and the store is written; the match statistics still come at Leave.
+void progression_note_met(const std::vector<std::string> &names);
 
 // clantag.cpp: BUTTON_CLANTAG's text box (NetPlayerData +0x1a8).
 bool edit_clan_tag();

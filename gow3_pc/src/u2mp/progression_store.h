@@ -58,6 +58,9 @@ bool save(const std::string &path, const Store &store, uint64_t now);
 // Adds a finished match. The local player's line only updates `local_name`; the others are merged
 // by name into `recent` (most recent kept, at most kMaxRecent).
 void note_match(Store &store, const std::vector<MatchPlayer> &players, uint64_t now);
+// Players met at a match or round start: each name (not the local player) is added to `recent` with no
+// statistics, or a known one gets last_seen = now; same order and cap as note_match. False: nothing changed.
+bool note_met(Store &store, const std::vector<std::string> &names, uint64_t now);
 
 // The local player's career values, read from the Data block by the guest side.
 struct LocalStats {

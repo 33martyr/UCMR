@@ -239,3 +239,15 @@ framing, every proto3 field, attribute ranges, signaling (SIGN v3, UDP 3657 ping
 - Still in the launcher's relay (another change in progress there): only the command ids the game uses should be
   forwarded (any server-side error closes the launcher's RPCN session), RemoveFriend's NotFound is 26, and the
   handoff should pass the RPCN host as UNCHARTED_U2MP_RPCN_HOST (the DLL's UDP pings default to np.rpcs3.net).
+
+## 8. PS3 parity group E (2026-11-25, spec/parity-e-flow2.md 7)
+
+- `party_room_id()` / `party_size()`: our party room (a party of one too) and its member count (Party Up press).
+- `take_led_party()`: `go_to_owner` with a led party remembers `session::member_npids()`; session.cpp sends them to
+  the room owner's slot manager (0x100) once the transport reaches it.
+- `party_up_join(room)`: Party Up 0x119, a JoinList request for that party room with `lead_party` false (every
+  player of the group was told by the host itself); not for our own party room.
+- `reservation_refused()`: 0x101 "no": a stranger's matchmaking room -> `mm_host_gone(.., bad room)`; another room
+  -> room left, `join_page_fail`, `own_party`.
+- Friends ticker (`stats_ticker_text`): the local player's entry (online id, LAN: player name; value from
+  NetPlayerData; headshots 0) comes right after the heading. The display call is still not known.
