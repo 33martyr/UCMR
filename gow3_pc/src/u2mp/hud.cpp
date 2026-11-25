@@ -17,6 +17,8 @@
 
 #include "u2mp_internal.h"
 
+extern "C" int runtime_memory_is_mapped(uintptr_t address, uint64_t size);
+
 // The game's results depend on every float operation being rounded on its own.
 #pragma clang fp contract(off)
 
@@ -839,7 +841,7 @@ float message_line(uint64_t entry, float x, float y, float alpha, float s, bool 
         const char *prefix = "";
         if (!red) {
             const char *found = text_find(0x9b5b3c66);
-            if (found) prefix = found;
+            if (found && runtime_memory_is_mapped(uintptr_t(found), 1)) prefix = found;   // never a bad pointer into %s
         }
         char badge[24];
         std::snprintf(badge, sizeof badge, "%s%i", prefix, count);

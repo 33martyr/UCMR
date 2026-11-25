@@ -216,8 +216,9 @@ int32_t int_tag(const unsigned char *spawner, uint32_t key) {
 }
 
 const char *spawner_name(const unsigned char *spawner) {
+    // An unset name can be a -1 pointer, not just null; only a readable one goes to strncmp / log %s.
     const char *name = reinterpret_cast<const char *>(pointer_at(spawner + 0x20));
-    return name ? name : "?";
+    return name && runtime_memory_is_mapped(uintptr_t(name), 1) ? name : "?";
 }
 
 void log_type12_spawn(const LevelRecord &level, const char *where, uint32_t id, const unsigned char *spawner) {
