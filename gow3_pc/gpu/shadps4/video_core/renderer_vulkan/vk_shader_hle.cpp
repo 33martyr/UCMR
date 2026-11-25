@@ -494,6 +494,35 @@ static bool ExecuteScalarCopyHLE(const Shader::Info& info, const AmdGpu::Compute
     return true;
 }
 
+// gow3 25 Nov 2026 (The Temple's water): the 64-wide copy also moves surfaces (MiBs). A piece of
+// a GPU-written image that does not start at its base reads old bytes; logged, and with
+// GOW3_SURFACE_PIECE_COPY=1 made as an image copy (TextureCache::CopySurfacePiece). Only plain
+// linear dword copies, whose bytes go from base + 4i to base + 4i.
+static bool SurfacePieceCopy64(const Shader::Info& info, const AmdGpu::ComputeProgram& cs_program,
+                               Rasterizer& rasterizer) {
+    const auto ud = info.UserData();
+    if (info.buffers.size() < 2 || ud.size() <= 6 || cs_program.dim_y != 1 ||
+        cs_program.dim_z != 1 || cs_program.num_thread_x.full != 64) {
+        return false;
+    }
+    const auto src = info.buffers[0].GetSharp(info);
+    const auto dst = info.buffers[1].GetSharp(info);
+    const auto plain = [](const AmdGpu::Buffer& buffer) {
+        return buffer.data_format == u32(AmdGpu::DataFormat::Format32) && buffer.stride == 4 &&
+               buffer.base_address != 0 && buffer.base_address % 4 == 0 &&
+               buffer.swizzle_enable == 0 && buffer.add_tid_enable == 0;
+    };
+    if (!plain(src) || !plain(dst) || src.dst_sel_x != 4) {
+        return false;
+    }
+    const u64 count = std::min<u64>({u64(cs_program.dim_x) * 64, ud[6], dst.num_records});
+    if (count * 4 < 64_KB || src.num_records < count) {
+        return false;
+    }
+    return rasterizer.GetTextureCache().CopySurfacePiece(src.base_address, dst.base_address,
+                                                         count * 4, "compute 6a6422a9");
+}
+
 bool ExecuteShaderHLE(const Shader::Info& info, const AmdGpu::Regs& regs,
                       const AmdGpu::ComputeProgram& cs_program, Rasterizer& rasterizer) {
     switch (info.pgm_hash) {
@@ -502,6 +531,9 @@ bool ExecuteShaderHLE(const Shader::Info& info, const AmdGpu::Regs& regs,
     case SCALAR_COPY_SHADER_HASH:
         return ExecuteScalarCopyHLE(info, cs_program, rasterizer, 1);
     case SCALAR_COPY64_SHADER_HASH:
+        if (SurfacePieceCopy64(info, cs_program, rasterizer)) {
+            return true;
+        }
         return ExecuteScalarCopyHLE(info, cs_program, rasterizer, 64);
     default:
         return false;
