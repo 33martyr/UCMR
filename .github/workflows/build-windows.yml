@@ -22,9 +22,6 @@ jobs:
         shell: msys2 {0}
     env:
       IS_RELEASE: ${{ startsWith(github.ref, 'refs/tags/v') }}
-      # Code signing (docs/CODE-SIGNING.md): a release is signed when the SignPath token is set up for the repository
-      # or the organization, whoever pushed the tag. Until then releases are published unsigned, as before.
-      SIGN_RELEASE: ${{ startsWith(github.ref, 'refs/tags/v') && secrets.SIGNPATH_API_TOKEN != '' }}
       # ccache reuses compiled objects in the launcher, the runtime and the importers. A new commit gets a new
       # immutable cache entry (restore-keys picks the newest older one), so a stale cache can never win.
       CCACHE_DIR: ${{ github.workspace }}/.ccache
@@ -130,59 +127,6 @@ jobs:
         run: |
           export MSYS2_ROOT=$(cygpath -u '${{ steps.msys2.outputs.msys2-location }}')
           tools/package_windows.sh
-
-      # Signing a release: the package folder goes to SignPath as a build artifact, SignPath signs our own programs in
-      # it (.signpath/artifact-configuration.xml lists them; third-party files keep their own signatures or none) and
-      # hands the folder back, which is then zipped again. The wait covers a manual approval in SignPath. Once the
-      # token is set up, a release that cannot be signed is not published.
-      - name: Package for signing
-        id: unsigned
-        if: env.SIGN_RELEASE == 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: UCMR_windows-unsigned
-          path: dist/UCMR_windows/
-          if-no-files-found: error
-          retention-days: 1
-
-      - name: Sign
-        if: env.SIGN_RELEASE == 'true'
-        uses: signpath/github-action-submit-signing-request@v1
-        with:
-          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
-          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
-          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG || 'UCMR' }}
-          signing-policy-slug: ${{ vars.SIGNPATH_POLICY_SLUG || 'release-signing' }}
-          github-artifact-id: ${{ steps.unsigned.outputs.artifact-id }}
-          wait-for-completion: true
-          wait-for-completion-timeout-in-seconds: 7200
-          output-artifact-directory: dist/signed
-
-      - name: Package the signed programs
-        if: env.SIGN_RELEASE == 'true'
-        run: |
-          # the signed folder must hold exactly the files that were sent
-          (cd dist/UCMR_windows && find . -type f | sort) > dist/stage/sent.txt
-          (cd dist/signed && find . -type f | sort) > dist/stage/signed.txt
-          diff -q dist/stage/sent.txt dist/stage/signed.txt > /dev/null ||
-            { echo "::error::SignPath returned other files than were sent"; diff dist/stage/sent.txt dist/stage/signed.txt | head -20; exit 1; }
-          rm -rf dist/UCMR_windows dist/UCMR_windows.zip
-          mv dist/signed dist/UCMR_windows
-          dist/stage/mkzip.exe dist/UCMR_windows.zip dist/UCMR_windows
-
-      - name: Check the signatures
-        if: env.SIGN_RELEASE == 'true'
-        shell: pwsh
-        run: |
-          $bad = 0
-          [xml]$config = Get-Content -Raw .signpath/artifact-configuration.xml
-          foreach ($file in $config.GetElementsByTagName('pe-file')) {
-            $name = $file.GetAttribute('path')
-            $sig = Get-AuthenticodeSignature -LiteralPath (Join-Path dist/UCMR_windows $name)
-            "{0}: {1} ({2})" -f $name, $sig.Status, $sig.SignerCertificate.Subject
-            if ($sig.Status -ne 'Valid') { $bad++ }
-          }
-          if ($bad) { throw "$bad program(s) are not signed" }
 
       - name: Compiler cache after the build
         if: always()
