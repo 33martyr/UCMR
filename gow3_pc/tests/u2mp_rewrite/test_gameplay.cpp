@@ -280,7 +280,8 @@ void sb_setup(uint64_t target = kSbDraw) {
     put_call(kSbCall, target);
     // What the new install also checks, as the real PS4 1.02 image has it (boot-linked.bin): tracker entries 1-3
     // (speed 1.0, dim 1, page ids 5dad5a68 / 3d437466 / 5dad5a68), the cond 44 query 0x65b830 / 0x65b855 and the
-    // one-shot sound pair 0x3dd780 / 0x9b5c20 (0x3dd780 starts 48 89 f8 48 there, so the sounds stay off).
+    // one-shot sound pair 0x3dd780 / 0x9b5c20 (only their first bytes; the rest of the sound check, 0x3dd7f7,
+    // 0x3dd8a6, 0x9b5c34 and 0x666b8b, is not put, so the sounds stay off).
     for (int k = 1; k < 4; k++) {
         put<float>(kSbTracker + 0x10 + 0x14 * k, 1.0f);
         put<uint32_t>(kSbTracker + 0x14 + 0x14 * k, 1);
@@ -291,6 +292,8 @@ void sb_setup(uint64_t target = kSbDraw) {
     put_bytes(0x65b855, {0x83, 0x3b, 0x01, 0x0f, 0x85, 0xf1, 0x02, 0x00, 0x00});
     put_bytes(0x3dd780, {0x48, 0x89, 0xf8, 0x48});
     put_bytes(0x9b5c20, {0x55, 0x48, 0x89, 0xe5});
+    // The frame step read the new install requires (parity-m-features.md 10.1; without it: not installed).
+    put_bytes(0x5a3c74, {0x48, 0x8d, 0x05, 0x05, 0x25, 0xb7, 0x00, 0xc5, 0xfa, 0x2a, 0x88, 0x10, 0x01, 0x00, 0x00});
 }
 
 // ---- the documented scoreboard changes since the old version, applied to the old record before the comparison ----

@@ -35,6 +35,9 @@ bool menu_text_in_rect(const float *xform, const char *text, float x, float y, f
     return gp_deps.text_in_rect;
 }
 
+// loading.cpp: the menu state word (scoreboard.cpp's hint line and page draw); no menu is up in these scenarios
+bool menu_up() { return gp_deps.menu_up; }
+
 // session.cpp
 void sync_netstat_ranks() { hx::rec("sync_netstat_ranks"); }
 

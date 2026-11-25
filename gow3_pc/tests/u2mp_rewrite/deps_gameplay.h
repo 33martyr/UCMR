@@ -8,6 +8,7 @@
 
 struct GpDeps {
     bool text_in_rect = true;                      // loading.cpp menu_text_in_rect: the text was drawn
+    bool menu_up = false;                          // loading.cpp menu_up: a menu is up (not recorded)
     uint32_t local_id = 1;                         // session::local_id: this PC's net id (the host's)
     std::map<uint32_t, std::string> members;       // session::member_name: the party's members by net id
     std::set<uint32_t> muted;                      // voice::muted / toggle_mute: the muted net ids

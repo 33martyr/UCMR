@@ -6,10 +6,9 @@
 // Reimplemented from the behaviour description u2mp/docs/spec/unlocks.md.
 
 #include "unlocks.h"
+#include "host_memory.h"
 #include "session_api.h"
 #include "u2mp_internal.h"
-
-#include <windows.h>
 
 #include <atomic>
 #include <cstdio>
@@ -211,9 +210,7 @@ bool in_copy(const void *p, uint64_t n = 1) {
 
 bool package_ptr_ok(const uint8_t *p) {
     if (reinterpret_cast<uintptr_t>(p) < 0x10000) return false;
-    MEMORY_BASIC_INFORMATION m{};
-    if (!VirtualQuery(p, &m, sizeof m) || m.State != MEM_COMMIT) return false;
-    return (m.Protect & (PAGE_NOACCESS | PAGE_GUARD)) == 0;
+    return host_readable(p);
 }
 
 // A data symbol of the net-patch9 root object, or NULL.

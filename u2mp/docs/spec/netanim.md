@@ -43,6 +43,23 @@ On PS4 1.02 remote characters in multiplayer lose two things:
 
 The NetAnimList visitor the slot needs does not exist on PS4; the host provides one with the PS4 visitor layout.
 
+**Current state (since `e05a7d9`, PR #110, 2026-11-22): slot 4 is not installed.** That commit replaced the reader
+call-out of 1.4.2: the new one (`read_leaf`) reads the phase, resolves the clip through an anim index table (index
+call-out `0x66b637`) and calls slot 3 (clip) or slot 5 (bind pose) of the visitor only when that visitor is the pose
+generator (vtable `0x100ac80`); it also added a bind-pose prefill (`0x5f3d63`), a tree depth guard (`0x5f3dd1`) and
+the bit count padding (`0x60e296` / `0x60e9f3`, `UNCHARTED_U2MP_NETANIM_PAD=0` off). The same commit dropped the
+slot 4 checks and `replace_function` (install steps 6 and 7 below). No commit message, comment or crash note gives a
+reason, but with the new reader the slot's own visitor would never receive a clip, so the slot would never fire an
+event. The slot 4 host function (1.4.3) stays in netanim.cpp, unused. Installing it again needs the reader call-out
+to hand the resolved clip to every visitor's slot 3 (as 1.4.2 describes), tested on two PCs. Sections 1.4.2 and
+1.5 below still describe the version before `e05a7d9`; the new reader, index, prefill, depth and padding call-outs are
+not described here yet.
+
+Install log of the padding (current code): `netanim: snapshot bit counts padded to whole words` when installed;
+`netanim: bit count padding off (UNCHARTED_U2MP_NETANIM_PAD=0)` only when the variable is exactly `"0"`;
+`netanim: snapshot bit count sites differ from 1.02, no bit count padding` when its bytes differ;
+`netanim: no stub memory near the image, no bit count padding` when a stub request fails.
+
 Switch: environment variable `UNCHARTED_U2MP_NETANIM`. When it is exactly `"0"`, nothing in this file is
 installed.
 
@@ -62,7 +79,7 @@ Entry points the game reaches after install:
 |---|---|---|---|
 | Writer call-out | `0x6364b5` | 11 bytes replaced by `e9 rel32` + 6 x `cc`, jumping to a stub in `near_stub` memory | register contract, see 1.4.1 |
 | Reader call-out | `0x66c035` | 28 bytes replaced by `e9 rel32` + 23 x `cc`, jumping to a stub | register contract, see 1.4.2 |
-| Generator slot 4 | `0x5f48d0` | `replace_function(0x5f48d0, 16, host, "NetAnimCmdGenerator slot 4 (PS3 0x453c10)")` | `void (const uint8_t *generator /*rdi*/, void *events /*rsi*/)`, no return value |
+| Generator slot 4 (not installed since `e05a7d9`, see 1.1) | `0x5f48d0` | `replace_function(0x5f48d0, 16, host, "NetAnimCmdGenerator slot 4 (PS3 0x453c10)")` | `void (const uint8_t *generator /*rdi*/, void *events /*rsi*/)`, no return value |
 | Visitor slots 0..6 | host vtable | pointers in a host-owned 7-entry table, passed to the guest inside the visitor object | see 1.4.4 |
 
 ### 1.3 Game facts
@@ -301,7 +318,8 @@ In this order:
    the reader's displacement does not fit, the writer site stays patched, the same log line is printed, return.
 5. `installed += 2`; log
    `netanim: snapshot clip phases restored (writer 0x6364b5, reader 0x66c035; both PCs need this build)`.
-6. Slot checks (all must match):
+6. (Steps 6 and 7 are the version before `e05a7d9`; the current code skips both, see 1.1.) Slot checks (all must
+   match):
 
    | Address | Bytes |
    |---|---|

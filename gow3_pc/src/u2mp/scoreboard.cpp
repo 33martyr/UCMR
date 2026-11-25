@@ -614,8 +614,13 @@ void check_facts() {
                                 0x74, 0x04});
     if (!pause_ok) log("scoreboard: pause test 0x3faf57 not as expected: the overlay also draws while paused");
 
-    // 10.9: the one-shot sound calls and the uncalled PS4 entry setter that names the two ids.
-    sound_ok = check(fSoundInit, {0x55, 0x48, 0x89, 0xe5}) && check(fSoundPlay, {0x55, 0x48, 0x89, 0xe5}) &&
+    // 10.9: the one-shot sound calls and the uncalled PS4 entry setter that names the two ids. The init is a leaf
+    // without a frame (mov rax, rdi first); it stores the id (esi) at +0x70 and the third argument (edx) at +0xd8.
+    // The play keeps its two arguments (mov r13, rsi; mov rsi, rdi). Every PS4 caller does init(buf, id, 0), then
+    // play(buf, 0), as play_sound does.
+    sound_ok = check(fSoundInit, {0x48, 0x89, 0xf8}) && check(fSoundInit + 0x77, {0x89, 0x90, 0xd8, 0x00, 0x00, 0x00}) &&
+               check(fSoundInit + 0x126, {0x89, 0x70, 0x70}) && check(fSoundPlay, {0x55, 0x48, 0x89, 0xe5}) &&
+               check(fSoundPlay + 0x14, {0x49, 0x89, 0xf5, 0x48, 0x89, 0xfe}) &&
                check(0x666b8b, {0x85, 0xf6, 0x75, 0x2f, 0x80, 0xf1, 0x01, 0x75, 0x2a, 0x84, 0xdb, 0xb8, 0xe1, 0x65,
                                 0xb4, 0xd9, 0xbe, 0x31, 0x8f, 0x11, 0x2f});
     if (!sound_ok) log("scoreboard: one-shot sound calls / entry setter not as expected, no open / close sounds");

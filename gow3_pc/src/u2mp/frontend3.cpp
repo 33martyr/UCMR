@@ -503,7 +503,8 @@ void host_start_matchmaking_step() {
                 m.party_wait = now | 1;
                 log("matchmaking: waiting for %d party member(s) to come back before searching", missing);
             }
-            if (now - m.party_wait < kPartyBackWait) break;
+            // signed: party_wait may be now + 1 (now | 1 on an even clock), which must still count as waiting
+            if (int32_t(now - m.party_wait) < int32_t(kPartyBackWait)) break;
         }
         m.party_wait = 0;
         start_search_pass();

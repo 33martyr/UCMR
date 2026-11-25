@@ -151,7 +151,7 @@ the entry rules 6-8, overlay alpha, "every player out", hint) are in `overlay_ru
 | `0x664b90` | `bool (tracker *)`: the tracker's death camera runs |
 | `0x555550` | `bool (HUD manager 0x1130008 *)`: a HUD notification is showing |
 | `0xe2186a0c` | text "\|SELECT\| Scoreboard    \|D-PAD\| Camera" (TextDb `0xcddc00`) |
-| `0x3dd780` / `0x9b5c20` | one-shot sound init / play; `d9b465e1` "scoreboard-open", `2f118f31` "scoreboard-close" |
+| `0x3dd780` / `0x9b5c20` | one-shot sound init `(buffer *, u32 id, u32 0)` / play `(buffer *, u32 0)`; `d9b465e1` "scoreboard-open", `2f118f31` "scoreboard-close" |
 | `0x5b5450` | menu text-in-rect item (loading.cpp `menu_text_in_rect`) |
 
 ### 1.4 Behaviour
@@ -268,9 +268,10 @@ In this order:
    automatic board); state record call (`0x65b902`; off: flags A / B not read); tracker times (10.6: `0x6626b5`; off:
    "every player out" never holds); death camera (10.5: `0x664b90`; off: no hint); HUD notification (10.8:
    `0x555550`; off: no override); dim (10.2: `0x5d06a4`, `0x5d0704`, `0x5d1afd`; off: no dim); HUD alpha (10.3:
-   `0x555cd1`; off: A = 1.0); pause (10.3: `0x3faf57`; off: drawn while paused); sounds (`55 48 89 e5` at
-   `0x3dd780` and `0x9b5c20`, and 10.9 `0x666b8b`; off: silent). The menu state word (`menu_up()`, loading.cpp)
-   checks its own bytes on first use (10.2: `0x5e5b82`, `0x665151`, `0x4cbc18`; off: "no menu up", logged once).
+   `0x555cd1`; off: A = 1.0); pause (10.3: `0x3faf57`; off: drawn while paused); sounds (the init `0x3dd780`
+   is a frameless leaf: `48 89 f8` at `+0`, `89 90 d8 00 00 00` at `+0x77`, `89 70 70` at `+0x126`; the play
+   `0x9b5c20`: `55 48 89 e5` at `+0`, `49 89 f5 48 89 fe` at `+0x14`; and 10.9 `0x666b8b`; off: silent). The menu
+   state word (`menu_up()`, loading.cpp) checks its own bytes on first use (10.2: `0x5e5b82`, `0x665151`, `0x4cbc18`; off: "no menu up", logged once).
 5. The current target = `0x3fc532 + rel32` (as an image offset; it may lie outside the image when another module
    already retargeted the call). Remember its absolute address as the previous target.
 6. `retarget_call(0x3fc52d, current target, H, name)` with name `scoreboard: 2D draw` when the current target is
