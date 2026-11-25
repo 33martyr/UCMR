@@ -4,8 +4,10 @@
 // gameplay queues events into per-peer message layers ("M", vtable 0x103fc80) of 32 connection
 // records at 0x1152a18; the PS3 packet code (header, acks: 0x4652cc / 0x465138 / 0x465218 /
 // 0x464cb8) and the per-frame update (0x43cdb8) are gone. This file is that code, in C++:
-//   per frame (frame()):  for each peer, pack (M vtable[2]) behind a PS3-style header and send it
-//                         as one unreliable transport message (tag kGamePacket);
+//   per frame (frame()):  for each peer, drop expired snapshots from the unreliable queue, then on
+//                         the fixed 50 ms tick, if something is pending or the 2 s keepalive is due,
+//                         pack (M vtable[2]) behind a PS3-style header and send it as one unreliable
+//                         transport message (tag kGamePacket); rules: gamenet_rules.h;
 //   on receive (receive()): header/acks (delivered / lost through M vtable[3]/[4]), then unpack and
 //                         apply (M vtable[1]).
 // Peers are attached by the session layer (session.cpp), which owns players and slots.
@@ -31,7 +33,8 @@ uint64_t message_layer(uint8_t slot);
 
 // Checks this build's message layer and caches its functions. Returns false if it differs.
 bool install();
-// Once per frame (session layer, after receiving): pack and send each direct peer's queued events.
+// Once per frame (session layer, after receiving): expire stale snapshots of every peer, then pack
+// and send each direct peer's queued events (spec parity-i-connection.md I1..I3).
 void frame(double now);
 // The game clock in seconds (frame counter / 300), the time base of the message layer.
 double clock();

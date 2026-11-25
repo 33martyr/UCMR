@@ -8,10 +8,13 @@
 #include <vector>
 
 #include "bitstream.h"
+#include "gamenet_rules.h"
 #include "u2mp_internal.h"
 
 namespace u2mp::gamenet {
 namespace {
+
+namespace rules = gamenet_rules;
 
 // ---- guest addresses ------------------------------------------------------------------------
 constexpr uint64_t kRecords = 0x1152a18;     // 32 connection records, 0x220 bytes each
@@ -20,6 +23,7 @@ constexpr int kRecordCount = 32;
 constexpr uint64_t kMessageVtable = 0x103fc80;
 constexpr uint64_t kFrameClock = 0x1116180 + 0x204;  // game frame counter (300 per second)
 constexpr uint64_t kNoopHook = 0x5e9d80;             // M+0x150 receive hook the game installs
+constexpr uint64_t kNeverExpires = 0x619da0;         // the events' shared "expired?" method (vtable +0x30)
 
 // Message layer (M = record + 0x40) fields
 constexpr uint64_t M_NEXT_SEQ = 0x08, M_RECV_SEQ = 0x0c, M_RECV_BITS = 0x14, M_ACKED_SEQ = 0x18;
@@ -27,11 +31,9 @@ constexpr uint64_t M_LAST_SEND = 0xa4, M_LAST_RECV = 0xa8;
 constexpr uint64_t M_INFLIGHT_HEAD = 0x100, M_INFLIGHT_TAIL = 0x108;
 constexpr uint64_t M_RELIABLE_HEAD = 0x110, M_UNRELIABLE_HEAD = 0x120, M_HOOK = 0x150;
 // Packet record (ours, 0x18 bytes as the game's AllocPacketRecord): +0 seq, +8 next, +0x10 messages
-constexpr uint64_t R_SEQ = 0x00, R_NEXT = 0x08;
+constexpr uint64_t R_SEQ = 0x00, R_NEXT = 0x08, R_MESSAGES = 0x10;
 
-constexpr int kWindow = 30;               // PS3: "%s window full" at 30 unacknowledged packets
 constexpr uint32_t kMaxBits = 1200 * 8;   // the message layer's packet budget
-constexpr double kSendInterval = 0.05, kIdleInterval = 2.0;
 
 using ReadMessagesFn = void(U2MP_GUEST *)(void *M, void *bitstream);
 using WriteMessagesFn = void(U2MP_GUEST *)(void *M, void *bitstream, void *record);
@@ -54,7 +56,8 @@ struct Peer {
     bool used = false;
     int record = -1;
     bool direct = true;
-    double next_send = 0, last_send = 0;
+    rules::Cadence cadence{};
+    bool window_full = false;   // logged once per stall
 };
 Peer peers[net::kMaxPeers + 1];
 net::Transport *transport = nullptr;
@@ -64,12 +67,74 @@ uint64_t layer_of(int index) { return record_address(index) + 0x40; }
 
 double game_time() { return double(field<uint32_t>(uint64_t(uintptr_t(image.base)), kFrameClock)) / 300.0; }
 
+// The packet records' message lists are walked (I2) and handed back (I3) only once a packed record
+// showed the layout TRANSPORT-INTERFACE 1.3 gives (event at node +0, next at +0x20): 0 not seen yet,
+// 1 confirmed, -1 differs (I2 then counts any in-flight packet, I3 stays off).
+int lists_ok = 0;
+void check_record_list(uint64_t record) {
+    const uint64_t list = field<uint64_t>(record, R_MESSAGES);
+    if (lists_ok || !list) return;
+    const uint64_t base = uint64_t(uintptr_t(image.base));
+    lists_ok = rules::plausible_messages(list, base, base + image.size) ? 1 : -1;
+    log("game transport: packet record message list %s", lists_ok > 0 ? "layout confirmed"
+                                                                    : "layout differs: in-flight scan and snapshot expiry off");
+}
+
+// I3: the type-12 time stamp (the first payload word, f32 net clock seconds) is used only once 8
+// queued snapshots carried a value within 0.5 s of the net clock; one outside [now - 60 s, now + 0.1 s]
+// (or not a number) turns expiry off. 0 checking, 1 confirmed, -1 off.
+int stamps_ok = 0, stamps_seen = 0;
+void check_stamp(uint64_t ev, double now) {
+    if (stamps_ok) return;
+    if (stamps_seen == 0) {
+        const uint64_t base = uint64_t(uintptr_t(image.base));
+        const uint64_t expiry = field<uint64_t>(field<uint64_t>(ev, 0), 0x30);
+        if (expiry == base + kNeverExpires) log("snapshot expiry: type 12 uses the shared \"never expires\" method");
+        else log("snapshot expiry: type 12 has its own expiry method at %#llx", (unsigned long long)(expiry - base));
+    }
+    const double age = now - double(field<float>(ev, rules::kEventStamp));
+    if (!(age >= -0.1 && age <= 60.0)) {
+        stamps_ok = -1;
+        log("snapshot expiry off: type 12 first payload word %#x is no net clock time (now %.3f)",
+            field<uint32_t>(ev, rules::kEventStamp), now);
+    } else if (age <= 0.5 && ++stamps_seen == 8) {
+        stamps_ok = 1;
+        log("snapshot expiry on: type 12 time stamps follow the net clock (last %.3f s old)", age);
+    }
+}
+
+// I3 (PS3 0x467d20): before the send decision, every expired message leaves the unreliable queue.
+// Only mode-2 snapshots expire, so they are handed back as a lost packet's messages: the game's own
+// loss handling releases mode 2 (event reference, relay list, node) the way its reset does.
+void expire_peer(uint8_t slot, Peer &peer, double now) {
+    const uint64_t M = layer_of(peer.record);
+    if (lists_ok < 0 || stamps_ok < 0) return;
+    if (stamps_ok == 0) {
+        for (uint64_t n = field<uint64_t>(M, M_UNRELIABLE_HEAD); n && stamps_ok == 0; n = field<uint64_t>(n, rules::kNodeNext)) {
+            const uint64_t ev = field<uint64_t>(n, rules::kNodeEvent);
+            if (field<uint8_t>(ev, rules::kEventType) == rules::kCharacterMove) check_stamp(ev, now);
+        }
+        if (stamps_ok <= 0) return;
+    }
+    if (lists_ok == 0) return;
+    const uint64_t gone = rules::unlink_expired(M, now);
+    if (!gone) return;
+    int count = 0;
+    for (uint64_t n = gone; n; n = field<uint64_t>(n, rules::kNodeNext)) ++count;
+    log("Message type %i has expired (%d, slot %u)", int(rules::kCharacterMove), count, unsigned(slot));
+    alignas(16) uint8_t record[0x18] = {};
+    *reinterpret_cast<uint32_t *>(record + R_SEQ) = field<uint32_t>(M, M_ACKED_SEQ);
+    *reinterpret_cast<uint64_t *>(record + R_MESSAGES) = gone;
+    fn.lost(reinterpret_cast<void *>(M), record);
+}
+
 // The PS3 header writer (0x4652cc / 0x465138): kind byte 0, hasMessages 1, seq 11, ack 10, bits 32.
 void send_peer(uint8_t slot, Peer &peer, double now) {
     const uint64_t M = layer_of(peer.record);
+    if (!rules::tick(peer.cadence, now)) return;
     const bool queued = field<uint64_t>(M, M_RELIABLE_HEAD) || field<uint64_t>(M, M_UNRELIABLE_HEAD);
-    const bool inflight = field<uint64_t>(M, M_INFLIGHT_HEAD) != 0;
-    if (now < peer.next_send || (!queued && !inflight && now - peer.last_send < kIdleInterval)) return;
+    const bool pending = queued || (lists_ok > 0 ? rules::inflight_needs_ack(M) : field<uint64_t>(M, M_INFLIGHT_HEAD) != 0);
+    if (!rules::send(peer.cadence, now, pending)) return;
     static bool logged_queued = false;
     if (queued && !logged_queued) {
         logged_queued = true;
@@ -80,7 +145,10 @@ void send_peer(uint8_t slot, Peer &peer, double now) {
     BitStream bs{words.data(), 0, kMaxBits + 32 * 32, 0};
     write_bits(bs, 0, 8);
     const uint32_t next = field<uint32_t>(M, M_NEXT_SEQ), acked = field<uint32_t>(M, M_ACKED_SEQ);
-    if (int32_t(next - acked) >= kWindow) {   // window full: an ack-only packet
+    const bool full = rules::window_full(next, acked);
+    if (full && !peer.window_full) log("game transport: slot %u window full", unsigned(slot));
+    peer.window_full = full;
+    if (full) {   // more than 30 unacknowledged: an ack-only packet
         write_bits(bs, 0, 1);
         write_bits(bs, next & 0x7ff, 11);
         write_bits(bs, field<uint32_t>(M, M_RECV_SEQ) & 0x3ff, 10);
@@ -102,6 +170,7 @@ void send_peer(uint8_t slot, Peer &peer, double now) {
         // or the game's inline writes assert: room for 1024 more bits (still within kMaxPacket).
         bs.max_bits = kMaxBits + 1024;
         fn.write(reinterpret_cast<void *>(M), &bs, record);
+        check_record_list(r);
     }
     field<float>(M, M_LAST_SEND) = float(now);
     const size_t bytes = (size_t(bs.bits) + 31) / 32 * 4;
@@ -109,12 +178,12 @@ void send_peer(uint8_t slot, Peer &peer, double now) {
     message[0] = kGamePacket;   // the session layer's channel tag
     std::memcpy(message.data() + 1, words.data(), bytes);
     transport->send(slot, false, message.data(), message.size());
-    peer.last_send = now;
-    peer.next_send = now + kSendInterval;
 }
 
 // The PS3 header reader and ack processing (0x465218 / 0x464cb8), then unpack (M vtable[1]).
 void receive_peer(Peer &peer, const uint8_t *data, size_t size, double now) {
+    const uint64_t M = layer_of(peer.record);
+    field<float>(M, M_LAST_RECV) = float(now);   // PS3: stamped first, for every datagram
     if (size < 8 || size > (kMaxBits + 1024) / 8 + 64 || size % 4) return;
     std::vector<uint32_t> words(size / 4 + 2, 0);   // one spare word: the game reads ahead
     std::memcpy(words.data(), data, size);
@@ -123,7 +192,6 @@ void receive_peer(Peer &peer, const uint8_t *data, size_t size, double now) {
     if (!read_bits(bs, kind, 8) || kind != 0 || !read_bits(bs, has_messages, 1) || !read_bits(bs, seq, 11) ||
         !read_bits(bs, ack, 10) || !read_bits(bs, ack_bits, 32))
         return;
-    const uint64_t M = layer_of(peer.record);
     uint32_t &recv_seq = field<uint32_t>(M, M_RECV_SEQ);
     uint32_t &recv_bits = field<uint32_t>(M, M_RECV_BITS);
     uint32_t &acked_seq = field<uint32_t>(M, M_ACKED_SEQ);
@@ -163,7 +231,6 @@ void receive_peer(Peer &peer, const uint8_t *data, size_t size, double now) {
         }
         acked_seq = full_ack;
     }
-    field<float>(M, M_LAST_RECV) = float(now);
     static bool logged_recv = false, logged_messages = false;
     if (!logged_recv) {
         logged_recv = true;
@@ -184,8 +251,11 @@ void set_transport(net::Transport *t) { transport = t; }
 
 void frame(double now) {
     if (!transport || !fn.write) return;
-    for (uint8_t slot = 0; slot <= net::kMaxPeers; ++slot)
-        if (peers[slot].used && peers[slot].direct) send_peer(slot, peers[slot], now);
+    for (uint8_t slot = 0; slot <= net::kMaxPeers; ++slot) {
+        if (!peers[slot].used) continue;
+        expire_peer(slot, peers[slot], now);
+        if (peers[slot].direct) send_peer(slot, peers[slot], now);
+    }
 }
 
 double clock() { return fn.write ? game_time() : 0; }
@@ -211,7 +281,7 @@ int attach(uint8_t slot, uint32_t key, bool direct) {
         field<int32_t>(rec, 0x38) = 1;
         fn.reset(reinterpret_cast<void *>(layer_of(i)));
         field<uint64_t>(layer_of(i), M_HOOK) = uint64_t(uintptr_t(image.base)) + kNoopHook;
-        peers[slot] = Peer{true, i, direct, 0, 0};
+        peers[slot] = Peer{true, i, direct, {}, false};
         return i;
     }
     log("no free connection record for slot %u", slot);

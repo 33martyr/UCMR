@@ -137,13 +137,18 @@ Both count 1/300 s.
 
 ## 2. What our port does today
 
-- `gamenet.cpp send_peer`: header as PS3; **window full at 30** unacknowledged; sends when 0.05 s passed since its
-  last send and (a queue is non-empty, **or any packet is in flight**, or 2 s passed).
-- `gamenet.cpp receive_peer`: PS3 acceptance rules (refuses jumps of 32+ and acks beyond our sequence), delivered /
-  lost per record, unpack for new packets with messages; stamps the last-receive time only for accepted packets
-  (liveness is net.cpp's `last_heard`, stamped for every datagram, so the visible result is the same).
-- No per-frame expiry pass; the PS4 type-12 vtable is believed to use the shared "never expires" method
-  (TRANSPORT-INTERFACE 1.1), so stale snapshots are never dropped.
+- `gamenet.cpp send_peer` (rules in `gamenet_rules.h`, tested by `tests/test_u2mp_gamenet.cpp`): header as PS3;
+  header-only when **more than 30** are unacknowledged (31 in flight at most; `slot <n> window full` logged once per
+  stall); a fixed 50 ms tick that advances whether or not a packet goes out; on a tick it sends if a queue is
+  non-empty, an in-flight packet holds a mode 0 / 1 message, or the 2 s keepalive (moved by each packet) is due (I1,
+  I2 done).
+- `gamenet.cpp receive_peer`: stamps the last-receive time first, for every datagram (PS3 order); PS3 acceptance rules
+  (refuses jumps of 32+ and acks beyond our sequence), delivered / lost per record, unpack for new packets with
+  messages.
+- `gamenet.cpp expire_peer`, every frame for every peer before the send decision: unlinks the type-12 (mode 2)
+  messages of the unreliable queue whose time stamp is more than 1.0 s behind the net clock, keeping the others in
+  order, logs `Message type 12 has expired (<count>, slot <n>)` once per pass, and releases them through the PS4
+  packet-lost method (mode 2 = released, as in the reset) (I3 done, run-time checks below).
 - `session.cpp mm_roster_query`: bars from `online::peer_rtt` (`bars_of`, PS3 thresholds); colour from the link
   state `online::peer_link_state` through `peer_rules::bars_colour` (I5, done 2026-11-25): inactive `0x800000FF`,
   pending `0x80FF0000`, active `0x8000FF00`, dead / no record / own row / LAN `0x80808080`.
@@ -155,7 +160,7 @@ Both count 1/300 s.
 
 ## 3. Items to implement
 
-### I1. Send window of 31 packets (PS3 `0x4652cc`) - MISSING
+### I1. Send window of 31 packets (PS3 `0x4652cc`) - COVERED (gamenet.cpp, 2026-11-25)
 
 PS3 lets 31 packets be unacknowledged; the 32nd send attempt (and every later one while 31 are unacked) becomes an
 ack-only header. Ours switches to ack-only at 30. Change the rule to "ack-only when more than 30 are in flight". Effect
@@ -165,7 +170,7 @@ can, as on PS3. Optional while there: print `<peer name> window full` on the deb
 the record's last-receive time before the acceptance checks (PS3 order; no visible effect because liveness lives in
 net.cpp).
 
-### I2. When a connection sends (PS3 `0x43cdb8` with `0x467438`) - MISSING (timing)
+### I2. When a connection sends (PS3 `0x43cdb8` with `0x467438`) - COVERED (gamenet.cpp, 2026-11-25)
 
 PS3, every frame, per connection (after the expiry pass I3):
 
@@ -181,7 +186,7 @@ restarts at each send instead of running on a fixed tick, so after an idle perio
 PS3 waits for the next tick (up to 50 ms). Target: the PS3 rule exactly (scan the in-flight records' message lists for
 a mode 0 / 1 event; message node and event layouts in TRANSPORT-INTERFACE 1.1 / 1.3).
 
-### I3. Stale player snapshots expire after 1 s (PS3 `0x467d20`, type-12 expiry `0x474a68`) - MISSING
+### I3. Stale player snapshots expire after 1 s (PS3 `0x467d20`, type-12 expiry `0x474a68`) - COVERED (gamenet.cpp, 2026-11-25; run-time checks to confirm in a match)
 
 PS3 behaviour, every frame, for every connection, before the send decision:
 
@@ -203,6 +208,25 @@ Implementation facts for PS4 (to verify at run time, not assumed): the PS4 type-
 by the fill function (PS4 `0x634970`) from the same net clock the expiry must compare with; the unreliable queue is the
 record's message layer +0x120 head / +0x128 tail with 0x28-byte nodes (TRANSPORT-INTERFACE 1.3); free nodes the way
 the PS4 reset `0x60ba10` does. Leave every other type alone (they never expire on PS3).
+
+As implemented (2026-11-25). The time stamp is read as the f32 at event `+0xc` (net clock seconds, the encoding the
+other snapshot types use, `events.md` 4.1 `Time`); the net clock is the game clock `0x1116180+0x204` / 300, which
+session.cpp also writes into the net clock object. The expired nodes are handed to the PS4 packet-lost method
+(`0x60b8f0`) as the message list of a scratch packet record: for mode 2 it releases event reference, relay list and
+node, which is the reset's way. Two run-time checks guard what static reading could not settle; each logs its
+outcome once:
+
+- Record message list layout (event at node +0, next at +0x20, as the in-flight scan of I2 also needs): checked on the
+  first packed record that holds messages (`packet record message list layout confirmed` / `layout differs`). Until
+  confirmed, I2 counts any in-flight packet as pending (the old rule) and I3 does not run; if it differs, both stay so.
+- Time stamp: expiry starts only after 8 queued type-12 events carried a stamp within 0.5 s of the net clock
+  (`snapshot expiry on`); a stamp outside [now - 60 s, now + 0.1 s] or not a number turns it off (`snapshot expiry
+  off: ... no net clock time`). The same check logs whether the type-12 vtable's expiry slot (+0x30) is the shared
+  `0x619da0` (question 4).
+
+Only mode-2 type-12 messages are removed (a type-12 event with another mode would be re-queued by the lost method,
+so it is left alone). The PS3 line is printed once per pass with a count, not once per message (a 20 s stall would
+otherwise print hundreds of lines per peer).
 
 ### I4. Unreachable peers are not tried again (PS3 `0x4e8978`, fed by `0x4e9618`, used by `0x4e9e98`, `0x4b0a58`, `0x4c41f8`) - MISSING (partly covered)
 
@@ -299,7 +323,8 @@ state from `online.cpp` (a getter next to `peer_rtt`). The byte order of the wor
    authentication tag so a stray or forged datagram cannot reach the PS4 unpack? (Not a visible PS3 behaviour; owner
    decision.)
 4. I3: confirm on PS4 that the type-12 vtable's expiry slot is the shared "never" method and that the time stamp is the
-   first payload word; if the PS4 slot already expires snapshots, only the per-frame pass is missing.
+   first payload word; if the PS4 slot already expires snapshots, only the per-frame pass is missing. gamenet.cpp now
+   answers both in the log of the first match (`snapshot expiry: type 12 uses ...`, `snapshot expiry on` / `off`).
 5. I5: the colour byte order on PS4 (same open point as `parity-b-menus.md` 2). `parity-b-menus.md` 11.4 reads the
    PS4 0x1d drawer (`0x5c0eba`): bits 16-23 / 8-15 / 0-7 red / green / blue, 24-31 alpha, so the PS3 words keep their
    meaning written as the same 32-bit values (inactive blue, pending red, active green); check it on screen.
@@ -311,13 +336,13 @@ state from `online.cpp` (a getter next to `peer_rtt`). The byte order of the wor
 | 0x464cb8 | packet header read: sequence / ack acceptance, ack field, delivered / lost per record | COVERED | gamenet.cpp `receive_peer` (same rules; 1.2) |
 | 0x465138 | packet header write (has-messages bit, 11-bit seq, 10-bit ack, 32-bit field) | COVERED | gamenet.cpp `send_peer` |
 | 0x4651b4 | "silent for more than T s" test (T = 20 s at its caller) | COVERED | I6 = parity-e 2.2: net.cpp `kTimeoutSeconds` 20 s, session.cpp `on_timeout` log |
-| 0x465218 | read packet: stamp last receive, header, unpack if new with messages | COVERED | net.cpp `last_heard` + gamenet.cpp `receive_peer` (stamp order: I1 note) |
-| 0x4652cc | write packet: window (ack-only above 30 in flight), new record, pack | MISSING | I1 (ours ack-only at 30) |
+| 0x465218 | read packet: stamp last receive, header, unpack if new with messages | COVERED | net.cpp `last_heard` + gamenet.cpp `receive_peer` (stamps first, PS3 order) |
+| 0x4652cc | write packet: window (ack-only above 30 in flight), new record, pack | COVERED | I1: gamenet.cpp `send_peer` + `gamenet_rules.h window_full` |
 | 0x465484 | module static: a word set to -1 | PLATFORM | no visible effect |
 | 0x4654c0 | static-init caller of 0x465484 | PLATFORM | no visible effect |
 | 0x467378 | module static teardown: clear the block-cipher state | PLATFORM | 4 (transport own design) |
 | 0x4673c0 | module static set-up: key the block-cipher state | PLATFORM | 4 (transport own design) |
-| 0x467438 | "something to send": queues non-empty or in-flight mode 0/1 message | MISSING | I2 (ours: any in-flight packet) |
+| 0x467438 | "something to send": queues non-empty or in-flight mode 0/1 message | COVERED | I2: gamenet.cpp `send_peer` + `gamenet_rules.h` tick / send / inflight_needs_ack |
 | 0x4674e0 | set the per-message receive hook + context | COVERED | gamenet.cpp `attach` installs the PS4 no-op hook (PS3 hook is debug-gated) |
 | 0x4674ec | module static: a word set to -1 | PLATFORM | no visible effect |
 | 0x467528 | static-init caller of 0x4674ec | PLATFORM | no visible effect |
@@ -326,12 +351,12 @@ state from `online.cpp` (a getter next to `peer_rtt`). The byte order of the wor
 | 0x467ae8 | message layer constructor (empty queues, counters) | COVERED | PS4 static constructor `0x675570` |
 | 0x467b5c | allocate a packet record | COVERED | gamenet.cpp own 0x18-byte record |
 | 0x467ba0 | queue an event (reliable gets a sequence, others unsequenced; relay list) | COVERED | PS4 `0x609fc0` and inline in `0x644ab0` |
-| 0x467d20 | per-frame removal of expired unreliable messages ("has expired") | MISSING | I3 |
+| 0x467d20 | per-frame removal of expired unreliable messages ("has expired") | COVERED | I3: gamenet.cpp `expire_peer` + `gamenet_rules.h unlink_expired` (run-time checks, I3) |
 | 0x467e88 | unpack: factory, read, relay, hook, apply; in-order reliable delivery | COVERED | PS4 `0x60a110` via gamenet.cpp `receive_peer` |
 | 0x468658 | reset: release all queued / parked messages, counters back | COVERED | PS4 `0x60ba10` (gamenet.cpp `attach` / `detach`) |
 | 0x4688a8 | packet lost: mode 0 back in order, mode 1 to the front, mode 2 released | COVERED | PS4 `0x60b8f0` |
 | 0x468a18 | packet delivered: release, advance the contiguous reliable ack | COVERED | PS4 `0x60b780` |
-| 0x468c10 | event base "expired?" = never (79 of 80 types use it) | COVERED | PS4 shared method; type 12 override is I3 |
+| 0x468c10 | event base "expired?" = never (79 of 80 types use it) | COVERED | PS4 shared method; type 12 override: gamenet_rules.h `expired` (I3) |
 | 0x468c18 | StartConnection (type 0) Read: empty | COVERED | PS4 `0x63c100` (same empty body) |
 | 0x468c1c | StartConnection (type 0) Write: empty | COVERED | PS4 `0x63c0f0` |
 | 0x468d70 | copy an 80-byte block (BreakableCollapse sender helper) | COVERED | PS4 `0x614010` (inline) |
@@ -374,8 +399,7 @@ state from `online.cpp` (a getter next to `peer_rtt`). The byte order of the wor
 | 0x4ec120 | pick the NP communication id (retail NPWR00462, beta NPWR00795) | COVERED | online.cpp `kCommunicationId` "NPWR00462_00" |
 | 0x4ec184 | NP / NP2 init with two 128 KB pools | PLATFORM | online program |
 
-Counts: COVERED 33, PLATFORM 29, MISSING 3 (I1 `0x4652cc`, I2 `0x467438`, I3 `0x467d20`: done on another branch in
-gamenet.cpp, rows updated at its merge). Before I4 - I6: COVERED 30, MISSING 6.
+Counts: COVERED 36, PLATFORM 29, MISSING 0 (I1 - I3 in gamenet.cpp, I4 - I6 below; all done 2026-11-25).
 
 ## 8. Implementation of I4 - I6 (2026-11-25, branch `u2mp-ps3-parity-3`)
 
