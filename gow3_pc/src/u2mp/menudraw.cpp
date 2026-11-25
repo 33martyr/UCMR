@@ -30,6 +30,9 @@
 // quads) and the writer 0xbdc190 asserts at 0xbdc5c2 / 0xbdc65a. install_streams raises the stream
 // sizes at their setup 0xc79d40 (guest frame-heap memory, as before) and guards 0xbdc190 so that a
 // quad that still does not fit is dropped instead of written past the end.
+//
+// Also (install_carousel_hint): the picture carousels (control kind 8) draw no "<>" beside a focused, closed
+// row while a multiplayer session is up, as PS3 (u2mp/docs/MENUS.md 3.2).
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -212,10 +215,68 @@ void install_streams(int &installed) {
     }
 }
 
+// ---- picture carousels (control kind 8): no "<>" beside a closed, focused row in multiplayer ----------
+// Draw 0x588ed0 of the kind-8 control (Game Type, Map, Playlist, Boosters, Hero / Villain) draws two arrow
+// images (type 6) beside the value whenever the row has the focus (+0x8) and its box is closed (open
+// fraction 0): the block 0x58a0d3..0x58a68d, entered past `cmpb [r14+8],0` / `je 0x58a68d` at 0x58a0ab /
+// 0x58a0bf, at the value rect from 0x57f060 + (11 / 31, -100). PS3 shows no arrows there: they belong to
+// the open box only (drawn by the same function before 0x589d35). The je goes to a stub that also skips the
+// block while a multiplayer session is up (NET_SM, s32 0x14ce97c, > 1), so the campaign's chapter carousel
+// (PAGE_CHAPTERS, also kind 8) keeps it. Flags are not live at 0x58a68d (rewritten by `test` / `vucomiss`).
+constexpr uint64_t kHintJe = 0x58a0bf;     // je 0x58a68d
+constexpr uint64_t kHintNext = 0x58a0c5;   // the hint block (vxorps; vucomiss: drawn only when closed)
+constexpr uint64_t kHintSkip = 0x58a68d;
+constexpr uint64_t kNetSm = 0x14ce97c;
+
+// rel32 of a jump / rip-relative operand ending at `from_end` to `to`; false when out of range.
+bool rel32(const unsigned char *from_end, const unsigned char *to, int32_t *out) {
+    const int64_t d = int64_t(uintptr_t(to)) - int64_t(uintptr_t(from_end));
+    if (d < INT32_MIN || d > INT32_MAX) return false;
+    *out = int32_t(d);
+    return true;
+}
+
+void install_carousel_hint(int &installed) {
+    // cmpb [r14+8],0; mov r15d,[rbp-0x7c8]; vmovss xmm1,[rbp-0x7bc]; je 0x58a68d; vxorps xmm0,xmm0,xmm0
+    static const unsigned char want[] = {0x41, 0x80, 0x7e, 0x08, 0x00, 0x44, 0x8b, 0xbd, 0x38, 0xf8, 0xff, 0xff,
+                                         0xc5, 0xfa, 0x10, 0x8d, 0x44, 0xf8, 0xff, 0xff, 0x0f, 0x84, 0xc8, 0x05,
+                                         0x00, 0x00, 0xc5, 0xf8, 0x57, 0xc0};
+    static_assert(kHintJe + 6 == kHintNext && kHintNext + 0x5c8 == kHintSkip, "je 0x58a68d at 0x58a0bf");
+    unsigned char *stub = nullptr;
+    if (!image.matches(0x58a0ab, want, sizeof want) || !(stub = near_stub(24))) {
+        log("menu draw: carousel draw 0x588ed0 differs, focus arrows left as on PS4");
+        return;
+    }
+    // je skip; cmp dword [rip+NET_SM],1; jg skip; jmp next
+    unsigned char code[24] = {0x0f, 0x84, 0, 0, 0, 0, 0x83, 0x3d, 0, 0, 0, 0, 0x01,
+                              0x0f, 0x8f, 0, 0, 0, 0, 0xe9, 0, 0, 0, 0};
+    int32_t r[4] = {};
+    unsigned char *const b = image.base;
+    if (!rel32(stub + 6, b + kHintSkip, &r[0]) || !rel32(stub + 13, b + kNetSm, &r[1]) ||
+        !rel32(stub + 19, b + kHintSkip, &r[2]) || !rel32(stub + 24, b + kHintNext, &r[3])) {
+        log("menu draw: no stub in range for the carousel focus arrows");
+        return;
+    }
+    std::memcpy(code + 2, &r[0], 4);
+    std::memcpy(code + 8, &r[1], 4);
+    std::memcpy(code + 15, &r[2], 4);
+    std::memcpy(code + 20, &r[3], 4);
+    std::memcpy(stub, code, sizeof code);
+    int32_t to_stub = 0;
+    if (!rel32(b + kHintJe + 5, stub, &to_stub)) return;
+    unsigned char *site = b + kHintJe;
+    site[0] = 0xe9;
+    std::memcpy(site + 1, &to_stub, 4);
+    site[5] = 0x90;
+    log("menu draw: picture carousels draw no focus arrows in multiplayer (0x%llx -> stub)", (unsigned long long)kHintJe);
+    ++installed;
+}
+
 }  // namespace
 
 void install_menudraw(int &installed) {
     install_streams(installed);   // first: more surviving 2D commands need room in the streams
+    install_carousel_hint(installed);
 
     static const unsigned char mov_size[] = {0xbf, 0x00, 0x00, 0x03, 0x00, 0xe8};
     static const unsigned char or_flags[] = {0x48, 0x0d, 0x00, 0x00, 0x0c, 0x00};

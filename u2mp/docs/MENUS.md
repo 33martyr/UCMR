@@ -18,8 +18,9 @@ Uncharted 2 multiplayer notes or code were used. Code: `gow3_pc/src/u2mp/menus.c
    (`+0x58..+0x5c` on PS4: action 22, condition 97..101/130/137, help-bar id). The only menu.bin
    difference that matters is the missing Multiplayer button in the main menus, which
    the menu overlay (`u2import --overlay`, overlay.cpp) already adds. The overlay also takes the Trophies mode
-   button (BUTTON_NETTROPHIES) off PAGE_MULTIPLAYER (owner 2026-11-25: PC has no trophies; 3.1). Nothing else is
-   patched in menu.bin.
+   button (BUTTON_NETTROPHIES) off PAGE_MULTIPLAYER (owner 2026-11-25: PC has no trophies; 3.1). Since overlay
+   version 7 it also makes PAGE_LOBBY's five custom game option rows drop-downs (kind 6 -> 13): the data is the
+   same as PS3, but the PS4 code draws kind 6 differently (3.2). Nothing else is patched in menu.bin.
    Since overlay version 6 (`spec/parity-n-remaining.md` N3) the overlay gives the three main menus new control
    lists with a new Multiplayer code button and leaves BUTTON_MULTIMEDALS as shipped, in the PS3 order:
    PAGE_NEWPROFILE New Game, Load Game, Multiplayer, Options, Multiplayer Medals; PAGE_NEWPROFILE_BETA Multiplayer,
@@ -125,6 +126,29 @@ State: **stub** = `ret`; **wrap** / **port** = changed by menus.cpp; otherwise i
   game becomes a game of that type (SetNetGame `63dc30`); Start Match then picks a random game of
   that type (session.cpp). The status line as in 3.1.
 
+**Option boxes and the stray "<>" (owner report 2026-11-25, PS3 video `u2menu.mp4`).** On PS3, X on an option
+row opens a box over the dimmed page: a list (Variation, Score Limit, Time Limit, Rounds, Co-op Difficulty,
+Friendly Fire, Team) or, for the picture carousels (Game Type, Map, Playlist; 3.3: Boosters, Hero, Villain), the
+row's label and value above a fan of pictures with the arrows at the box's edges; a focused, closed row shows no
+arrows. On PC Variation .. Co-op Difficulty had no box and every focused carousel showed a small "<>" pair right of
+(or above) its value. menu.bin is not the cause: PAGE_LOBBY and PAGE_MULTIPLAYER_PLAYER_OPTIONS have the same
+kinds, flags, columns, conditions and `+0x68` (PS3 `+0x44`) on both games. Kinds (PS4 control construction switch
+`0x5c5871`, jump table `0x5c7b30`, record `+0x10`):
+
+| kind | rows | PS4 class (vtable; update, draw) | PS4 behaviour |
+|---|---|---|---|
+| 6 | Variation, Score Limit, Rounds, Time Limit, Co-op Difficulty | `0x57df50` list, `0x1007090`; `0x57e410`, `0x581e60` -> `0x57e7c0` | inline: left / right change the value at once, arrows (type 6) at value right + 11 / + 31 when editable; no box |
+| 8 | Playlist, Game Type, Map, Boosters 0/1, Hero, Villain | `0x5881c0`, `0x1007220`; `0x588360`, `0x588ed0` | X / left / right open the box (`+0x24c`, fraction `+0x250` over 1/6 s), X commits, O reverts; box, fan (`0x58ab40`, `+0x254` = 5 per side) and arrows drawn while open |
+| 13 | Friendly Fire, Team, Co-op Difficulty (profile), Taunt, Matchmaking | `0x586b80`, `0x10071b0` (a kind-7 list `0x1007120` inside, box rows = record `+0x68`) | drop-down box as PS3 |
+
+PS4 kind 6 is Bluepoint's inline spinner of the Collection's options (their own rows BP_MENU_SPEEDRUN_TYPE, the
+audio output page and Motion Blur are kind 6); Bluepoint changed the campaign's difficulty row (PAGE_GAMEPLAY, PS3
+kind 6) to kind 13 for the box. Kind 8 still opens the PS3 box, but its draw adds an arrow pair for a focused
+closed row (`0x58a0ab..0x58a68d`, value rect + (11 / 31, -100)): the stray "<>".
+Fix: the overlay (version 7) makes the five kind-6 rows kind 13, the record otherwise unchanged (queries, flags 0,
+`+0x64` 0, `+0x68` 5 rows as Team); menudraw.cpp skips the kind-8 closed-row arrows while NET_SM > 1 (the
+campaign's chapter carousel, also kind 8, keeps them). Friendly Fire was kind 13 already. Not verified in the game.
+
 ### 3.3 PAGE_MULTIPLAYER_PLAYER_OPTIONS ("Profile"; page handler `5ed8b0` = remaining.cpp)
 
 Rank widget (k19, cond 105: rank and progress to the next rank from cash), Boosters Slot 1/2
@@ -132,7 +156,8 @@ Rank widget (k19, cond 105: rank and progress to the next rank from cash), Boost
 skin selection), co-op difficulty, taunt, matchmaking preference, toggles (108..110). All queries
 intact; their data is NetPlayerData (now loaded and saved). Restored texts: NET_CLANTAG label
 (d4143b18 "Clan Tag") and the empty-tag text (639e0fa8 "None"). The clan tag button explains it is
-not available on PC (remaining.cpp).
+not available on PC (remaining.cpp). Boosters and Hero / Villain are kind-8 carousels, Co-op Difficulty, Taunt and
+Matchmaking kind-13 drop-downs: no "<>" beside a focused closed carousel in multiplayer (3.2).
 
 ### 3.4 Store ("Rewards"): PAGE_MULTIPLAYER_STORE, PAGE_MULTIPLAYER_STORE_ITEMS
 
