@@ -287,6 +287,12 @@ Fix (runtime, menus.cpp; no import step, no new asset, no PS3 asset):
    (action 0xa and exchange), else "|R1| ". When the u64 at record +0 is not the address of wanted, write it (8 bytes;
    the segment is read-only: make it writable for the write and put it back, as `netinit.cpp` `write_code` does with
    `HostCodeWrite`) and log `menus: help bar shoulder icons %s` (`L1 / R1` or `exchanged`) once per change.
+   At the first write it also logs `menus: shoulder setting %u, exchange %u` (u32 `+0x4888`, `+0x4870`; test (a)).
+   If a record cannot be made writable: log `menus: help bar record 0x%llx cannot be made writable (%lu), Prev /
+   Next icons left alone` and stop the fix-up for the session.
+
+Built 2026-11-25 (`menus.cpp` `menus_help_bar_frame()`, called first in `session.cpp` `page_handler` after the
+version text; old-vs-new harness `menus`: scenarios HB-1 and HB-2). Not yet checked in the game.
 
 Result: "[L1] Prev [R1] Next" exactly as PS3 while the PS4 shoulder setting is on (the menu then runs Prev / Next
 from L1 / R1, as PS3); with the setting off (0, what the game's initializers `0x90dd64` / `0xdc6563` write before the
@@ -394,7 +400,7 @@ Three causes cover most of the gaps:
 | PAGE_LOBBY, matchmaking (7) | Find Match, playlist "Deathmatch" with picture card | playlist "Machinima", empty picture box | Machinima (the cinema game type, text 5614c769) is no playlist; Deathmatch first; picture: type 0x25 replaced by the type 3 net image `general/net/playlists/<deathmatch, objective, coop, survival, default>` chosen by game type (the PS4 net.pak has these five) |
 | PAGE_LOBBY, custom game (8, 14-18) | Game Type with mode icon, Map with card + name, Variation, Score / Time Limit, Friendly Fire; party leader with badge; Team | rows on one line ("Variation/Game Type"), party leader and members empty | party rows: cond 26..35 have table args 10..19 and the roster query read them as rows 10..19 (empty); now row = arg % 10 as PS3 `0x4bc780` (and the PARTY_PLAYERn callback likewise). Rows / icons / map cards: cause 2. DLC map cards are not in the PS4 net.pak (IMPORT.md). Leader badge: cause 3 |
 | PAGE_MULTIPLAYER_PLAYER_OPTIONS, Profile (9-11) | rank ring and money, Boosters Slot 1/2 with names and icons, Clan Tag, Hero / Villain portraits, Co-op Difficulty, Taunt, Matchmaking, Golden Guns; booster carousel with descriptions | empty, footer UNTRANSLATED | Clan Tag label and "Enter Clan Tag..."; footer texts; booster and portrait images are type 3 (cause 2). Rank badge in the k19 widget (type 0x27): cause 3. Why the whole page was empty is not explained by the code (all its queries are intact): check with the new build |
-| PAGE_MENU_LEADERBOARD (12) | Rank, Level badge, Players, Kills, Deaths, Ratio; footer Filter / Prev / Next / Top of List | footer UNTRANSLATED; no table at all (column set never written, 3.8) | footer texts (PS3 wording); the table (PS3 start-over at Multiplayer entry + fresh-list rule, 3.8); footer L1 / R1 pictures (3.8.1, specified, to build); rows from progression.cpp; level badge = type 0x27 (cause 3) |
+| PAGE_MENU_LEADERBOARD (12) | Rank, Level badge, Players, Kills, Deaths, Ratio; footer Filter / Prev / Next / Top of List | footer UNTRANSLATED; no table at all (column set never written, 3.8) | footer texts (PS3 wording); the table (PS3 start-over at Multiplayer entry + fresh-list rule, 3.8); footer L1 / R1 pictures (3.8.1, built 2026-11-25, not yet checked in the game); rows from progression.cpp; level badge = type 0x27 (cause 3) |
 | PAGE_NET_TROPHIES (13) | list with icons, progress bars, counts, description | title / label only | DROPPED (owner 2026-11-25: PC has no trophies): no button leads there (3.1, 3.8) |
 | PAGE_CINEMA (19) | Local Files, map picture, Author / Players / Length / Size / Date | not reported | texts; the list picture uses type 0x22 (cause 3) |
 

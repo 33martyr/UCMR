@@ -12,6 +12,9 @@
 #include <cstdint>
 
 #ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX   // keep std::min / std::max usable in the files that include this
+#endif
 #include <windows.h>
 #else
 #include <cerrno>

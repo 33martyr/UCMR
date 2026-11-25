@@ -39,6 +39,7 @@ void menu_draw_quad(uint8_t *material, float x, float y, float w, float h, float
 }  // namespace u2mp_old
 namespace u2mp {
 void install_menus(int &installed);
+void menus_help_bar_frame();   // MENUS.md 3.8.1 (new only: the HB scenarios)
 void install_menuimages(int &installed);
 int32_t playlist_pick_type();
 bool playlist_game_types(std::vector<int32_t> &types);
@@ -438,8 +439,14 @@ void b2782c2_friend_card_step(int &n) {
     n += 1;
 }
 
+// 2026-11-25 (MENUS.md 3.8.1): install_menus first checks the four help-bar shoulder records and their two token
+// strings. The compared scenarios' image holds none of them, so the new build logs that it leaves the icons alone;
+// the old record gets that line. The help-bar scenarios (HB-1, HB-2, new only) build the records.
+const char kHelpBarDiffer[] = "log menus: help bar shoulder records differ, Prev / Next icons left alone";
+
 void inst_menus(const Api &a) {
     int n = 100;
+    if (a.install_menus == A_old.install_menus) rec("%s", kHelpBarDiffer);
     a.install_menus(n);
     if (a.install_menus == A_old.install_menus) b2782c2_friend_card_step(n);
     rec("installed %d", n);
@@ -912,6 +919,93 @@ namespace {
 // ======================================================================================================
 // menus scenarios
 // ======================================================================================================
+// ---- help bar shoulder icons (MENUS.md 3.8.1), new only ------------------------------------------------------
+// The four records as MENUS.md lists them (u64 token, u32 action, u32 text id, u32 callback id, u8 shown).
+struct HelpRec {
+    uint64_t off;
+    uint32_t action, text, callback;
+};
+const HelpRec kHelpRecs[] = {{0x1041710, 0xb, 0x5ba2fdfb, 0xd1683525},
+                             {0x10416f8, 0xa, 0x8994a031, 0x035e68ef},
+                             {0x1041758, 0xb, 0x1842529c, 0x6b2970e2},
+                             {0x10417a0, 0xa, 0x90354b88, 0x130ecc72}};
+constexpr uint64_t kTokL1 = 0xe8957b, kTokR1 = 0xe8956e, kPadExchange = 0x1059640 + 0x4870,
+                   kPadSetting = 0x1059640 + 0x4888;
+
+void help_bar_image() {
+    std::memcpy(mem + kTokL1, "|L1-NOSWAP| ", 13);
+    std::memcpy(mem + kTokR1, "|R1-NOSWAP| ", 13);
+    for (const HelpRec &r : kHelpRecs) {
+        put<uint64_t>(r.off, addr(r.action == 0xb ? kTokL1 : kTokR1));
+        put<uint32_t>(r.off + 8, r.action);
+        put<uint32_t>(r.off + 0xc, r.text);
+        put<uint32_t>(r.off + 0x10, r.callback);
+        put<uint8_t>(r.off + 0x14, 1);
+    }
+    put<uint32_t>(kPadSetting, 1);
+}
+std::string token_of(const HelpRec &r) {
+    const uint64_t p = get<uint64_t>(r.off);
+    if (p == addr(kTokL1)) return "L1-NOSWAP";
+    if (p == addr(kTokR1)) return "R1-NOSWAP";
+    return reinterpret_cast<const char *>(uintptr_t(p));
+}
+// every record shows `prev` for action 0xb and `next` for 0xa
+bool help_bar_shows(const std::string &prev, const std::string &next) {
+    for (const HelpRec &r : kHelpRecs)
+        if (token_of(r) != (r.action == 0xb ? prev : next)) return false;
+    return true;
+}
+
+void help_bar_scenarios() {
+    run_new("HB-1 help bar icons: L1 / R1, exchanged and back (new only)", [](const Api &a) {
+        help_bar_image();
+        menus_ready(a);
+        EXPECT(lines(kHelpBarDiffer) == 0);
+        EXPECT(help_bar_shows("L1-NOSWAP", "R1-NOSWAP"));   // install only checks
+        u2mp::menus_help_bar_frame();
+        EXPECT(help_bar_shows("|L1| ", "|R1| "));
+        EXPECT(lines("log menus: shoulder setting 1, exchange 0") == 1);
+        EXPECT(lines("log menus: help bar shoulder icons L1 / R1") == 1);
+        u2mp::menus_help_bar_frame();   // nothing to write: no log
+        EXPECT(lines("log menus: help bar shoulder icons L1 / R1") == 1);
+        put<uint32_t>(kPadExchange, 7);
+        u2mp::menus_help_bar_frame();
+        u2mp::menus_help_bar_frame();
+        EXPECT(help_bar_shows("|R1| ", "|L1| "));
+        EXPECT(lines("log menus: help bar shoulder icons exchanged") == 1);
+        put<uint32_t>(kPadExchange, 0);
+        u2mp::menus_help_bar_frame();
+        EXPECT(help_bar_shows("|L1| ", "|R1| "));
+        EXPECT(lines("log menus: help bar shoulder icons L1 / R1") == 2);
+        // a record put back to its token (e.g. by the game) is fixed again without a new log
+        put<uint64_t>(kHelpRecs[1].off, addr(kTokR1));
+        u2mp::menus_help_bar_frame();
+        EXPECT(help_bar_shows("|L1| ", "|R1| "));
+        EXPECT(lines("log menus: help bar shoulder icons L1 / R1") == 2);
+        EXPECT(lines("log menus: shoulder setting 1, exchange 0") == 1);
+    });
+    // any checked byte different: logged at install, no record is ever written
+    struct Bad {
+        const char *name;
+        uint64_t off;
+    };
+    const Bad bad[] = {{"L1 token", kTokL1 + 3},          {"R1 token", kTokR1 + 12},
+                       {"Prev action", 0x1041710 + 8},    {"Next text id", 0x10416f8 + 0xc},
+                       {"0x1041758 callback", 0x1041758 + 0x13}, {"Store shown", 0x10417a0 + 0x14},
+                       {"Store +0x17", 0x10417a0 + 0x17}};
+    for (const Bad &b : bad)
+        run_new(std::string("HB-2 help bar ") + b.name + " differs: left alone (new only)", [b](const Api &a) {
+            help_bar_image();
+            mem[b.off] ^= 0x01;
+            menus_ready(a);
+            EXPECT(lines(kHelpBarDiffer) == 1);
+            u2mp::menus_help_bar_frame();
+            for (const HelpRec &r : kHelpRecs) EXPECT(get<uint64_t>(r.off) == addr(r.action == 0xb ? kTokL1 : kTokR1));
+            for (const auto &l : hx::calls) EXPECT(l.rfind("log menus: help bar shoulder icons", 0) != 0);
+        });
+}
+
 void menus_install_scenarios() {
     run("1 install: good table", [](const Api &a) { menus_ready(a); });
     run("2a install: first cond not 50", [](const Api &a) {
@@ -1002,6 +1096,7 @@ void menus_install_scenarios() {
         for (int i = 0; i < 12; ++i) ask(ETRACE + 3, 9, -i);   // 134: 12 lines
         ask(ETRACE + 3, 9, 99);
     });
+    help_bar_scenarios();
 }
 
 void menus_query_scenarios() {

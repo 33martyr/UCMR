@@ -420,7 +420,8 @@ wins, losses, rank, cut to at most 255 characters. When no player has that name,
 
 #### 1.5.19 Leaderboard start-over (`progression_multiplayer_entered()` and the fresh-list rule)
 
-Settled 2026-11-25 from PS3 1.10 (replaces the page-shown handler of the same day). Rule:
+Settled 2026-11-25 from PS3 1.10 (replaces the page-shown handler of the same day). Built the same day (the page
+handler removed; tests P-M1..P-M4 in the old-vs-new harness `progression`, new-only scenarios). Rule:
 
 1. **Multiplayer entered** (`progression_multiplayer_entered()`, called by `session.cpp` `button_multiplayer` right
    after `netinit_prepare()`): nothing when `image.base` is NULL. Otherwise end a running online fetch (online
@@ -570,7 +571,10 @@ Others:
   refresh, reset 0: step 5 returns (no fetch, page kept) - a second visit shows the table as left.
 - P-M4 fresh list (+0x40..+0x54 all zero), LB reset 0, LB board 1, friends 1: reset path (rule 3), fetch of board 1
   Friends with page -1, column set of board 1 written; the same list on the next update: no reset.
-- Fixtures of P-B3..P-B7 need a non-zero column set at list +0x40 (with 0 they now take the reset path).
+- Fixtures of P-B3..P-B7 need a non-zero column set at list +0x40 (with 0 they now take the reset path). (The
+  harness fixtures already hold 0x11111111 there; P-B12, whose list overlaps the LB object, sets LB +0x79 to 1.)
+  P-M1..P-M4 run in `gow3_pc/tests/u2mp_rewrite/test_progression.cpp` (new only; P-M1b is the `image.base` NULL
+  case); `test_u2mp_progression.cpp` still links only the store.
 - In game, PS3 rules: (1) enter Multiplayer, open Leaderboards: "Competitive Kills - Global", Rank / Level / Players /
   Kills / Deaths / Ratio, 11 stripes (empty or "my page"); log `rankings: multiplayer entered: ...` once at the
   Multiplayer button and (linked) `online: rankings: board 300 mode 2` at the first visit only. (2) R1 to Competitive

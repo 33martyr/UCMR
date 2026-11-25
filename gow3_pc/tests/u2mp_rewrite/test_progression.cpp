@@ -45,6 +45,7 @@ void progression_publish();
 std::vector<std::string> progression_players_met();   // was progression_recent_players (parity G1, f11e480)
 void progression_note_met(const std::vector<std::string> &names);
 std::string progression_player_summary(const std::string &name);
+void progression_multiplayer_entered();   // progression.md 1.5.19 (new only: the P-M scenarios)
 void netinit_prepare();
 void netinit_match();
 void netinit_dump(const char *when);
@@ -1635,6 +1636,7 @@ void define() {
         put<uint8_t>(LB + 0x84, 1);
         put<uint32_t>(LB + 0x24, 30);
         put<int32_t>(LB + 0x74, 1);
+        put<uint8_t>(LB + 0x79, 1);   // list column set (+0x40) non-zero: 0 now takes the reset path (1.5.19 rule 3)
         list_update(LB + 0x39);
         put<uint8_t>(LB + 0x78, 1);
         put<uint32_t>(LB + 0x80, 2);
@@ -1654,6 +1656,108 @@ void define() {
         st.linked = false;
         put<int32_t>(LIST + 0x44, 1);
         list_update();
+    });
+
+    // ---------------- leaderboard start-over (1.5.19, 2026-11-25), new only ----------------
+    // Multiplayer entered: board 0, Global, "my page", reset request; a list object that never fetched (column set 0)
+    // starts over by itself. The old code had neither.
+    auto mp_entered = [] {
+        rec("-> multiplayer_entered");
+        u2mp::progression_multiplayer_entered();
+        lb_fields();
+    };
+    // the record lines from `from` (exclusive) to the next "-> " line
+    auto after = [](const Result &r, const std::string &from) {
+        std::vector<std::string> v;
+        auto it = std::find(r.rec.begin(), r.rec.end(), from);
+        if (it == r.rec.end()) return v;
+        for (++it; it != r.rec.end() && it->rfind("-> ", 0) != 0; ++it) v.push_back(*it);
+        return v;
+    };
+    const std::string mp_log = "log rankings: multiplayer entered: leaderboards back to board 0, global";
+    const std::string lb_reset = "lb total=0 count=0 page=-1 status=0 busy=0 reset=1 board=0 friends=0 refresh=0";
+    N("P-M1 multiplayer entered during an online fetch", [lb_setup, mp_entered] {
+        lb_setup();
+        st.linked = true;
+        st.board_state = 1;
+        list_state(0, 0, 1, 0, 0, 0, 50);
+        list_update();   // range of page 1 started: stage 2, busy 1
+        put<uint32_t>(LB + 0x80, 2);
+        put<uint8_t>(LB + 0x84, 1);
+        put<uint8_t>(LB + 0x85, 1);
+        put<int32_t>(LB + 0x74, 3);
+        put<uint32_t>(LB + 0x70, 4);
+        mp_entered();
+        list_update();   // the fetch ended: the update runs (no wait) and starts over
+    }, [after, mp_log, lb_reset](const Result &r) {
+        const auto v = after(r, "-> multiplayer_entered");
+        EXPECT(v.size() == 3 && v[0] == mp_log && v[1] == lb_reset);
+        EXPECT(requests(r) == std::vector<std::string>({"online::board_request 300 0 12 11 -> 1",
+                                                        "online::board_request 300 2 0 1 -> 1"}));
+    });
+    N("P-M1b multiplayer entered with image base NULL", [lb_setup] {
+        lb_setup();
+        put<uint32_t>(LB + 0x80, 2);
+        put<uint8_t>(LB + 0x84, 1);
+        rec("-> multiplayer_entered");
+        hx::set_image_both(nullptr, 0);
+        u2mp::progression_multiplayer_entered();
+        hx::bind_both();
+        lb_fields();
+    }, [after, mp_log](const Result &r) {   // nothing written, nothing logged
+        const auto v = after(r, "-> multiplayer_entered");
+        EXPECT(!v.empty() && v[0] == lb_line(0, 0, 0, 0, 2, 1));
+        EXPECT(count_of(r, mp_log) == 0);
+    });
+    N("P-M2 list update after multiplayer entered", [lb_setup, mp_entered] {
+        lb_setup();
+        st.linked = true;
+        st.board_state = 1;
+        put<uint32_t>(LB + 0x80, 2);
+        put<uint8_t>(LB + 0x84, 1);
+        put<uint32_t>(LIST + 0x40, 7);
+        put<int32_t>(LIST + 0x50, 2);
+        put<uint8_t>(LIST + 0x54, 1);
+        mp_entered();
+        list_update();
+    }, [](const Result &r) {   // reset path: board shown -1 -> 0, page -1, "my page" lookup of board 0 Global
+        EXPECT(requests(r) == std::vector<std::string>({"online::board_request 300 2 0 1 -> 1"}));
+        EXPECT(starting(r, "list cols=").back() == "list cols=000000c0 delta=0 +48=00000000 page=-1 board=0 friends=0");
+        EXPECT(last_lb(r) == "lb total=0 count=0 page=-1 status=0 busy=1 reset=0 board=0 friends=0 refresh=0");
+    });
+    N("P-M3 second visit, no multiplayer entry", [lb_setup] {
+        lb_setup();
+        st.linked = true;
+        st.board_state = 1;
+        list_state(1, -1, 0, 1, 1, 0, 30);
+        list_update();   // board shown -1: friends board fetch
+        st.board_state = 0;
+        st.my_npid = "Me";
+        list_update();   // filled; nothing changed after it
+        list_update();   // the next visit: the same table, no fetch
+    }, [](const Result &r) {
+        EXPECT(requests(r) == std::vector<std::string>({"online::board_request 301 1 0 100 -> 1"}));
+        const auto lists = starting(r, "list cols=");
+        EXPECT(lists.size() >= 3 && lists[lists.size() - 1] == lists[lists.size() - 2]);
+        EXPECT(lists.back() == "list cols=000000c1 delta=0 +48=22222222 page=0 board=1 friends=1");
+    });
+    N("P-M4 fresh list object starts over by itself", [lb_setup] {
+        lb_setup();
+        st.linked = true;
+        st.board_state = 1;
+        put<uint32_t>(LB + 0x80, 1);
+        put<uint8_t>(LB + 0x84, 1);
+        put<int32_t>(LB + 0x74, 2);
+        list_update();   // list +0x40..+0x54 all zero, reset 0
+        st.board_state = 0;
+        st.my_npid = "Me";
+        list_update();   // filled; no second reset
+        list_update();
+    }, [](const Result &r) {
+        EXPECT(requests(r) == std::vector<std::string>({"online::board_request 301 1 0 100 -> 1"}));
+        const auto lists = starting(r, "list cols=");
+        EXPECT(lists.size() >= 3 && lists[0] == "list cols=000000c1 delta=0 +48=00000000 page=-1 board=1 friends=1");
+        EXPECT(lists.back() == "list cols=000000c1 delta=0 +48=00000000 page=0 board=1 friends=1");
     });
 
     // ---------------- others ----------------
