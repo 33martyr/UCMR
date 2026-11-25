@@ -18,13 +18,20 @@
 //     original game (no Multiplayer Medals here, as on PS3).
 // PAGE_MULTIPLAYER loses its Trophies mode button (BUTTON_NETTROPHIES, to PAGE_NET_TROPHIES; owner 2026-11-25: PC has
 // no trophies): a new list with the other controls in their order (the page's default control, Matchmaking, stays).
+// PAGE_LOBBY's five custom game option rows (Variation, Score Limit, Rounds, Time Limit, Co-op Difficulty) become
+// drop-down controls (kind 13, like Team and Friendly Fire) in place of kind 6. PS3 opens a box with the choices for
+// them; the PS4 code draws kind 6 as Bluepoint's inline "value <>" spinner instead (Bluepoint made the campaign's
+// difficulty row kind 13 for the same reason). The records keep everything else, so the queries and the box height
+// (+0x68, 5 rows) are as shipped (u2mp/docs/MENUS.md 3.2).
 //
 // menu.bin is Naughty Dog DC data ('00CD', version 1): u32 data end at +8; 64-bit pointers are offsets into the file;
 // after the data a u32 byte count and a bitmap with one bit per 8-byte slot (least significant bit first), set where
 // the slot holds a pointer. A name's id is the CRC-32 of the name (MSB first, polynomial 0x04C11DB7, no initial value,
 // no final xor). Page record: +0 name, +8 id, +0x38 pointer to {u64 count, u64 base} of 0x70-byte control records:
 // +0 name, +8 id, +0x10 kind (2 button, 1 spacer), +0x14 flags, +0x20 label, +0x28 label id, +0x30 action (20 go to
-// page), +0x34 visibility condition (0 always), +0x48 target page, +0x50 its id, +0x58 column (0xffffffff: spacer).
+// page), +0x34 visibility condition (0 always), +0x48 target page, +0x50 its id, +0x58 column (0xffffffff: spacer),
+// +0x64 / +0x68 (s16) the drop-down's arguments (+0x68: rows shown in its box). Kinds used here: 6 inline list, 8
+// picture carousel, 13 drop-down (the construction switch of the game, u2mp/docs/MENUS.md 3.2).
 // Every value is checked before anything changes; the source is only read. Rebuilt only when the source changed
 // (state.json).
 #include "u2import.hpp"
@@ -34,9 +41,10 @@ namespace {
 
 const char *MENU = "u2data/build/main/dc1/ps4/menu.bin";
 // bump when the overlay changes for the same sources (5: Multiplayer is a code button; 6: Multiplayer Medals kept, no
-// Trophies button)
-const int VERSION = 6;
+// Trophies button; 7: custom game option rows are drop-downs)
+const int VERSION = 7;
 const size_t RECORD = 0x70;
+const uint32_t KIND_LIST = 6, KIND_DROPDOWN = 13;
 
 uint32_t name_id(const std::string &name) {
     uint32_t crc = 0;
@@ -208,6 +216,33 @@ std::vector<Rec> multiplayer_records(const Bytes &d, size_t bitmap) {
     return v;
 }
 
+// PAGE_LOBBY's kind-6 rows, in place: exactly the five custom game option rows (by label), flags 0, no drop-down
+// argument, a box of 5 rows; each becomes kind 13. Records already of kind 13 (a menu patched before) are left.
+// Returns the rows changed.
+size_t lobby_dropdowns(Bytes &d) {
+    const std::set<uint32_t> want = {name_id("MENU_MULTIPLAYER_CUSTOMVARIATION"), name_id("MENU_MULTIPLAYER_CUSTOMSCORELIMIT"),
+                                     name_id("MENU_MULTIPLAYER_CUSTOMROUND"), name_id("MENU_MULTIPLAYER_CUSTOMTIMELIMIT"),
+                                     name_id("MENU_MULTIPLAYER_CUSTOMDIFFICULTY")};
+    const auto [count, base] = page_controls(d, "PAGE_LOBBY");
+    std::vector<size_t> rows;
+    std::set<uint32_t> seen;
+    for (size_t i = 0; i < count; i++) {
+        const size_t at = size_t(base) + i * RECORD;
+        const uint32_t kind = u32(d, at + 0x10), label = u32(d, at + 0x28);
+        if (!want.count(label)) {
+            if (kind == KIND_LIST) throw std::runtime_error("ValueError: PAGE_LOBBY has an unexpected list row");
+            continue;
+        }
+        if ((kind != KIND_LIST && kind != KIND_DROPDOWN) || u32(d, at + 0x14) != 0 || u32(d, at + 0x64) != 0 || u32(d, at + 0x68) != 5 ||
+            !seen.insert(label).second)
+            throw std::runtime_error("ValueError: PAGE_LOBBY's custom game rows are not as expected (not the Uncharted 2 1.02 menu?)");
+        if (kind == KIND_LIST) rows.push_back(at);
+    }
+    if (seen != want) throw std::runtime_error("ValueError: PAGE_LOBBY lacks a custom game row");
+    for (size_t at : rows) p32(d, at + 0x10, KIND_DROPDOWN);
+    return rows.size();
+}
+
 size_t patch_menu(Bytes &d) {
     if (strings(d, "PAGE_MULTIPLAYER").empty()) throw std::runtime_error("ValueError: menu.bin has no PAGE_MULTIPLAYER (not Uncharted 2?)");
     const auto [bitmap, bsz] = pointer_bitmap(d);
@@ -219,6 +254,7 @@ size_t patch_menu(Bytes &d) {
     const uint64_t beta_base = expect_controls(d, "PAGE_NEWPROFILE_BETA", {"BUTTON_BETA_TRAILER", "BUTTON_OPTIONS", "BUTTON_MULTIMEDALS"});
     expect_medals(d, bitmap, size_t(fresh_base) + 3 * RECORD, "PAGE_NEWPROFILE");
     expect_medals(d, bitmap, size_t(beta_base) + 2 * RECORD, "PAGE_NEWPROFILE_BETA");
+    lobby_dropdowns(d);   // in place: the old data is copied below
 
     // After the old data, 16-byte aligned: the two name strings, then each new list ({u64 count, u64 base}, records).
     const size_t start = (size_t(end) + 15) & ~size_t(15), name = start, label = start + 24, lists = start + 48;
@@ -298,7 +334,8 @@ fs::path build_overlay(const fs::path &game, const fs::path &out, const std::opt
     fs::rename(tmp, target, ec);
     if (ec) throw std::runtime_error("cannot write " + S(target) + ": " + ec.message());
     write_text(state, want);
-    log(fmt("u2mp: Multiplayer button in the main menus, Multiplayer Medals kept, no Trophies button (%zu pages) -> %s", n, S(target).c_str()));
+    log(fmt("u2mp: Multiplayer button in the main menus, Multiplayer Medals kept, no Trophies button, custom game drop-downs (%zu pages) -> %s",
+            n, S(target).c_str()));
     return out;
 }
 

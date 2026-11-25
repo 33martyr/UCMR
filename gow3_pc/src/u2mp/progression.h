@@ -16,6 +16,9 @@ void install_progression(int &installed);
 void progression_publish();
 // One career publish (progression.md 1.5.4: counter +1, store written) when NetPlayerData is connected, changed or not.
 void progression_publish_career();
+// Multiplayer was entered (spec progression.md 1.5.19): the leaderboards go back to board 0, Global, "my page" and
+// the list starts over at its next update. For the session layer to call from the Multiplayer button.
+void progression_multiplayer_entered();
 
 // The Players Met rows (local store, spec parity-g-friends.md G1): players added at a match start, no friend,
 // most recently seen first, at most 50. Online it is empty until the RPCN friend list is known.

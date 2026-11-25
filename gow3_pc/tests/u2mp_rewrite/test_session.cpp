@@ -591,6 +591,13 @@ void expected_new(std::vector<std::string> &r, std::vector<uint8_t> &img, uint8_
         // session.md 5.4 (parity J6, commit dc349a9): a Multiplayer entry that starts the transport (5.5 step 3's
         // first call follows netpatch_load) puts the voice volume back first
         if (l == "gamenet::set_transport set" && prev == "netpatch_load") o.push_back("voice::reset_volume");
+        // progression.md 1.5.19 (2026-11-25): the Multiplayer button starts the leaderboards over right after
+        // netinit_prepare (the PS3 NetInit leaderboard init)
+        if (l == "netinit_prepare") {
+            o.push_back(l);
+            o.push_back("progression_multiplayer_entered");
+            continue;
+        }
         // session.md 5.6 (parity D): a preload package found present gets its keep flag again
         if (l == "netpatch_load") requested.clear();
         if (l.rfind("guest RequestPackage ", 0) == 0) {

@@ -29,12 +29,18 @@ jobs:
         uses: actions/checkout@v6
         with:
           submodules: recursive
+
       - name: Setup Pages
         uses: actions/configure-pages@v5
+
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v4
         with:
           path: assets/website
+          name: github-pages-${{ github.run_attempt }}
+
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
+        with:
+          artifact_name: github-pages-${{ github.run_attempt }}

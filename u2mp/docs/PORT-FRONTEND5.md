@@ -99,6 +99,10 @@ refresh `0x4233c4`. Not verified in the game: the NULL-context page draw (`0x5a6
 
 ## 4. Profile editor sizes (second pass)
 
+Correction (2026-11-25, MENUS.md 3.2): case 8 `0x5c60ad` constructs class `0x5881c0` (vtable `0x1007220`, update
+`0x588360`, draw `0x588ed0`, the fan `0x58ab40`); `0x10072b0` (`0x58b410` / `0x58b6f0`) is the class of kind 9
+(case `0x5c6128`). Sections 4 and 6 below describe that kind-9 class.
+
 The kind-8 control (rich rows / carousels, LIST_BOOSTERS, LIST_PREFERED_*) is class vtable `0x10072b0`
 (control construction switch `0x5c5880`, case 8 `0x5c60ad`): update `0x58b410` (which also drives the
 gallery slot `[this+0x238]`), draw `0x58b6f0`. Its direct converter calls are the panel (type 0xe, box =

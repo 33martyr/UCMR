@@ -502,6 +502,8 @@ rank/team, last seen NET_SM, the frame and rate-log counters, the net clock obje
 ### 5.3 Page handler (event pointer)
 
 Only when the pointer is non-NULL and event[0] == 6:
+0. (2026-11-25) After the menu version text: `menus_help_bar_frame()` (menus.cpp, `MENUS.md` 3.8.1: the help bar
+   L1 / R1 pictures), even while not active.
 1. Finish leaving game (5.1), even while not active.
 2. If active, NET_SM == 18 and the Multiplayer page is not open: increase the closed-page counter; when
    it reaches 30, reset it to 0, log
@@ -512,7 +514,8 @@ Only when the pointer is non-NULL and event[0] == 6:
 
 ### 5.4 BUTTON_MULTIPLAYER
 
-In order: log `Multiplayer selected`; `netheap_install()`; `netinit_prepare()`; `netpatch_load()`.
+In order: log `Multiplayer selected`; `netheap_install()`; `netinit_prepare()`; `progression_multiplayer_entered()`
+(2026-11-25, `progression.md` 1.5.19: the PS3 NetInit leaderboard start-over); `netpatch_load()`.
 If not active: `voice::reset_volume()` (parity J6, commit dc349a9: PS3 NetInit made the speaker port at full volume
 on every online start), then start the transport (5.5); on failure (PS3 bootstrap 0x438bc8 without a network, parity group
 D 2.1) log `Multiplayer could not start: network message, staying in the main menu`, close transport (5.1),

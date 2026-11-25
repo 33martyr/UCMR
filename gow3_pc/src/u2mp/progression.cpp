@@ -10,6 +10,8 @@
 //     remembers who was in the match and posts the scores online when the online link is up;
 //   - the leaderboard list update (0x5b3000): fills the game's leaderboard object with rows from the
 //     online score service when linked, otherwise from the local store.
+// When Multiplayer is entered (progression_multiplayer_entered), the leaderboard object goes back to board 0,
+// Global, "my page" and asks the list to start over, as the PS3 multiplayer start did; nothing on PS4 does it.
 // The store file format and the board maths live in progression_store.cpp.
 //
 // Reimplemented from the behaviour description u2mp/docs/spec/progression.md.
@@ -624,7 +626,9 @@ U2MP_GUEST void leaderboard_list_update(uint8_t *list) {
     store_at<int32_t>(list + kListPage, first);
 
     int32_t shown, delta;
-    if (lb()[kLbReset] != 0) {
+    // A reset request, or a list object that never fetched (column set 0: PS4 builds it without its board, page and
+    // column fields). The second test is ours, not PS3's (spec progression.md 1.5.19 rule 3).
+    if (lb()[kLbReset] != 0 || load_at<uint32_t>(list + kListColumns) == 0) {
         store_at<int32_t>(list + kListBoard, -1);
         std::memset(list + kListColumns, 0, 16);
         list[kListFriends] = 0;
@@ -724,6 +728,23 @@ void progression_publish() {
 void progression_publish_career() {
     if (!image.base) return;
     publish();
+}
+
+// 1.5.19 rule 1: each Multiplayer entry starts the leaderboards over at board 0, Global, "my page" (PS3 did this
+// once per entry in its multiplayer start). A running online fetch ends; the next list update fetches.
+void progression_multiplayer_entered() {
+    if (!image.base) return;
+    g_fetch_stage = kIdle;
+    uint8_t *b = lb();
+    store_at<uint64_t>(b + kLbBusy, 0);
+    store_at<uint32_t>(b + kLbTotal, 0);
+    store_at<uint32_t>(b + kLbRowCount, 0);
+    store_at<int32_t>(b + kLbPage, -1);
+    b[kLbReset] = 1;
+    store_at<uint32_t>(b + kLbBoard, 0);
+    b[kLbFriends] = 0;
+    b[kLbRefresh] = 0;
+    log("rankings: multiplayer entered: leaderboards back to board 0, global");
 }
 
 // Players Met never shows a friend (PS3 parity G1): online, the RPCN friend list decides; LAN has none.
