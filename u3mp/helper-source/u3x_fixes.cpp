@@ -3853,6 +3853,22 @@ U3X_FN void u3x_kr_37a16c(uintptr_t base, void *s, uint8_t *S, uint8_t *knp);
 U3X_FN void u3x_kr_37a32c(uintptr_t base, void *s, uint8_t *S, uint8_t *knp, uint8_t *info);
 }
 
+// The guest's way into the match load (PS3 1.19: the guest lobby step at net state 0x12 ends on the "loading" page;
+// PS4's own lobby page step, which takes the start-load flag, shows the lobby page and then the match loading page
+// after it sets net state 0x2d). The net state steps 0x2c..0x30 (pre-load, both load screens, countdown) run only
+// in the loading page's own handler, so a guest that enters 0x2d without that page never advances: its lobby world
+// is unloaded, the map is never loaded and the owner waits at 0x2f for a ReadyToStart {load} that never comes.
+// To be called right after a fallback that does the lobby page step itself (flag cleared, load request stage 0, net
+// state 0x2d): mm254::guest_start (matchmaking guests) and start253::u3x_start_member_lobby (party custom game).
+// s = the menu state (u3h_fl_state()); nothing happens without one, or when the net state is not 0x2d.
+extern "C" U3X_FN void u3x_guest_load_pages(uintptr_t base, void *s) {
+    constexpr uintptr_t NET_STATE = 0x1b68810;
+    constexpr uint32_t PAGE_LOBBY = 0xb99a3235, PAGE_LOADING = 0x69e10dad;
+    if (!s || at<uint32_t>(base + NET_STATE) != 0x2d) return;
+    u3h_show(base, s, PAGE_LOBBY, 0);
+    u3h_show(base, s, PAGE_LOADING, 0);
+}
+
 #pragma clang section text=".text.ext" rodata=".rodata.ext"   // v7.253: back to the file's default (region B), not ""
 // ===== end of contributor section =====
 // (keep these three lines unchanged: they separate the contributor section from the parts appended below)
