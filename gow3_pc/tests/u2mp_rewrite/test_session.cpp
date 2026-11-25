@@ -13,11 +13,15 @@
 // compared at the end. Host pointers the module writes into guest memory (menu page handler, state wrappers, abort
 // wrapper, roster text pointers) are compared by meaning: the slots are called, the text pointers are read, and the
 // values are replaced by a constant before the image comparison.
+// Changes made after the rewrite that session.md documents (sections 6.1, 5.4 J6, 5.6, 5.9.1) are applied to the old
+// record and image before the comparison (expected_new); the parity behaviour added since is checked by the new-only
+// scenarios ("N ...", spec section in the name). See session.md "Differential test after the rewrite".
 #include "harness.h"
 
 #define HX_NO_CLOCK_MACRO
 #include "fake_clock.h"
 
+#include <algorithm>
 #include <cmath>
 #include <functional>
 #include <map>
@@ -138,6 +142,17 @@ G void g_team_colour(uint8_t *out, void *n, int team, int variant) {
 }
 G void g_owner_changed(void *p) { rec("guest OwnerChanged %s", where(p).c_str()); }
 G void g_abort_orig(void *self) { rec("guest original abort %s", where(self).c_str()); }
+// the originals behind the tracker state traces (session.md 6.1.3, new-only scenarios)
+G void g_state_send(void *t) { rec("guest state send %s", where(t).c_str()); }
+G void *g_state_alloc(uint64_t size, void *ctx, uint32_t align) {
+    rec("guest state alloc %llu %s %u", (unsigned long long)size, where(ctx).c_str(), align);
+    return mem + 0x1608000;
+}
+G uint32_t g_state_helper(void *a, void *b, void *c, void *d, uint64_t e, uint64_t f) {
+    rec("guest state helper %s %s %s %s %llx %llx", where(a).c_str(), where(b).c_str(), where(c).c_str(),
+        where(d).c_str(), (unsigned long long)e, (unsigned long long)f);
+    return 0x77;
+}
 template <int I> G uint64_t g_orig(void *s) {
     rec("guest original update %d state %s", I, where(s).c_str());
     return 0x5000 + I;
@@ -422,10 +437,34 @@ struct Scenario {
     std::string name;
     std::function<void()> setup;
     std::function<void(const Api &)> body;
+    bool new_only = false;   // a check of the new build alone (behaviour the old code did not have)
 };
 std::vector<Scenario> all;
 void add(std::string name, std::function<void()> setup, std::function<void(const Api &)> body) {
     all.push_back({std::move(name), std::move(setup), std::move(body)});
+}
+// New-only scenarios: the body runs on the new build and checks the rule of the spec section its name gives.
+void add_new(std::string name, std::function<void()> setup, std::function<void(const Api &)> body) {
+    all.push_back({"N " + std::move(name), std::move(setup), std::move(body), true});
+}
+int g_failed_checks = 0;
+void expect(bool ok, const std::string &what) {
+    if (ok) return;
+    ++g_failed_checks;
+    std::printf("  check failed: %s\n", what.c_str());
+}
+// the record lines (since `from`) that are exactly `l`, and whether the record holds `l` at all
+size_t count_lines(const std::string &l, size_t from = 0) {
+    size_t n = 0;
+    for (size_t i = from; i < hx::calls.size(); ++i) n += hx::calls[i] == l;
+    return n;
+}
+bool has(const std::string &l) { return count_lines(l) != 0; }
+// position of the first record line `l` at or after `from` (npos: none)
+size_t pos(const std::string &l, size_t from = 0) {
+    for (size_t i = from; i < hx::calls.size(); ++i)
+        if (hx::calls[i] == l) return i;
+    return std::string::npos;
 }
 
 const char *kEnv[] = {"UNCHARTED_U2MP_NAME", "UNCHARTED_U2MP_PORT", "UNCHARTED_U2MP_JOIN", "UNCHARTED_U2MP_PRELOAD",
@@ -434,6 +473,7 @@ const char *kEnv[] = {"UNCHARTED_U2MP_NAME", "UNCHARTED_U2MP_PORT", "UNCHARTED_U
 struct Result {
     std::vector<std::string> calls;
     std::vector<uint8_t> img;
+    uint8_t c8 = 0;   // match +0xc8 after the setup (before the body)
 };
 Result run_side(const Scenario &s, const Api &a, const std::vector<uint8_t> &base) {
     std::printf("-- %s build\n", a.tag);
@@ -450,6 +490,7 @@ Result run_side(const Scenario &s, const Api &a, const std::vector<uint8_t> &bas
     hx::calls.clear();
     hx::recording = true;
     if (s.setup) s.setup();
+    const uint8_t c8 = mem[MATCH + 0xc8];
     s.body(a);
     // host pointers in guest memory, by meaning: the page handler entries, state slots and abort slot
     for (uint32_t i = 0; i < 40; i++) {
@@ -459,8 +500,154 @@ Result run_side(const Scenario &s, const Api &a, const std::vector<uint8_t> &bas
     for (uint64_t o : kSlots)
         if (host_ptr(get<uint64_t>(o))) put<uint64_t>(o, 0x484f5354484f5354ull);
     if (host_ptr(get<uint64_t>(kAbortSlot))) put<uint64_t>(kAbortSlot, 0x484f5354484f5354ull);
-    Result r{hx::calls, hx::snapshot()};
+    Result r{hx::calls, hx::snapshot(), c8};
     return r;
+}
+
+// ---- documented changes since the rewrite: the old record and image -> what the new build must give ------------
+// Each rule is a change of session.cpp made after the clean-room rewrite, described in u2mp/docs/spec/session.md
+// (section named at the rule) with its origin commit. Only these are mapped; every other difference stays visible.
+// The post-rewrite parity behaviour (groups D, E, F, H, I and the rest) is not rebuilt here: the new-only scenarios
+// ("N ...") check those rules on the new build alone.
+uint64_t pkg_in(const std::vector<uint8_t> &img, uint32_t id) {   // session.md 5.1 find package, on a snapshot
+    auto u64 = [&](uint64_t o) {
+        uint64_t v;
+        std::memcpy(&v, img.data() + o, 8);
+        return v;
+    };
+    const uint64_t buckets = u64(PT + 0x10);
+    int32_t count;
+    std::memcpy(&count, img.data() + PT + 0x4c, 4);
+    if (!buckets || count <= 0) return 0;
+    const uint64_t b = buckets - addr(0);
+    uint64_t node = u64(b + 8 * (fnv(id) % uint32_t(count)));
+    const uint64_t end = u64(b + 8 * uint64_t(count));
+    while (node && node != end) {
+        uint32_t nid;
+        std::memcpy(&nid, img.data() + (node - addr(0)) + 0x10, 4);
+        if (nid == id) return u64(node - addr(0) + 0x18) - addr(0);
+        node = u64(node - addr(0));
+    }
+    return 0;
+}
+
+const char *const kPreloadNames[] = {
+    "beretta-pistol", "beretta-pistol-magazine", "colt-defender-pistol", "colt-defender-magazine",
+    "desert-eagle", "desert-eagle-magazine", "dragunov-magazine", "dragunov-rifle", "fn-fal-clip",
+    "fn-fal-rifle", "m4-rifle", "m4-rifle-magazine", "shotgun", "spas12-shotgun", "machine-gun",
+    "machine-gun-clip", "rpg", "anim-proto-multiplayer", "anim-proto-shield", "anim-proto-carry-objects",
+    "m32-grenade-launcher"};
+
+void expected_new(std::vector<std::string> &r, std::vector<uint8_t> &img, uint8_t c8_before) {
+    static const unsigned char links_orig[6] = {0x0f, 0x8c, 0x13, 0x01, 0x00, 0x00};
+    static const unsigned char links_jump[6] = {0x90, 0xe9, 0x13, 0x01, 0x00, 0x00};
+    static const unsigned char actor_orig[7] = {0x48, 0x8b, 0x05, 0xd9, 0x90, 0xa0, 0x00};
+    static const unsigned char idle_120[4] = {0x00, 0x00, 0xf0, 0x42};
+    // The old build never writes these three places, so its final image shows what install found there.
+    const bool links_o = std::memcmp(img.data() + 0x5f17ed, links_orig, 6) == 0;
+    const bool links_j = std::memcmp(img.data() + 0x5f17ed, links_jump, 6) == 0;
+    const bool actor_o = std::memcmp(img.data() + 0x641b20, actor_orig, 7) == 0;
+    const bool actor_j = img[0x641b20] == 0xe9;
+    const bool idle = std::memcmp(img.data() + 0xe622a8, idle_120, 4) == 0;
+    std::vector<std::string> o;
+    int added = 0;            // installed count the new install adds (session.md 6.1)
+    uint8_t c8 = c8_before;   // match +0xc8 as the new build keeps it (session.md 5.9.1)
+    bool c8_mapped = false, playing_entered = false;
+    int last_index = -1;      // the wrapped state the module ran last (5.9: "last online state index")
+    bool in_playing_entry = false;
+    std::vector<std::string> requested;   // RequestPackage names of the current Multiplayer entry
+    for (size_t i = 0; i < r.size(); ++i) {
+        const std::string &l = r[i];
+        const std::string prev = i ? r[i - 1] : std::string();
+        const std::string next = i + 1 < r.size() ? r[i + 1] : std::string();
+        // session.md 6 step 2..5 (50a6b69: voice::install; 934a6ca: lost links, actor requests, tracker traces):
+        // after gamenet::install returned true (the old install went on: its next line is not the count)
+        if (l == "gamenet::install") {
+            o.push_back(l);
+            if (next.rfind("installed ", 0) == 0) continue;
+            o.push_back("voice::install");
+            if (links_o) o.push_back("log lost links: Playing's PSN record check jumped (0x5f17ed)");
+            if (links_o || links_j) ++added;
+            if (actor_o) o.push_back("unmapped: 0x641b20 holds the original bytes (the hook needs a near stub)");
+            else if (actor_j) ++added;
+            static const struct {
+                const char *line;
+                uint64_t off;
+            } traces[] = {{"retarget_call 0x664d6a 0x60ded0 tracker state send", 0x664d6a},
+                          {"retarget_call 0x60df2f 0xb332a0 tracker state alloc", 0x60df2f},
+                          {"retarget_call 0x60e291 0x634970 tracker state helper", 0x60e291}};
+            for (const auto &t : traces) {
+                o.push_back(t.line);
+                char f[64];
+                std::snprintf(f, sizeof f, "retarget_call 0x%llx failed (test)", (unsigned long long)t.off);
+                if (hx::fails_at(t.off)) o.push_back(f);
+                else ++added;
+            }
+            continue;
+        }
+        // session.md 6 step 10 (934a6ca): the idle-kick limit, after the states were wrapped (and the abort slot)
+        if (l == "log match state updates wrapped (10 states)") {
+            o.push_back(l);
+            if (idle) {
+                o.push_back("log idle kick: limit 120 s -> 300 s");
+                ++added;
+                const float v = 300.0f;
+                std::memcpy(img.data() + 0xe622a8, &v, 4);
+            } else {
+                o.push_back("log idle kick limit at 0xe622a8 differs: left alone");
+            }
+            continue;
+        }
+        if (l.rfind("installed ", 0) == 0 && added) {
+            o.push_back("installed " + std::to_string(std::atoi(l.c_str() + 10) + added));
+            added = 0;
+            continue;
+        }
+        // session.md 5.4 (parity J6, commit dc349a9): a Multiplayer entry that starts the transport (5.5 step 3's
+        // first call follows netpatch_load) puts the voice volume back first
+        if (l == "gamenet::set_transport set" && prev == "netpatch_load") o.push_back("voice::reset_volume");
+        // session.md 5.6 (parity D): a preload package found present gets its keep flag again
+        if (l == "netpatch_load") requested.clear();
+        if (l.rfind("guest RequestPackage ", 0) == 0) {
+            const size_t a = l.find('['), b = l.rfind(']');
+            if (a != std::string::npos && b != std::string::npos) requested.push_back(l.substr(a + 1, b - a - 1));
+        }
+        if (l.rfind("log package preload (PS3 0xe155d0): ", 0) == 0) {
+            for (const char *name : kPreloadNames) {
+                if (std::find(requested.begin(), requested.end(), name) != requested.end()) continue;
+                if (const uint64_t p = pkg_in(img, sid(name))) img[p + 0x18] |= 0x40;
+            }
+        }
+        // session.md 5.9.1 (934a6ca): match +0xc8 as the new build sets it
+        if (l == "log leaving the match: LEAVING_GAME may close (match +0xc8 = 1)") c8 = 1;
+        if (l == "log Start Match: creating the match") c8 = 0, c8_mapped = true;
+        // session.md 5.9.1 (934a6ca): entering Playing (state 3, 0x5f14d0)
+        if (l.rfind("guest original update ", 0) == 0) {
+            const int index = std::atoi(l.c_str() + 22);
+            if (index == 3 && last_index != 3) {
+                if (c8 == 0) {
+                    o.push_back("log playing: the match session is joined (match +0xc8 = 1)");
+                    c8 = 1;
+                    c8_mapped = true;
+                }
+                playing_entered = true;
+                o.push_back(l);
+                o.push_back("log playing: update returned");
+                in_playing_entry = true;
+                last_index = index;
+                continue;
+            }
+            last_index = index;
+        }
+        if (in_playing_entry && l.rfind("== state 3 -> ", 0) == 0) {
+            o.push_back("log playing: frame work returned");
+            in_playing_entry = false;
+        }
+        o.push_back(l);
+    }
+    if (c8_mapped) img[MATCH + 0xc8] = c8;
+    if (playing_entered) img[0x104f1c0] = img[0x14ce978] = 0;   // the match-over bytes, cleared at Playing entry
+    r.swap(o);
 }
 
 int run_one(size_t i) {
@@ -473,8 +660,18 @@ int run_one(size_t i) {
     hx::init();
     base_image();
     std::vector<uint8_t> base(mem, mem + hx::kImageSize);
+    if (s.new_only) {
+        g_failed_checks = 0;
+        Result n = run_side(s, new_api, base);
+        const bool ok = g_failed_checks == 0;
+        if (!ok || std::getenv("HX_SESSION_TRACE"))
+            for (auto &c : n.calls) std::printf("  new| %s\n", c.c_str());
+        std::printf("%s %s (new only, %zu calls)\n", ok ? "PASS" : "FAIL", s.name.c_str(), n.calls.size());
+        return ok ? 0 : 1;
+    }
     Result o = run_side(s, old_api, base);
     Result n = run_side(s, new_api, base);
+    expected_new(o.calls, o.img, o.c8);
     const bool ok = hx::same(s.name.c_str(), o.calls, n.calls, &o.img, &n.img);
     if (std::getenv("HX_SESSION_TRACE")) {
         for (auto &c : o.calls) std::printf("  old| %s\n", c.c_str());
@@ -485,6 +682,7 @@ int run_one(size_t i) {
 }
 
 // ===========================================================================================================
+void new_only_scenarios();
 void scenarios() {
     // ---------------- install ----------------
     add("01 install: all bytes as expected", nullptr, [](const Api &a) {
@@ -1981,6 +2179,281 @@ void scenarios() {
         rec("net_id_of %u", a.net_id_of(""));
         frame();
     });
+    new_only_scenarios();
+}
+
+// ===========================================================================================================
+// New-only scenarios: rules the old code did not have, checked on the new build alone. Each name gives the spec
+// section (session.md, or the parity spec) and the origin commit. A failing one is left failing: it shows a
+// difference between the code and its spec (see the comment at the check).
+void install_bytes(bool links, bool actor, bool idle) {
+    static const unsigned char links_orig[6] = {0x0f, 0x8c, 0x13, 0x01, 0x00, 0x00};
+    static const unsigned char actor_orig[7] = {0x48, 0x8b, 0x05, 0xd9, 0x90, 0xa0, 0x00};
+    static const unsigned char idle_120[4] = {0x00, 0x00, 0xf0, 0x42};
+    if (links) std::memcpy(mem + 0x5f17ed, links_orig, 6);
+    if (actor) std::memcpy(mem + 0x641b20, actor_orig, 7);
+    if (idle) std::memcpy(mem + 0xe622a8, idle_120, 4);
+}
+bool bytes_are(uint64_t off, std::initializer_list<int> b) {
+    size_t i = 0;
+    for (int v : b)
+        if (mem[off + i++] != uint8_t(v)) return false;
+    return true;
+}
+bool before(const std::string &a, const std::string &b) {
+    const size_t pa = pos(a), pb = pos(b);
+    return pa != std::string::npos && pb != std::string::npos && pa < pb;
+}
+
+void new_only_scenarios() {
+    // ---- install additions (session.md 6.1; commits 934a6ca, 50a6b69) ----
+    add_new("6.1 install: the patch sites hold the PS4 1.02 bytes (934a6ca)", [] { install_bytes(true, true, true); },
+            [](const Api &a) {
+                put<uint64_t>(0x104ac00, 0x1122334455667788ull);
+                inst(a);
+                expect(hx::calls.size() > 2 && hx::calls[0] == "gamenet::install" && hx::calls[1] == "voice::install",
+                       "voice::install right after gamenet::install");
+                expect(before("voice::install", "log lost links: Playing's PSN record check jumped (0x5f17ed)") &&
+                           before("log lost links: Playing's PSN record check jumped (0x5f17ed)",
+                                  "log skins: actor requests hooked after StartNetGame's package requests (0x641b20)") &&
+                           before("log skins: actor requests hooked after StartNetGame's package requests (0x641b20)",
+                                  "retarget_call 0x664d6a 0x60ded0 tracker state send") &&
+                           before("retarget_call 0x60e291 0x634970 tracker state helper",
+                                  "replace_function 0x5eb160 5 BUTTON_MULTIPLAYER") &&
+                           before("log match state updates wrapped (10 states)", "log idle kick: limit 120 s -> 300 s"),
+                       "install order: voice, lost links, actor hook, traces, functions, states, idle limit");
+                expect(bytes_are(0x5f17ed, {0x90, 0xe9, 0x13, 0x01, 0x00, 0x00}), "0x5f17ed = nop; jmp 0x5f1906");
+                expect(get<float>(0xe622a8) == 300.0f, "idle limit 300.0");
+                expect(has("installed 12"), "installed 12 (links, actor, 3 traces, 5 functions, states, idle)");
+                // 0x641b20: jmp rel32 to a near stub, two NOPs; the stub calls the hook and jumps back to 0x641b27
+                expect(mem[0x641b20] == 0xe9 && mem[0x641b25] == 0x90 && mem[0x641b26] == 0x90, "0x641b20 = jmp; nop; nop");
+                const uint8_t *stub = mem + 0x641b25 + get<int32_t>(0x641b21);
+                uint64_t fn = 0, back = 0;
+                std::memcpy(&fn, stub + 2, 8);
+                std::memcpy(&back, stub + 18, 8);
+                expect(stub[0] == 0x48 && stub[1] == 0xb8 && stub[10] == 0xff && stub[11] == 0xd0 && stub[12] == 0xff &&
+                           stub[13] == 0x25 && get<uint32_t>(stub - mem + 14) == 0 && back == addr(0x641b27) && host_ptr(fn),
+                       "stub: movabs rax, hook; call rax; jmp [rip] -> base+0x641b27");
+                if (host_ptr(fn)) {
+                    const size_t mark = hx::calls.size();
+                    const uint64_t r = reinterpret_cast<uint64_t(G *)()>(fn)();
+                    expect(r == 0x1122334455667788ull, "the hook returns the u64 at 0x104ac00 (the replaced mov)");
+                    expect(mark < hx::calls.size() && hx::calls[mark] == "unlocks_apply_slot_skins",
+                           "the hook applies the slot skins first");
+                }
+            });
+    add_new("6.1 install: already patched sites are counted, not patched again (934a6ca)", [] {
+        static const unsigned char jump[6] = {0x90, 0xe9, 0x13, 0x01, 0x00, 0x00};
+        std::memcpy(mem + 0x5f17ed, jump, 6);
+        mem[0x641b20] = 0xe9;
+        put<float>(0xe622a8, 300.0f);
+    }, [](const Api &a) {
+        inst(a);
+        expect(!has("log lost links: Playing's PSN record check jumped (0x5f17ed)"), "no lost-links line");
+        expect(!has("log skins: actor requests hooked after StartNetGame's package requests (0x641b20)"), "no actor line");
+        expect(has("log idle kick limit at 0xe622a8 differs: left alone"), "idle limit 300 already: left alone");
+        expect(has("installed 11"), "installed 11");
+        expect(get<float>(0xe622a8) == 300.0f && bytes_are(0x641b20, {0xe9, 0, 0, 0, 0, 0, 0}), "bytes unchanged");
+    });
+    add_new("6.1 install: 0x641b20 not executable: the actor hook is skipped (934a6ca)", [] {
+        install_bytes(false, true, false);
+        hx::noexec = {{0x641b20, 7}};
+    }, [](const Api &a) {
+        inst(a);
+        expect(!has("log skins: actor requests hooked after StartNetGame's package requests (0x641b20)"), "no actor line");
+        expect(bytes_are(0x641b20, {0x48, 0x8b, 0x05, 0xd9, 0x90, 0xa0, 0x00}), "bytes unchanged");
+        expect(has("installed 9"), "installed 9 (3 traces, 5 functions, states)");
+    });
+    add_new("6.1.3 tracker state traces: enter/leave logged for the first 8 calls, originals always (934a6ca)",
+            [] {
+                hx::stub(0x60ded0, (void *)g_state_send);
+                hx::stub(0xb332a0, (void *)g_state_alloc);
+                hx::stub(0x634970, (void *)g_state_helper);
+            },
+            [](const Api &a) {
+                inst(a);
+                void *send = hx::retarget_host(0x664d6a), *alloc = hx::retarget_host(0x60df2f),
+                     *helper = hx::retarget_host(0x60e291);
+                expect(send && alloc && helper, "three retargeted call sites");
+                if (!send || !alloc || !helper) return;
+                const size_t mark = hx::calls.size();
+                bool results = true;
+                for (int i = 0; i < 10; ++i) {
+                    reinterpret_cast<void(G *)(void *)>(send)(mem + 0x1608100);
+                    void *p = reinterpret_cast<void *(G *)(uint64_t, void *, uint32_t)>(alloc)(0x2c0, mem + 0x1608200, 16);
+                    const uint32_t h = reinterpret_cast<uint32_t(G *)(void *, void *, void *, void *, uint64_t, uint64_t)>(
+                        helper)(mem + 1, mem + 2, mem + 3, mem + 4, 5, 6);
+                    results = results && p == mem + 0x1608000 && h == 0x77;
+                }
+                expect(results, "the originals' results are returned");
+                expect(count_lines("guest state send img+0x1608100", mark) == 10 &&
+                           count_lines("guest state alloc 704 img+0x1608200 16", mark) == 10 &&
+                           count_lines("guest state helper img+0x1 img+0x2 img+0x3 img+0x4 5 6", mark) == 10,
+                       "every call reaches its original with the same arguments");
+                for (const char *l : {"log tracker: state send enter", "log tracker: state send leave",
+                                      "log tracker: state alloc enter 704", "log tracker: state alloc leave",
+                                      "log tracker: state helper enter", "log tracker: state helper leave"})
+                    expect(count_lines(l, mark) == 8, std::string(l) + ": 8 times");
+                expect(mark + 3 < hx::calls.size() && hx::calls[mark] == "log tracker: state send enter" &&
+                           hx::calls[mark + 1] == "guest state send img+0x1608100" &&
+                           hx::calls[mark + 2] == "log tracker: state send leave",
+                       "enter, original, leave");
+            });
+
+    // ---- Multiplayer entry and teardown (session.md 5.4, 5.6, 5.7; parity J6 and D) ----
+    add_new("5.4 J6: the voice volume is reset once per transport start (parity-j J6)", nullptr, [](const Api &a) {
+        host_party(a);
+        enter();
+        expect(count_lines("voice::reset_volume") == 1, "one reset for two entries (the second finds the session active)");
+        const size_t p = pos("voice::reset_volume");
+        expect(p != std::string::npos && p > 0 && hx::calls[p - 1] == "netpatch_load" &&
+                   p + 1 < hx::calls.size() && hx::calls[p + 1] == "gamenet::set_transport set",
+               "after netpatch_load, before the transport starts");
+    });
+    add_new("5.4 D 2.1: the transport cannot start: box over the main menu (parity-d 2.1)", [] {
+        st.host_ok = false;
+        mem[NETINFO + 0x1c] = 0x5a;
+        netsm(5);
+    }, [](const Api &a) {
+        inst(a);
+        enter();
+        const size_t p = pos("log cannot listen on UDP port 27210");
+        expect(p != std::string::npos && p + 4 < hx::calls.size() &&
+                   hx::calls[p + 1] == "log Multiplayer could not start: network message, staying in the main menu" &&
+                   hx::calls[p + 2] == "transport.close" &&
+                   hx::calls[p + 3] == "online::on_transport_closed [Multiplayer could not start]" &&
+                   hx::calls[p + 4] == "game_message_box 0x88a082af 0x0",
+               "log, close transport, on_transport_closed, message box 0x88a082af");
+        expect(!has("show_page 0x53cbb5f2"), "no PAGE_MULTIPLAYER");
+        expect(mem[NETINFO + 0x1c] == 0x5a && get<int32_t>(NETSM) == 5, "netInfo+0x1c and NET_SM untouched");
+        expect(a.member_count() == 0 && !a.is_host(), "the session stays inactive");
+    });
+    add_new("5.6 / 5.7 D: preload keeps present packages, teardown releases them (parity-d, session.md 7 test 60)", [] {
+        add_pkg(sid("net"), pkg(0), 7, 0x80);
+        add_pkg(sid("rpg"), pkg(5), 7, 0x80);
+        add_pkg(sid("shotgun"), pkg(6), 6, 0x00);
+    }, [](const Api &a) {
+        host_party(a);
+        expect((mem[pkg(0) + 0x18] & 0x40) && (mem[pkg(5) + 0x18] & 0x40) && (mem[pkg(6) + 0x18] & 0x40),
+               "entry: net requested, rpg and shotgun present: keep flag 0x40 on all three");
+        put<int16_t>(NGM + 0x1ca0, 2);
+        const size_t mark = hx::calls.size();
+        leave();
+        const size_t p = pos("log leaving multiplayer: 3 package(s) no longer kept for Multiplayer", mark);
+        expect(p != std::string::npos, "release log with 3 packages");
+        expect(!(mem[pkg(0) + 0x18] & 0x40) && !(mem[pkg(5) + 0x18] & 0x40) && !(mem[pkg(6) + 0x18] & 0x40),
+               "the keep flags are cleared");
+        expect(mem[pkg(0) + 0x18] == 0x80 && mem[pkg(6) + 0x18] == 0x00, "only bit 0x40 changes");
+        expect(p != std::string::npos && pos("frontend6::preload_net_game 0 1 0", p) != std::string::npos &&
+                   pos("guest PopPage img+0x1136640", p) != std::string::npos,
+               "then the level preload release, then PopPage");
+        expect(get<int16_t>(NGM + 0x1ca0) == -1, "ngm+0x1ca0 = -1");
+    });
+
+    // ---- match states (session.md 5.9.1, 934a6ca; Players Met parity-e 2.9) ----
+    add_new("5.9.1 Playing entry: match +0xc8, match-over bytes, Players Met (934a6ca, parity-e 2.9)", [] {
+        mem[0x104f1c0] = 1;
+        mem[0x14ce978] = 1;
+        const uint64_t t0 = NGM + 0x10;
+        put<uint64_t>(NGM, addr(t0));   // tracker 0 is the local player
+        std::memcpy(mem + t0 + 0x20, "Me", 3);
+        std::memcpy(mem + t0 + 0x2c0 + 0x20, "Alpha", 6);
+        std::memcpy(mem + t0 + 2 * 0x2c0 + 0x20, "Bravo", 6);
+        mem[t0 + 2 * 0x2c0 + 0x26c] = 1;   // excluded
+        std::memcpy(mem + t0 + 3 * 0x2c0 + 0x20, "Charlie", 8);
+    }, [](const Api &a) {
+        inst(a);
+        state(3);
+        expect(mem[MATCH + 0xc8] == 1 && mem[0x104f1c0] == 0 && mem[0x14ce978] == 0,
+               "match +0xc8 = 1, both match-over bytes cleared");
+        mem[0x104f1c0] = 1;
+        state(3);
+        expect(mem[0x104f1c0] == 1, "only on entry (a second Playing update leaves the byte)");
+        state(0);
+        state(3);
+        expect(count_lines("log playing: the match session is joined (match +0xc8 = 1)") == 1, "joined line once (+0xc8 was 1)");
+        expect(count_lines("progression_note_met [Alpha,Charlie]") == 2, "Players Met per entry: used, not excluded, not local");
+        expect(count_lines("log playing: update returned") == 2 && count_lines("log playing: frame work returned") == 2,
+               "update / frame work lines per entry");
+        expect(before("log playing: the match session is joined (match +0xc8 = 1)", "progression_note_met [Alpha,Charlie]") &&
+                   before("progression_note_met [Alpha,Charlie]", "guest original update 3 state img+0x1600400") &&
+                   before("guest original update 3 state img+0x1600400", "log playing: update returned") &&
+                   before("log playing: update returned", "log playing: frame work returned"),
+               "order: joined, players met, original, update returned, frame work, frame work returned");
+    });
+    // session.md 5.9.2: the diagnostic reads its "timer" from 0x113a04c, beside the net clock pointer 0x113a040, not
+    // from the clock object's +0xc (session.md 3.1, as reset_watch and net_ticks read it). Left failing: suspected bug.
+    add_new("5.9.2 WaitReady diagnostics: timer = the net clock's ticks (FAILS: reads 0x113a04c, suspected bug)", [] {
+        put<uint64_t>(CLOCKPTR, addr(OTHERCLOCK));
+        put<uint32_t>(OTHERCLOCK + 0xc, 1234);
+    }, [](const Api &a) {
+        inst(a);
+        state(2);
+        expect(has("log wait ready: all ready 0, deadline 0, timer 1234, end 0xfffffffffffffff0"),
+               "timer 1234 from the clock object at 0x113a040");
+    });
+
+    // ---- parity H (parity-h-session.md 7, session.md "Parity group H changes") ----
+    add_new("H1 custom_room_slots: 10 competitive, 3 co-op, 0 none / unknown", nullptr, [](const Api &a) {
+        game(1, 0xa001, 13);
+        const int16_t games[] = {-1, 0, 1, 2, 3, 4};
+        const int want[] = {0, 10, 0, 10, 3, 0};
+        for (int i = 0; i < 6; ++i) {
+            cur_game(games[i]);
+            expect(a.custom_room_slots() == want[i], "game " + std::to_string(games[i]) + " -> " + std::to_string(want[i]));
+        }
+    });
+    add_new("H1 playlist_room_slots: largest type count, 10 without a playlist", nullptr, [](const Api &a) {
+        const std::vector<std::vector<int32_t>> lists = {{}, {4, 8}, {1, 4}, {13}, {12}};
+        const int want[] = {10, 3, 10, 10, 3};
+        for (size_t i = 0; i < lists.size(); ++i) {
+            st.playlist_types = lists[i];
+            expect(a.playlist_room_slots() == want[i], "playlist " + std::to_string(i) + " -> " + std::to_string(want[i]));
+        }
+    });
+    add_new("H5 mm_pack_mask: 0 without a playlist or a map-pack map; else this PC's packs (alone)", nullptr,
+            [](const Api &a) {
+                expect(a.mm_pack_mask() == 0, "no playlist: 0");
+                st.playlist_types = {1};
+                expect(a.mm_pack_mask() == 0, "playlist without a map-pack map: 0");
+                st.net_game_pack = {{3, 2}};   // a map-pack map of type 4: not in the playlist
+                expect(a.mm_pack_mask() == 0, "a map-pack map of another type: 0");
+                st.net_game_pack = {{2, 1}};   // net game 2 is type 1
+                expect(a.mm_pack_mask() == 7, "a type-1 map-pack map: dlc_packs() & 0xff = 7");
+            });
+    add_new("H8 online_network_error: error byte, the transport closes on the next frame", nullptr, [](const Api &a) {
+        a.network_error("test");
+        expect(!has("log party: network error (test): leaving online play"), "inactive: nothing");
+        host_party(a);
+        a.network_error("test");
+        expect(has("log party: network error (test): leaving online play") && mem[NETINFO + 0x1c] == 1,
+               "log, netInfo+0x1c = 1");
+        frame();
+        expect(has("log party: closing the transport (host lost); Multiplayer starts a new one") && a.member_count() == 0,
+               "next frame: closed as host lost");
+    });
+
+    // ---- parity E 2.2 / I6 (session.md "Parity group E changes", parity-i 8) ----
+    add_new("E 2.2 / I6 silent peer: the timeout line names the member", nullptr, [](const Api &a) {
+        host_party(a, {3});
+        a.peer_timeout(3);
+        a.peer_timeout(7);
+        expect(has("log *************** Player 4 has left : timed out (nothing heard for 20 s)"), "slot 3: Player 4");
+        expect(has("log *************** ? has left : timed out (nothing heard for 20 s)"), "unused slot: ?");
+    });
+
+    // ---- frame work team preference (934a6ca; session.md 3.3: slot 0 is the host) ----
+    // A co-op client takes the host's team. The code reads members[host_id] (the host's net id, 1, used as a slot
+    // index: slot 1, another client) instead of slot 0. Left failing: suspected bug.
+    add_new("5.8 co-op client: team preference = the host's team (FAILS: reads slot 1, suspected bug)", [] { client_env(); },
+            [](const Api &a) {
+                client_party(a);
+                in_sess(0, {2, 0, 4, 3, 'H', 'o', 's', 't', 1, 1, 1, 'M'});
+                in_sess(0, {6, 0, 2, 1, 1});
+                cur_game(3);   // type 4: co-op
+                frame(3);
+                expect(get<int32_t>(NPD + 0x114) == 2, "NPD+0x114 = 2 (the host in slot 0 is on team 2)");
+            });
 }
 
 }  // namespace

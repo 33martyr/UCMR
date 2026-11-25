@@ -751,7 +751,8 @@ matching record is not tried). No match: fail.
 <= 0 or > 4096. At the first entry with that key: default if the value is NULL, its type != 1 or its data NULL; else
 the s32 data. No entry with that key: default.
 
-**Spawner name:** char* at spawner+0x20, or `?` when NULL.
+**Spawner name:** char* at spawner+0x20, or `?` when NULL or when its first byte is not readable
+(`runtime_memory_is_mapped(name, 1)` false: an unset name can be a -1 pointer; commit c5a5d89, Gold Rush).
 
 **Online pick (package, turn, start):** none if the package is NULL, its group is NULL, "all" is NULL, or count <= 0
 or > 100000. If start: first try the spawners (non-NULL entries of "all", in order) with online-spawner == 1 and
@@ -789,6 +790,38 @@ and +0x20 = pointer to the string `u2mp-origin`. Its id (+0x28) is 0.
 7. Fill the own entry = {id, 0, spawner}; the own group = all zero except sorted = &entry and sorted count = 1; the
    u64 at own package+0x9a0 = &group (the rest of the own package, 0x9b0 bytes, stays zero). Return the own package.
 
+**Diagnostics (squash 934a6ca, no message; the reasons are the comments in `spawn.cpp`).** The search and the
+fallback above are unchanged; these reads and logs come on top, for the Siege (type 12) and Gold Rush hunts:
+
+- *Game type:* one guest call `0xa15e70(0x3b9a067d)`; -1 when it returns NULL, the records pointer (+8) is NULL or
+  the s16 game is < 0 or >= the count; else the s32 at record + 0x0c. Each use below reads it again (one guest call
+  each).
+- *After the level lines of step 3* (only when they were logged): read the game type; when it is 12 log
+  `spawn: wave spawner %s %08x %s` (name, sid, `loaded` / `MISSING`: some loaded package finds the id) for
+  `npc-spawn-1` .. `npc-spawn-10`, `defend-1`, `online-spawner-coop-1`. Then, once per process, the net-game dump:
+  one guest call `0xa15e70(0x3b9a067d)`; NULL: log `spawn: *net-games* is missing`; records NULL or count <= 0 or
+  > 512: nothing; else for each record i: the level name (a guest call `0xa15e70(0x0dec97a4)` per record; `?` when
+  it is NULL, its records NULL, its count <= 0 or > 4096, no record +0 equals the level id, or the first matching
+  record's name +0x18 is NULL) and log `spawn: net game %d type %d level %08x %s tasks %d default %08x first %08x`
+  (i, s32 +0x0c, u32 +4, name; with list = u64 at +0x48: s32 list+8, u32 at the pointer list+0, u32 at the pointer
+  list+0x10, each 0 when its pointer is NULL).
+- *Before step 4's search in pak* (pak not NULL): read the game type; when it is 12 and pak's group is usable (the
+  online-pick group conditions), once per (level name, s32 task at `0x113d4cc`): log `spawn: group all %d sorted %d`,
+  `spawn: sorted-only %s pos %d %d %d` for the first 200 sorted entries whose spawner name holds `roof` or `vault`
+  (position f32 x 10, truncated), and `spawn: type 12 %s spawner-list %08x name %s pos %.2f %.2f %.2f online %d
+  start %d team %d` (level name, id, name, position, the online-spawner / start-spawner / `team` (0xd50bc34b) tags)
+  for each spawner of "all" that is online, start, named `*coop*` or `net-*`.
+- *At every return* (found in pak, map, loaded package, or the fallback): read the game type; when it is 12, once
+  per (level name, task, id): log `spawn: type 12 %s spawner %08x name %s pos %.2f %.2f %.2f online %d start %d team
+  %d; task %d coop %d ids %08x %08x %08x` (`level` / `map` / `loaded` / the fallback method text; the task's three
+  ids from the net-game record's list +0x10 entry 0x28*task, +8; coop = s32 local tracker +0x198, -1 when none),
+  `spawn: type 12 task %d candidate %d %08x name %s pos ... online %d start %d team %d` for each of the three ids
+  that is not the wanted one (looked up in the loaded packages), and `spawn: type 12 capture-zone spawner 0 name %s
+  pos %.2f %.2f %.2f` from guest call `0x64b960(B + 0x113b760, 0)`.
+
+So outside type 12 a call makes one extra guest call before returning, one more when pak is loaded, and one more
+after a level line (plus the dump, once: 1 + one per net-game record guest calls and its lines).
+
 ### 6.5 Install
 
 1. Read the s32 at `0x662fcc`. If the bytes at `0x662fc9` are not `48 8D 3D`, or `0x662fd0 + that value` != `0x113b760`,
@@ -797,6 +830,39 @@ and +0x20 = pointer to the string `u2mp-origin`. Its id (+0x28) is 0.
    `spawn: GetSpawnLocator (662fa0) looks the spawner up in every loaded package, with a fallback` and add 1.
 
 There is no NULL-image check.
+
+Probes (squash 934a6ca, no message; comments in `spawn.cpp`; see PORT-SPAWN.md "Diagnostics"):
+
+0. Before step 1, always: two image probes, each a 5-byte `jmp` to a near stub that saves rdi/rsi/rdx/rcx/r8/r9,
+   calls a host function, restores them, runs the replaced instructions and jumps back.
+   - Result probe at `0x4bdfad`: expects `49 8B 04 24 48 3B 45 D8`; else log
+     `spawn: result probe 0x4bdfad bytes differ, left alone`. Its host function does nothing. Resumes at `0x4bdfb5`.
+   - Batch probe at `0x4bf925`: expects `84 C0 0F 84 C7 00`; else log
+     `spawn: batch probe 0x4bf925 bytes differ, left alone`. Calls the candidate probe (al zero-extended, r14, r12),
+     then `test al, al`, `je 0x4bf9f4`, else continues at `0x4bf92d`. The candidate probe acts only in game types 9
+     and 12 while the NGM state (`0x113d5e0`) is 2 and the candidate (r14) is readable for 0x80 bytes: in type 12 it
+     collects `net-territory*` spots, logs spawners near them, records `roof-spawner` / `vault-spawner` entry points,
+     and when the handle count at `0x113d530` changes it lets 4 `npc-soldier*` spawners through: clears bit 1 of
+     their u16 flags at +0x50 and moves them next to the entry point nearest the active zone (behaviour, not only a
+     log: the converted level ships those spawners disabled). It logs `spawn: gate type %d %llu flags 0x%06x name %s
+     list 0x%llx` for the first 300 candidates of each of the two types.
+   Either one: no near stub in range: log `spawn: result probe: no stub memory in range` / `spawn: batch probe: no
+   stub memory in range`. Installed: log `spawn: result probe installed at 0x%llx` / `spawn: batch probe installed at
+   0x%llx` and add 1.
+3. After step 2's success, call-site probes, each adding 1 when `retarget_call` succeeds (no own log):
+   - `0x23bb22` -> `0x64d840` `NetNpc name (AI spawn probe)`, only when the bytes there are `E8 19 1D 41 00`;
+     forwards, logs `spawn: NetNpc name '%s' (seq %u) for a new AI agent` when the sequence changes.
+   - 16 `SpawnNpc` sites -> `0x4be330` `SpawnNpc (probe)`: `0x13b9 0x3b8c 0x2e5780 0x2e597a 0x45b9f2 0x4bf936
+     0x61e7be 0x62378a 0x647c62 0x647dc6 0x6484e8 0x9fc1e4 0xa0962d 0xa644ad 0xa64d9a 0xa69907`. Forwards; in type 12
+     a spawned `net-territory*` spawner becomes the active zone (logged); the first 300 calls log
+     `spawn: SpawnNpc type %d from 0x%llx spawner %s class %08x -> %p` (the return site, the u32 at spawner+0x40).
+   - 12 spawner update sites -> `0x236f40` `spawner update (probe)`: `0x27e86c 0x280e25 0x28375e 0x284b72 0x28642a
+     0x28c8e2 0x28e8ac 0x2902ec 0x292377 0x294257 0x295f7e 0x296b44`. Forwards; logs the first call from each site.
+   - `0xa08d42`, `0xa08d59` -> `0xce33a0` `get-spawner-locator lookup (probe)`. Forwards; the first 96 calls log
+     `spawn: script asked for spawner %08x (%s, %s)` (the answered text or `no name`; `loaded package` / `not in any
+     package`).
+   Not installed (commented out in `install_spawn`, "off while the boot crash is tracked"): the per-type update slot
+   probes and the factory probe; the type-vtable scan (`scan_type_vtables`) is off in session.cpp (PR 21).
 
 ### 6.6 Test scenarios
 

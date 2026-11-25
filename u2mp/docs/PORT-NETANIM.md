@@ -83,3 +83,12 @@ a clip phase` (stream overflow or a peer with another build).
   and their footstep / animation sounds and effects should play.
 - The writer's stream capacity (r15+0xc) was not measured; the phases add 4-16 bits per clip.
 - The meaning of the layer gate value `[0xe5f550]` and of the events list beyond `0x4bcd30`'s writes.
+
+## 6. Changes after the clean-room rewrite
+
+The current netanim.cpp / natives.cpp (since the squash 934a6ca) differ from sections 2-4: fixed 10-bit phases
+(the game writer's three width constants patched to match), a new reader call-out that reads anim indices itself
+(index call-out `0x66b637`) and calls the CreateAnimCmds visitor `0x100ac80` directly (clip or bind pose), a bind-pose
+prefill (`0x5f3d63`) and tree depth guard (`0x5f3dd1`), bit-count padding of snapshots (`0x60e296`, `0x60e9f3`,
+`UNCHARTED_U2MP_NETANIM_PAD=0` turns it off), assert sites in `0x66b430` ending the parse, diagnostic log lines, and
+generator slot 4 no longer replaced (open). Exact behaviour: u2mp/docs/spec/netanim.md Part 3.

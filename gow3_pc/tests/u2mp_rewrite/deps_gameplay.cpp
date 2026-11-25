@@ -34,6 +34,9 @@ bool menu_text_in_rect(const float *xform, const char *text, float x, float y, f
             text ? text : "(NULL)", double(x), double(y), double(w), double(h));
     return gp_deps.text_in_rect;
 }
+// loading.cpp, used by scoreboard.cpp since 6d52c86 (parity-m-features.md 10.2): no record, the scenarios
+// compare what the overlay does with the answer
+bool menu_up() { return gp_deps.menu_up; }
 
 // session.cpp
 void sync_netstat_ranks() { hx::rec("sync_netstat_ranks"); }

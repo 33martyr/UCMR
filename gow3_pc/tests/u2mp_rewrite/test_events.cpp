@@ -5,6 +5,7 @@
 // byte for byte); the Applies and the installs run on the fake image (guest calls, logs, image compared).
 // Host pointers (stack buffers of the NpcSpawn Apply, installed host functions) are compared by content,
 // alignment and identity between calls, never by address.
+#include <array>
 #include <cfloat>
 #include <cinttypes>
 #include <cmath>
@@ -945,6 +946,8 @@ void record_game(const Side &s) {
             !g.lookup_process ? "null" : g.lookup_process == s.lookup_process ? "installed" : "other");
 }
 
+const uint8_t *g_setup = nullptr;   // the scenario's setup image while `expected_old` runs (img_case)
+
 // Runs `body` for old and new on the same image (built by `setup`) and compares calls and image. `expected_old`,
 // when set, maps the old record to the form a documented change gives it (the comment at each use names it).
 void img_case(const std::string &what, const std::function<void()> &setup, const std::function<void(Side &)> &body,
@@ -963,8 +966,68 @@ void img_case(const std::string &what, const std::function<void()> &setup, const
         rec[i] = hx::calls;
         img[i] = hx::snapshot();
     }
+    g_setup = raw.data();
     if (expected_old) expected_old(rec[0]);
+    g_setup = nullptr;
     check(what, rec[0], rec[1], &img[0], &img[1]);
+}
+
+// events.md 5.1 step 5 (squash 934a6ca, no message; the comments in events.cpp): after the port count line the new
+// install_events runs five more installers on fixed game slots. Their rules, evaluated on the scenario's setup image
+// (`g_setup`, image size `size`), give the lines the new record has after each `net events: N ... ported` line of
+// the old record. Only the "left alone" / silent branches are mapped: an image on which a wrapper would be installed
+// changes the installed count and the slots too, so such a record is left unchanged and its difference stays visible.
+void extra_installs(std::vector<std::string> &r, uint64_t size = hx::kImageSize) {
+    if (!g_setup) return;
+    auto slot = [&](uint64_t off) {
+        uint64_t v;
+        std::memcpy(&v, g_setup + off, 8);
+        return v;
+    };
+    std::vector<std::string> lines;
+    // 5.1 step 5a: the extra fields of types 8, 9 and 11 (vtable, slot, game function, name)
+    const struct {
+        uint64_t vt;
+        unsigned slot;
+        uint64_t game;
+        const char *what;
+    } extras[] = {
+        {0x1040c60, 2, 0x62b650, "EmitGrenade +0x40 read"},
+        {0x1040c60, 3, 0x62b250, "EmitGrenade +0x40 write"},
+        {0x1040c10, 2, 0x62a780, "GrenadeExplode +0x14/+0x18/+0x170 read"},
+        {0x1040c10, 3, 0x62a020, "GrenadeExplode +0x14/+0x18/+0x170 write"},
+        {0x1041390, 2, 0x63b050, "EmitRocket +0x50 read"},
+        {0x1041390, 3, 0x63ad40, "EmitRocket +0x50 write"},
+    };
+    for (const auto &e : extras) {
+        if (e.vt + 8 * e.slot + 8 > size) continue;
+        if (slot(e.vt + 8 * e.slot) == hx::addr(e.game)) return;   // would be wrapped: not mapped
+        lines.push_back("log net events: " + std::string(e.what) + ": expected " + hexs(e.game) + ", left alone");
+    }
+    // 5.1 step 5b: the EmitRocket Apply guard
+    if (0x1041390 + 0x28 <= size) {
+        if (slot(0x1041390 + 0x20) == hx::addr(0x63a7c0)) return;
+        lines.push_back("log net rocket: Apply expected 0x63a7c0, left alone");
+    }
+    // 5.1 steps 5c / 5d: the AttackProjectile and carry wrappers are silent unless all three slots hold the game's
+    // functions; 5e: the Message 0x2e Read guard is silent unless 0x62dfc2 holds its 5 expected bytes
+    if (slot(0x1040b70 + 0x10) == hx::addr(0x628be0) && slot(0x1040b70 + 0x18) == hx::addr(0x628670) &&
+        slot(0x1040b70 + 0x20) == hx::addr(0x627da0))
+        return;
+    for (auto [vt, rd, wr, ap] : {std::array<uint64_t, 4>{0x1040800, 0x622bb0, 0x622940, 0x622760},
+                                  std::array<uint64_t, 4>{0x1040fd0, 0x62fc10, 0x62fb50, 0x62f9c0}})
+        if (slot(vt + 0x10) == hx::addr(rd) && slot(vt + 0x18) == hx::addr(wr) && slot(vt + 0x20) == hx::addr(ap)) return;
+    static const uint8_t want[5] = {0x48, 0x8b, 0x07, 0x48, 0x8d};
+    if (std::memcmp(g_setup + 0x62dfc2, want, 5) == 0) return;
+    const std::string head = "log net events: ", tail = " stubbed Read/Write/Apply slots ported";
+    std::vector<std::string> out;
+    for (const std::string &l : r) {
+        out.push_back(l);
+        if (l.rfind(head, 0) == 0 && l.size() > head.size() + tail.size() &&
+            l.compare(l.size() - tail.size(), tail.size(), tail) == 0)
+            out.insert(out.end(), lines.begin(), lines.end());
+    }
+    r = out;
 }
 
 // ---- NpcSpawn Apply (6.15 - 6.21) ----------------------------------------------------------------------
@@ -1167,7 +1230,8 @@ void scen_npc_spawn() {
                  const auto fn = reinterpret_cast<ApplyFn>(hx::get<uint64_t>(0x1040f30 + 0x20));
                  fn(hx::mem + oEv, nullptr);
                  mask_slots(s);
-             });
+             },
+             [](std::vector<std::string> &r) { extra_installs(r); });   // events.md 5.1 step 5
 }
 
 // ---- game mode function (6.11), process lookup (4.7), installed game used by Reads ---------------------
@@ -1368,7 +1432,8 @@ void scen_install() {
                  s.install_gameplay2(n);
                  hx::rec("installed after gameplay2 %d", n);
                  mask_slots(s);   // also shows 14: type 44 slot 3 left alone (image compare)
-             });
+             },
+             [](std::vector<std::string> &r) { extra_installs(r); });   // events.md 5.1 step 5
     img_case("good image, installed twice", [] { good_image(); },
              [](Side &s) {
                  *s.game = Game{};
@@ -1379,7 +1444,8 @@ void scen_install() {
                  s.install_gameplay2(n);
                  hx::rec("installed %d", n);
                  mask_slots(s);
-             });
+             },
+             [](std::vector<std::string> &r) { extra_installs(r); });   // events.md 5.1 step 5, once per install
 
     begin("S25 slots already replaced / stub bytes differ");
     struct E {
@@ -1409,7 +1475,8 @@ void scen_install() {
                      s.install_events(n);
                      hx::rec("installed %d", n);
                      mask_slots(s);
-                 });
+                 },
+                 [](std::vector<std::string> &r) { extra_installs(r); });   // events.md 5.1 step 5
 
     begin("S26 image too small / no image");
     for (uint64_t size : {uint64_t(0), uint64_t(0x1116387), uint64_t(0x1116388), uint64_t(0x1040f57), uint64_t(0x1040f58)})
@@ -1423,7 +1490,8 @@ void scen_install() {
                      record_game(s);
                      hx::bind_both();
                      mask_slots(s);
-                 });
+                 },
+                 [&](std::vector<std::string> &r) { extra_installs(r, size); });   // events.md 5.1 step 5
     img_case("events, image base NULL", [] { good_image(); },
              [](Side &s) {
                  *s.game = Game{};
@@ -1497,6 +1565,107 @@ void scen_install() {
                  gp);
 }
 
+// ---- the five extra installers on their game slots (new only: events.md 5.1 step 5, squash 934a6ca) -------------
+// The old code has none of them; the old-vs-new scenarios map their "left alone" lines (extra_installs). Here the
+// slots hold the game's functions (stubs that record), so each one installs: the lines, the count, the slots, and a
+// call through each kind of wrapper (log placement, forwarding, the rocket guard's drop and pass).
+U2MP_GUEST void g_ser(void *ev, BitStream *bs) { hx::rec("game serialize(%s, %s)", W(ev).c_str(), bs ? "bs" : "null"); }
+U2MP_GUEST void g_apply(void *ev, void *conn) { hx::rec("game apply(%s, %s)", W(ev).c_str(), W(conn).c_str()); }
+uint64_t g_settings_slot = 0;
+U2MP_GUEST void *g_find_settings(uint32_t id) {
+    hx::rec("find settings(%08x)", id);
+    return g_settings_slot ? hx::mem + g_settings_slot : nullptr;
+}
+void scen_extra_installs() {
+    begin("N3 extra installers on their game slots (new only: events.md 5.1 step 5, squash 934a6ca)");
+    good_image();
+    const uint64_t sers[] = {0x62b650, 0x62b250, 0x62a780, 0x62a020, 0x63b050, 0x63ad40, 0x628be0, 0x628670,
+                             0x622bb0, 0x622940, 0x62fc10, 0x62fb50};
+    const uint64_t applies[] = {0x63a7c0, 0x627da0, 0x622760, 0x62f9c0};
+    for (uint64_t f : sers) hx::stub(f, (void *)g_ser);
+    for (uint64_t f : applies) hx::stub(f, (void *)g_apply);
+    hx::stub(0xa15300, (void *)g_find_settings);
+    const struct {
+        uint64_t vt;
+        unsigned slot;
+        uint64_t fn;
+    } slots[] = {{0x1040c60, 2, 0x62b650}, {0x1040c60, 3, 0x62b250}, {0x1040c10, 2, 0x62a780}, {0x1040c10, 3, 0x62a020},
+                 {0x1041390, 2, 0x63b050}, {0x1041390, 3, 0x63ad40}, {0x1041390, 4, 0x63a7c0}, {0x1040b70, 2, 0x628be0},
+                 {0x1040b70, 3, 0x628670}, {0x1040b70, 4, 0x627da0}, {0x1040800, 2, 0x622bb0}, {0x1040800, 3, 0x622940},
+                 {0x1040800, 4, 0x622760}, {0x1040fd0, 2, 0x62fc10}, {0x1040fd0, 3, 0x62fb50}, {0x1040fd0, 4, 0x62f9c0}};
+    for (const auto &s : slots) hx::put<uint64_t>(s.vt + 8 * s.slot, hx::addr(s.fn));
+    const uint8_t want[5] = {0x48, 0x8b, 0x07, 0x48, 0x8d};
+    std::memcpy(hx::mem + 0x62dfc2, want, 5);
+    *NEW.game = Game{};
+    int n = 0;
+    hx::calls.clear();
+    hx::recording = true;
+    NEW.install_events(n);
+    const std::vector<std::string> want_log = {
+        "log net events: 28 stubbed Read/Write/Apply slots ported",
+        "log net events: EmitGrenade +0x40 read",
+        "log net events: EmitGrenade +0x40 write",
+        "log net events: GrenadeExplode +0x14/+0x18/+0x170 read",
+        "log net events: GrenadeExplode +0x14/+0x18/+0x170 write",
+        "log net events: EmitRocket +0x50 read",
+        "log net events: EmitRocket +0x50 write",
+        "log net rocket: Apply guarded (EmitRocket +0x50)",
+        "log net attack: AttackProjectile Read/Write/Apply wrapped for logging",
+        "log net carry: 2 carry-object event sets wrapped for logging",
+        "log net Message: 0x62dfc2 read guard installed",
+    };
+    expect(hx::calls == want_log, "the install lines, in order");
+    expect(n == 28 + 5, "installed = 28 ports + 1 per installer");
+    bool all_host = true;
+    for (const auto &s : slots) {
+        const uint64_t v = hx::get<uint64_t>(s.vt + 8 * s.slot);
+        all_host = all_host && v != hx::addr(s.fn) && !(v >= hx::addr(0) && v < hx::addr(hx::kImageSize));
+    }
+    expect(all_host, "every game slot now holds a host function");
+    expect(hx::mem[0x62dfc2] == 0xe9, "0x62dfc2 is a jmp");
+
+    hx::put<uint32_t>(0x1700000 + 0x0c, 0x11);
+    hx::put<uint32_t>(0x1700000 + 0x10, 22);
+    hx::put<uint32_t>(0x1700000 + 0x14, 33);
+    hx::put<int32_t>(0x1700000 + 0x1c, -4);
+    void *e = hx::mem + 0x1700000;
+    auto apply_at = [](uint64_t vt) { return reinterpret_cast<ApplyFn>(hx::get<uint64_t>(vt + 0x20)); };
+    auto read_at = [](uint64_t vt) { return reinterpret_cast<u2mp::events::SerializeFn>(hx::get<uint64_t>(vt + 0x10)); };
+    hx::calls.clear();
+    apply_at(0x1040b70)(e, hx::mem + 0x1234);
+    expect(hx::calls == std::vector<std::string>{"log net attack apply: flags 00000011 attacker 22 target 33 damage -4",
+                                                 "game apply(img+0x1700000, img+0x1234)"},
+           "attack Apply: logged, then the game's Apply");
+    hx::calls.clear();
+    read_at(0x1040800)(e, nullptr);
+    expect(hx::calls == std::vector<std::string>{"game serialize(img+0x1700000, null)",
+                                                 "log net carry 33 read: 00000011 00000016 00000021"},
+           "carry 33 Read: the game's Read, then logged");
+    hx::calls.clear();
+    hx::put<uint32_t>(0x1700000 + 0x50, 0);
+    apply_at(0x1041390)(e, hx::mem + 0x1234);
+    apply_at(0x1041390)(e, hx::mem + 0x1234);
+    expect(hx::calls == std::vector<std::string>{"log net rocket: settings 00000000 not loaded, left out"},
+           "rocket Apply, id 0: dropped, logged once");
+    hx::calls.clear();
+    hx::put<uint32_t>(0x1700000 + 0x50, 0x5e771465);
+    g_settings_slot = 0x1730000;
+    hx::put<uint64_t>(0x1730000, hx::addr(0x1731000));
+    hx::put<uint64_t>(0x1731000 + 0xb0, hx::addr(0x1732000));
+    apply_at(0x1041390)(e, hx::mem + 0x1234);
+    expect(hx::calls == std::vector<std::string>{"find settings(5e771465)", "game apply(img+0x1700000, img+0x1234)"},
+           "rocket Apply, settings loaded: the game's Apply");
+    hx::calls.clear();
+    hx::put<uint64_t>(0x1731000 + 0xb0, 0);
+    apply_at(0x1041390)(e, hx::mem + 0x1234);
+    expect(hx::calls == std::vector<std::string>{"find settings(5e771465)",
+                                                 "log net rocket: settings 5e771465 not loaded, left out"},
+           "rocket Apply, object +0xb0 NULL: dropped, logged");
+    g_settings_slot = 0;
+    hx::recording = false;
+    *NEW.game = Game{};
+}
+
 void scen_table() {
     begin("kPorts table (types, names, vtables, sizes, stubs, which functions exist)");
     std::vector<std::string> rec[2];
@@ -1537,6 +1706,7 @@ int main() {
     scen_game_functions();
     scen_connections();
     scen_install();
+    scen_extra_installs();   // last: it leaves the new module wrapped on its own image
     long fails = 0;
     for (const Group &g : groups) {
         std::printf("%-4s %-100s %6ld cases%s\n", g.fails ? "FAIL" : "PASS", g.name.c_str(), g.cases,

@@ -253,6 +253,23 @@ Rec run_side(const Ns &ns, const std::function<void()> &setup, const std::functi
     return hx::calls;
 }
 
+// Commit 50a6b69 (parity-n-remaining.md N2, spec remaining.md 1.5 step 12): install_remaining ends with the Mute
+// Players row-search check. The scenarios' image never holds those PS4 bytes (0x5ed076 .. 0x5ed12d), so the new
+// install always ends with the "not as expected" line and adds nothing to `installed`; the old record gets that line
+// right before its "installed N" (install has no early return, so every install reaches the step). When the bytes
+// do match, the line and count differ, and the difference shows.
+void n2_install_expected(Rec &r) {
+    for (size_t i = 0; i < r.size(); ++i)
+        if (r[i].rfind("installed ", 0) == 0) {
+            const bool match = get<uint32_t>(0x5ed0ca) == 0x828bfe81u;   // first bytes of `cmp esi, 0xb04c828b`
+            if (!match)
+                r.insert(r.begin() + std::ptrdiff_t(i),
+                         "log mute players page: row search in 0x5ecb80 not as expected: selecting a row changes "
+                         "nothing");
+            return;
+        }
+}
+
 // to_new: the old record in the form a documented change gives it (named where a scenario passes one); it runs
 // right after the old build, so it sees that build's scenario state.
 void run(const char *name, const std::function<void()> &setup, const std::function<void(const Ns &)> &act,
@@ -261,6 +278,7 @@ void run(const char *name, const std::function<void()> &setup, const std::functi
     std::vector<uint8_t> img[2];
     for (int k = 0; k < 2; k++) {
         calls[k] = run_side(k ? kNew : kOld, setup, act, &img[k]);
+        if (k == 0) n2_install_expected(calls[0]);
         if (k == 0 && to_new) to_new(calls[0]);
     }
     g_total++;

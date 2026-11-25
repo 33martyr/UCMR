@@ -21,6 +21,11 @@ Floating point: all float arithmetic below is IEEE single precision with each op
 (no fused multiply-add, no double intermediates, no fast-math). The build has no `-march`, so SSE2 scalar
 float is the reference.
 
+Parts 1 and 2 describe the clean-room version (4c88d7a, 2026-11-14). Part 3 lists what the current code does
+differently (first in the squash 934a6ca, 2026-11-24, unchanged since): it replaces 1.4.1 step 2-3, 1.4.2 and 1.5
+for the current code, adds four call-outs, and adds three log lines to Part 2. Generator slot 4 (1.4.3) is no
+longer installed; whether it should be is open (3.10).
+
 ---
 
 ## Part 1: netanim.cpp
@@ -617,3 +622,179 @@ Natives (fake `0xa15e70`, `0x64b960`, `0x60eb90`, converter pointer and virtual 
   flag set, other flag bits kept). Client: damage below max (only the max-health call), damage >= max (damage
   applied, no send even when alive changes), damage `0xffffffff`, max negative, health pointer null (max 0).
   Host status changing between its reads (fake virtual writes the match session).
+
+---
+
+## Part 3: changes after the clean-room version
+
+Origin: the clean-room netanim.cpp / natives.cpp of 4c88d7a (2026-11-14) passed this spec with no difference. Every
+change below appears first in the squash 934a6ca (2026-11-24, no message; the U3 repository's history reset) and is
+unchanged in 8e7965b, 9fd6134 and the current branch. `git log -S` finds no other commit. The reasons below come
+from the comments in the current netanim.cpp; nothing here was checked against the game.
+
+### 3.1 Install (replaces 1.5 for the current code)
+
+1. Switch: unchanged (1.5 step 1).
+2. Assert skip, before any check: for `at` = `0x66b430` upward while `at + 7 <= 0x66c380` and fewer than 32 sites
+   were patched: when the bytes at `at` are `48 8b 05` (mov rax, [rip+d]) and `at + 7 + d` (d = the signed 32-bit
+   value at `at + 3`) is `0x156df78` (the assertion hook global), write `e9 rel32` jumping to `0x66c380` (the
+   snapshot reader's epilogue; rel32 = `0x66c380 - (at + 5)`) followed by `90 90`, count the site and continue at
+   `at + 7`. A displacement that does not fit ends the scan. When at least one site was patched, log
+   `netanim: snapshot parse aborts on asserts (%d sites)`. Not counted in `installed`. Purpose (code comment): a
+   garbled snapshot ends the parse instead of taking the game down.
+3. Stream checks: the six of 1.5 step 2, plus (all must match, same log and return on a mismatch):
+
+   | Address | Bytes | Meaning |
+   |---|---|---|
+   | `0x66b637` | `4c 8d 35 3c c7 81 00` | index site (3.4) |
+   | `0x5f3d63` | `48 8d 0d 16 6f a1 00` | prefill site (3.5), `lea rcx, [image + 0x100ac80]` |
+   | `0x5f3dd1` | `41 8b 47 0c 49 8b 0f` | depth site (3.6) |
+   | `0x6367cb` | `8d 42 04` | writer constant (step 7) |
+   | `0x6368a0` | `83 f9 03` | writer constant (step 7) |
+   | `0x6368b7` | `83 c0 04` | writer constant (step 7) |
+
+4. Five `near_stub(512)` requests, always all five, in this order: writer, reader, index, prefill, depth. Any NULL:
+   log `netanim: no stub memory near the image`; return.
+5. Build the five stubs, then log `netanim: stubs writer=%p reader=%p index=%p prefill=%p depth=%p` with the five
+   stub addresses (host addresses: a diagnostic line, its values differ per process).
+6. Jumps, in this order: writer (11 bytes), reader (28), index (7), prefill (7), depth (7), each `e9 rel32` and the
+   rest `cc`. A displacement that does not fit logs `netanim: stub out of jump range` and returns (sites patched
+   before it stay patched, nothing is counted).
+7. Writer constants: the byte at `0x6367cd` becomes `0x0a`, at `0x6368a2` `0x09`, at `0x6368b9` `0x0a` (the
+   instructions of step 3 become `lea eax, [rdx+10]`, `cmp ecx, 9`, `add eax, 10`: the game's own writer accounts
+   for the 10 phase bits of 3.2).
+8. `installed += 5`; log the 1.5 step 5 line (same text), then `netanim: anim indices, bind-pose prefill and tree
+   depth guard installed`.
+9. Bit count padding: when `UNCHARTED_U2MP_NETANIM_PAD` is not exactly `"0"` and the bytes at `0x60e296` are
+   `41 89 84 24 bc 00 00 00` and at `0x60e9f3` are `89 83 bc 00 00 00`: two `near_stub(384)` requests (player, then
+   other). With both non-NULL, build both stubs (3.7), jump the player site (8 bytes) and then the other site
+   (6 bytes) as in step 6; when both jumps succeed, `installed += 1` and log
+   `netanim: snapshot bit counts padded to whole words`. A NULL stub or a failed jump is silent (a failed second
+   jump leaves the first site patched). Otherwise (switch `"0"` or either byte check failing) log
+   `netanim: bit count padding off (UNCHARTED_U2MP_NETANIM_PAD=0)`.
+10. Generator slot 4: the slot checks and the `replace_function` of 1.5 steps 6-7 are gone. The slot host function
+    and the host visitor (1.4.3, 1.4.4) are still in the source but nothing installs them. See 3.10.
+
+Fully installed: +6 (+5 without the padding).
+
+### 3.2 Writer call-out (replaces 1.4.1 host steps 2-3)
+
+Register contract and the word rules of 1.4.1 step 5 are unchanged. Host action:
+
+1. Call log: for the first 12 calls of the process, before anything else, log
+   `netanim: clip cmd %p size %u anim %p stream %p pos %u limit %u`: the command, the u16 at cmd+2, the anim pointer
+   (cmd+4), the stream, and the stream's position and limit as they are before the write.
+2. The phase always takes 10 bits, scale 1023.0f. q = 0. With an info pointer: frames = u16 at info+0x22, frame =
+   float at cmd+0x10; only when frames > 1 and frame > 0.0f (NaN, zero, negative zero and negative frames give 0):
+   q = truncate-to-int32 (1.4.1 rules) of `(frame * 1023.0f) / (float(frames) - 1.0f)`, then q = 1023 when q is
+   above 1023.
+3. Room check and overflow log as in 1.4.1 step 4, with n = 10. The reader no longer prints its overflow line, so
+   the 8-line cap is in practice the writer's alone.
+4. Write the low 10 bits of q (1.4.1 step 5).
+
+The phase bit widths of 1.3 (4 / 8 / 16 bits by frame count) are no longer used anywhere.
+
+### 3.3 Reader call-out (replaces 1.4.2)
+
+Stub: the r14 store to rbp-0x188, the save, the host call with (rdi = the 8 bytes at [rbp], i.e. the reader's
+frame; rsi = rax on entry, which the new code treats as the anim's art group; rdx = r14, the anim index + 1), the
+restore, the counter increment and the jump to `0x66c250`, as in 1.4.2.
+
+"Readable" below: the address is at least 0x10000, below 2^47 and in committed memory that is neither no-access nor
+a guard page (the code asks Windows `VirtualQuery`).
+
+Host action with frame, group, next:
+
+1. Count the call (process-wide leaf counter).
+2. q = 0. When position + 10 <= limit (no wrap): q = the next 10 bits (position += 10). Otherwise nothing: no log,
+   no position change.
+3. gen = pointer at frame-0x190. Return when gen is NULL or not readable, or when its vtable pointer (gen+0) is not
+   image + `0x100ac80` (the CreateAnimCmds visitor of PORT-NETANIM.md 2; any other visitor, e.g. the host visitor
+   of 1.4.4, gets no call).
+4. slot = u32 at frame-0x180 (the anim counter before the increment), sub = u32 at gen+0xc. Return when sub + slot
+   (u32) >= 7.
+5. anim = the lookup (below) of (group, stored index next - 1) when 1 <= next <= the stored index count (3.4), else
+   none.
+6. With an anim: call the vtable's slot 3 (gen+0 -> +0x18) with (gen, anim, slot, float(q) * (1.0f / 1023.0f));
+   count a clip. Without: call slot 5 (+0x28) with (gen, slot); count a pose.
+7. When the leaf count of step 1 is a multiple of 64, log
+   `netanim: leaves %d, clips %d, poses %d, misses %d, deep drops %d, index reads %d` (process-wide counters). The
+   returns of steps 3 and 4 skip this line.
+
+Lookup (group, idx): none when group is NULL or not readable or idx >= 0x800. An 8-entry per-thread cache of
+{group, idx, anim} is checked first. Otherwise: P = pointer at group+0x30 (not checked), tab = pointer at P+0x10;
+none when tab is NULL or not readable or idx >= the u32 at tab+0. entry = (pointer at tab+8) + idx * 16; none when
+not readable. want = u32 at entry+0, x = pointer at entry+8. Candidates: a = x, then (when not yet found and x is
+non-NULL) a = pointer at x (x itself is not checked). A candidate is the anim when a is readable, its name pointer
+(a+0) is readable, the name (read in 16-byte pieces) ends within 128 bytes, `sid(name)` == want, the clip pointer
+a+0x28 is readable and the u16 at clip+0x22 is non-zero. Found: stored in the cache (round robin). Not found: count
+a miss.
+
+### 3.4 Index call-out (`0x66b637`, new)
+
+The 7 bytes at `0x66b637` jump to a stub: save, host(rdi = [rbp], esi = r14d), restore, jump to `0x66b6a5`. The
+replaced `lea r14, [rip+...]` and the game code up to `0x66b6a5` (its own anim index reads) are skipped.
+
+Host (frame, count): count the call (index reads); for the first 4 calls log `netanim: %u anim indices`. Stream =
+frame-0x150. The stored count becomes min(count, 32). For i = 0 .. count-1: the index is the 11 bits at
+position + 11 * i when position + 11 * (i + 1) <= limit, else `0xffff`; it is stored at entry min(i, 31). Then the
+stream position becomes position + 11 * count (not limited). Indices and count are per thread.
+
+### 3.5 Bind-pose prefill (`0x5f3d63`, new)
+
+The 7 bytes at `0x5f3d63` jump to a stub: save, host(rdi = rbx = the command list, esi = r12d = the base slot),
+restore, `mov rcx, image + 0x100ac80` (the replaced lea), jump to `0x5f3d6a`.
+
+Host: words = pointer at list+0, count = u32 at list+0xc, top = u32 at list+0x10. For s = base, then base + 1:
+words[count] = `0x0002000d`, words[count + 1] = s, count += 2, top = s when top < s. Store count and top back, and
+keep {list, count, top} as the per-thread mark. No capacity check.
+
+### 3.6 Tree depth guard (`0x5f3dd1`, new)
+
+The 7 bytes at `0x5f3dd1` jump to a stub: save, host(rdi = r15 = the list, esi = ebx = the base slot), restore,
+`mov eax, [r15+0xc]; mov rcx, [r15]` (the replaced instructions), jump to `0x5f3dd8`.
+
+Host: top = u32 at list+0x10; depth = top - base when top >= base, else 0. When depth > 5 and the mark's list is
+this list: count and top are set back to the mark's (what was appended after the prefill is dropped), count a deep
+drop, and for the first 8 drops of the process log `netanim: deep tree dropped (%u slots, limit 5)` (depth).
+
+### 3.7 Bit count padding call-outs (`0x60e296`, `0x60e9f3`, new)
+
+Player site `0x60e296` (`mov [r12+0xbc], eax`, 8 bytes, resume `0x60e29e`, snapshot = r12) and other site
+`0x60e9f3` (`mov [rbx+0xbc], eax`, 6 bytes, resume `0x60e9f9`, snapshot = rbx): save, host(rdi = snapshot,
+esi = eax = the bit count), restore, jump. Registers (eax included) are as on entry.
+
+Host: n = (bits + 31) & ~31 (u32 arithmetic); when n > 0x550, n = bits. Store n as u32 at snapshot+0xbc. Purpose
+(code comment): the game copies ceil(bits / 8) bytes of a stream filled from the top of 32-bit words, so the high
+bits of the last partial word never reached the wire.
+
+### 3.8 Host visitor slot 3
+
+1.4.4 slot 3 checks "readable" (3.3) instead of non-NULL for the anim, the event table and the info pointer. Only
+reachable through slot 4, which is not installed.
+
+### 3.9 natives.cpp: value logs
+
+net-coop-host-script-id, net-coop-script-id and net-coop-task each remember the last value they returned in this
+process (initially `0xffffffff`). When the value they are about to return differs, they log, after all guest calls
+and right before returning:
+
+- `natives: net-coop-host-script-id -> %08x`
+- `natives: net-coop-script-id -> %08x`
+- `natives: net-coop-task -> %08x (a co-op wave script is running)`
+
+No cap. The returned values are unchanged (2.5).
+
+### 3.10 Open: generator slot 4
+
+The current code does not replace `0x5f48d0` (3.1 step 10). Whether it should is being decided on another branch;
+until then 1.4.3 / 1.5 steps 6-7 describe the old behaviour and this spec does not say which one is right. The test
+keeps that difference visible (3.11).
+
+### 3.11 How the rewrite test maps these changes
+
+`gow3_pc/tests/u2mp_rewrite/test_netanim.cpp` turns the old record and image into the expected new ones by the rules
+above (3.1 log lines, request count, installed count, the new patch bytes, 3.2 / 3.3 stream results, 3.9 lines),
+prints the 3.1 step 5 pointers as stub pool offsets, and checks 3.1 step 2-3 / 9, 3.2 step 1 and 3.3-3.7 with
+new-only scenarios. The slot 4 lines, the slot's +1 and the slot's 16 image bytes are compared on their own: a
+scenario whose only difference is that part is reported as `OPEN-SLOT4`, not as passed.

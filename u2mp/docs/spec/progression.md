@@ -497,7 +497,8 @@ Others:
 The PS3 multiplayer initialisation (NetInit, the connecting page update, NetGameManager::Init) is gone from PS4
 1.02. This file sets up the state those created that PS4 code still reads: two hash tables in the
 NetGameManager (without them the game reset at match start reads a NULL bucket array), the recent-game history,
-the leave status of two sessions, and the booster list. It patches no code; it is called from session.cpp.
+the leave status of two sessions, and the booster list. It is called from session.cpp. As written from this
+spec it patched no code; since 934a6ca it also makes four game fixes on its first passing call (2.4.5).
 
 ### 2.2 Interface
 
@@ -554,6 +555,7 @@ Byte checks (all must match; each is checked even after an earlier one failed):
 | `0x5fd8ef` | `48 8d 05 92 ce b3 00` | booster object |
 | `0xb332a0` | `55 48 89 e5 41 57 41 56 41 55 41 54 53 50 41 89` | Alloc |
 | `0xa15300` | `55 48 89 e5 53 48 83 ec 18 4c 8b 05 f0 58 63 00` | DcFind |
+| `0x632148` | `e8 43 ba 00 00` | player-setup slot reset (since 934a6ca, 2.4.5) |
 
 ### 2.4 Behaviour
 
@@ -572,6 +574,10 @@ Both do exactly the same:
 4. Table A (`0x113d300`, 16 entries, node 0x60, name `ngm table 0x1ba0`), then table B (`0x113d370`, 256 entries,
    node 0x38, name `ngm table 0x1c10`), as in 2.4.2.
 5. Boosters, as in 2.4.3.
+
+Since 934a6ca (2.4.5): step 1 also checks the `0x632148` row; between steps 1 and 2 the net bit writer fix runs
+on the first call that passes step 1; after step 5 come the player-setup NOP, the NetCharacter heap and the
+foreground mesh store, on every call.
 
 #### 2.4.2 Hash table setup (table T, entries N, node size S, name)
 
@@ -615,6 +621,63 @@ counts are 0. Log
 
 with when, label, b, end, `ok` when b is non-zero and end == b + n*8 (n sign-extended to 64 bits, 64-bit wrapping
 arithmetic) else `MISMATCH`, n, pointer +8, pointer +0x18, pointer +0x20, u8 +0x40, used, minus.
+
+#### 2.4.5 Game fixes added in 934a6ca
+
+Added after the rewrite, first in the squash 934a6ca (2026-11-24, no commit message; the reasons below are the
+code comments in netinit.cpp). All five sit in `netinit_prepare()` / `netinit_match()` (both still do the same).
+
+**Code writes.** A "code write" of bytes at an image offset makes those bytes writable first (the loader maps
+the code segments execute-only after install, and these run later), copies, flushes the instruction cache and
+puts the old protection back. When the bytes cannot be made writable: log
+`netinit: code at 0x%llx cannot be made writable (%lu)` (offset, system error) and nothing is written.
+
+1. **Check at `0x632148`.** The code check of 2.4.1 step 1 has one more row, last: `e8 43 ba 00 00` (the call to
+   `0x63db90` in NetEventPlayerSetup::Apply, `0x632110`), label `player-setup slot reset`. A mismatch fails the
+   check like any other row.
+2. **Net bit writer fix (342 sites).** Once per process, on the first call that passed the code check, before
+   step 2 of 2.4.1 (it is marked done before it runs, so it is never retried). Reason: the net bit writers keep
+   the destination word's bits above a field with `mov r32,-1; mov cl,<32 - offset>; shl r32,cl`; at offset 0
+   the count is 32, which x86 masks to 0, so the whole old word is kept and the field is ORed into stale bits (the
+   player snapshot's locator x became the OR of every x sent). A 64-bit shift clears the field.
+   - Site idiom, at an image offset `at`: (a) `mov r32,-1`: `b8+r ff ff ff ff` (r 0..7, 5 bytes) or
+     `41 b8+r ff ff ff ff` (r 8..15, 6 bytes); (b) zero, one or two "middle" instructions, each either an
+     optional REX byte `40` / `44` then `88 /r` with ModRM & 0xc7 == 0xc1 (a byte move into cl) whose source
+     register (ModRM bits 3..5, +8 with `44`) is not r and, without REX, is not a high-byte register (4..7) whose
+     low two bits equal r; or, without REX, `29 /r` with ModRM mod 3 (a 32-bit register subtract) naming neither
+     r as source nor as destination; (c) `shl r32,cl`: `d3 e0+r` (r < 8) or `41 d3 e0+(r-8)`. The site length is
+     the sum.
+   - Replacement, the same length: the middle instructions as they are, then `or r64,-1` (`48` / `49`, `83`,
+     `c8+(r&7)`, `ff`), then `shl r64,cl` (`48` / `49`, `d3`, `e0+(r&7)`), then `90` up to the length.
+   - Count: scan offsets from `0x5e0000` while offset + 16 <= `0x640000`; a site moves the scan past its length,
+     anything else by one byte. When the count is not 342: log
+     `netinit: %u net bit writer sites, not the %u of 1.02: masks left alone` (count, 342) and stop (so an image
+     already fixed, or not 1.02, is left alone).
+   - Fix: make `0x5e0000..0x640000` writable at once (failure: log
+     `netinit: the net bit writer range cannot be made writable (%lu); masks left alone` and stop); scan again the
+     same way, writing each replacement whose bytes differ (counted as patched); flush; put the protection back;
+     log `netinit: net bit writer word masks fixed (%u of %u)` (patched, 342).
+3. **Player-setup NOP.** Every call, after the boosters: when the byte at `0x632148` is `e8`, code write of five
+   `90` there; on success log `netinit: the player-setup event keeps the joiner's slots`. Reason: the event wipes
+   every slot on a joiner (`0x632110` -> `0x63db90`) and then refills only the ones it finds by NpId; the session
+   layer has already filled them.
+4. **NetCharacter heap.** Every call, next: the process type node at `0x14cee28`: when u32 +0x10 is `0xf2c86c22`
+   (NetCharacter) and u32 +0x18 (heap size) is `0x20000`, set +0x18 = `0x80000` (512 KiB, as Player's) and log
+   `netinit: NetCharacter process heap 128 -> 512 KiB`. Reason: 128 KiB fits the MP models, but a player on a
+   single-player actor (the hero-parka skin) overruns it in NetCharacter::Init and the match dies.
+5. **Foreground meshes.** Every call, last: when the 8 bytes at `0x5f228d` are `41 c6 87 bf 00 00 00 01`
+   (`mov byte [r15+0xbf],1`), code write of `00` at `0x5f2294` (the immediate) and log
+   `netinit: foreground meshes shown (0x5f228d stores 0)`. Reason: the online task's update stores 1 into the
+   render option "Disable Foreground Meshes" every frame, so no player, NetCharacter, pickup or prop is drawn in
+   a net game.
+
+Steps 3 to 5 check their bytes / values first, so a later call finds them done and does nothing (no log).
+Portability: the code writes use Windows calls (`VirtualProtect`, `FlushInstructionCache`).
+
+Differential test (`test_progression.cpp`): `ni_expected` gives the old record, on the first passing call, the
+bit writer line the fake image produces (`0 net bit writer sites ...`) and the player-setup NOP (image bytes and
+line); the new-only scenarios N-G1..N-G5 check steps 1 to 5 (342 sites and 1 site, heap 128 KiB and another
+size, the foreground bytes).
 
 ### 2.5 Install
 
