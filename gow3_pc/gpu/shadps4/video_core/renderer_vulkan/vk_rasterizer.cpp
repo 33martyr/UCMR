@@ -6169,11 +6169,12 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
             static std::atomic<int> traced{0};
             if (traced.fetch_add(1) < 80) {
                 std::printf("PS trace texture: shader %08llx image %u at %#llx %ux%u pitch %u levels %u-%u "
-                            "format %u/%u\n",
+                            "format %u/%u tile %u\n",
                             static_cast<unsigned long long>(stage.pgm_hash), image_index,
                             static_cast<unsigned long long>(tsharp.Address()), u32(tsharp.width) + 1,
                             u32(tsharp.height) + 1, u32(tsharp.pitch) + 1, u32(tsharp.base_level),
-                            u32(tsharp.last_level), u32(tsharp.GetDataFmt()), u32(tsharp.GetNumberFmt()));
+                            u32(tsharp.last_level), u32(tsharp.GetDataFmt()), u32(tsharp.GetNumberFmt()),
+                            u32(tsharp.tiling_index));
                 std::fflush(stdout);
             }
         }
@@ -6344,6 +6345,25 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
             auto& image_view = texture_cache.FindTexture(
                 image_id, desc, memo_entry ? &memo_entry->view_memo : nullptr, !on_helper);
             const auto binding = image.binding;
+            // gow3 25 Nov 2026 (GOW3_TRACE_PS, The Temple's water): the image each binding of a
+            // traced shader resolved to. No GpuModified flag: the GPU never wrote this image since
+            // it was made, so it holds the guest memory's bytes; target 1: a render target of the
+            // same draw (a feedback read).
+            if (TracedShader(stage.pgm_hash)) {
+                static std::atomic<int> traced{0};
+                if (traced.fetch_add(1) < 80) {
+                    std::printf("PS trace image: shader %08llx binding %u -> %#llx %ux%u levels %u %s "
+                                "flags %#x (gpu modified %d) target %d storage %d\n",
+                                static_cast<unsigned long long>(stage.pgm_hash), binding_index,
+                                static_cast<unsigned long long>(image.info.guest_address),
+                                image.info.size.width, image.info.size.height,
+                                image.info.resources.levels,
+                                vk::to_string(image.info.pixel_format).c_str(), u32(image.flags),
+                                int(True(image.flags & VideoCore::ImageFlagBits::GpuModified)),
+                                int(binding.is_target), int(is_storage));
+                    std::fflush(stdout);
+                }
+            }
 
             // gow3: a proxied scene image sampled with normalized coordinates reads the proxy:
             // no resample to the native size (the native image is not touched).
@@ -7170,6 +7190,13 @@ void Rasterizer::CopyBuffer(VAddr dst, VAddr src, u32 num_bytes, bool dst_gds, b
                                  ? "dma copy (gpu path)"
                                  : "dma copy",
                              src, 0, dst, num_bytes);
+    }
+    // gow3 25 Nov 2026 (The Temple's water): a packet moves at most 2 MiB - 1, so a surface
+    // copy arrives in pieces; past the first, a piece of a GPU-written image is not in guest
+    // memory or the buffer cache (TextureCache::CopySurfacePiece, GOW3_SURFACE_PIECE_COPY).
+    if (!dst_gds && !src_gds && num_bytes >= 64_KB &&
+        texture_cache.CopySurfacePiece(src, dst, num_bytes, "dma")) {
+        return;
     }
     if (!dst_gds && !buffer_cache.IsRegionGpuModified(dst, num_bytes)) {
         if (!src_gds && !buffer_cache.IsRegionGpuModified(src, num_bytes) &&

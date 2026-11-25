@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <set>
+#include <string>
+#include <fmt/format.h>
 #include <xxhash.h>
 #include "video_core/amdgpu/liverpool.h"
 
@@ -1313,6 +1316,99 @@ ImageId TextureCache::FindImageFromRange(VAddr address, size_t size, bool ensure
                     size);
     }
     return {};
+}
+
+bool TextureCache::CopySurfacePiece(VAddr src, VAddr dst, u64 size, const char* what) {
+    static const bool enabled = [] {
+        const char* value = std::getenv("GOW3_SURFACE_PIECE_COPY");
+        return value && value[0] == '1';
+    }();
+    // The newest registered colour image holding the whole range.
+    const auto holder = [&](VAddr address, bool gpu_written) {
+        ImageId found{};
+        ForEachImageInRegion(address, size, [&](ImageId id, Image& image) {
+            if (False(image.flags & ImageFlagBits::Registered) || image.info.props.is_depth ||
+                address < image.info.guest_address ||
+                address + size > image.info.guest_address + image.info.guest_size ||
+                (gpu_written && !image.SafeToDownload())) {
+                return;
+            }
+            if (!found || slot_images[found].alias_generation < image.alias_generation) {
+                found = id;
+            }
+        });
+        return found;
+    };
+    ImageId src_id{}, dst_id{};
+    bool piece = false, copied = false;
+    std::string text;
+    if (enabled) {
+        // The image copy below changes image state: the texture binding helper finishes first,
+        // before the lock is taken (as BufferCache::SynchronizeMemoryFromImage).
+        runtime.BeforeImageAccess();
+    }
+    {
+        std::scoped_lock lock{mutex};
+        src_id = holder(src, true);
+        if (!src_id) {
+            return false;
+        }
+        const Image& source = slot_images[src_id];
+        if (src == source.info.guest_address && size >= source.info.guest_size) {
+            return false; // a whole-image copy: the buffer cache synchronizes it from the image
+        }
+        dst_id = holder(dst, false);
+        piece = dst_id && IsSurfacePieceCopy(source.info, src, slot_images[dst_id].info, dst, size);
+        static std::set<std::pair<VAddr, VAddr>> reported;
+        const VAddr dst_base = dst_id ? slot_images[dst_id].info.guest_address : 0;
+        if (reported.size() < 16 && reported.emplace(source.info.guest_address, dst_base).second) {
+            const auto describe = [](const Image& image) {
+                return fmt::format("{:#x} {}x{} {} tile {} pitch {}", image.info.guest_address,
+                                   image.info.size.width, image.info.size.height,
+                                   vk::to_string(image.info.pixel_format),
+                                   u32(image.info.tile_mode), image.info.pitch);
+            };
+            text = fmt::format(
+                "GPU: surface piece copy ({}) {:#x} -> {:#x} ({} bytes, +{:#x}) from GPU-written image "
+                "{} into {}: {}",
+                what, src, dst, size, src - source.info.guest_address, describe(source),
+                dst_id ? describe(slot_images[dst_id]) : std::string("no image"),
+                !piece    ? "not the same layout, copied as memory (old bytes past the image base)"
+                : enabled ? "the image is copied (GOW3_SURFACE_PIECE_COPY)"
+                          : "copied as memory, old bytes past the image base "
+                            "(GOW3_SURFACE_PIECE_COPY=1 copies the image)");
+        }
+        if (piece && enabled) {
+            const Image& target = slot_images[dst_id];
+            const auto& last = last_piece_copy;
+            const bool same_copy = last.src == src_id && last.dst == dst_id &&
+                                   last.src_uid == source.image_uid &&
+                                   last.dst_uid == target.image_uid &&
+                                   last.src_generation == source.alias_generation &&
+                                   last.dst_generation == target.alias_generation;
+            if (!same_copy) {
+                CopyAlias(src_id, dst_id, target.info.size);
+                copied = true;
+            }
+        }
+    }
+    if (!text.empty()) {
+        std::printf("%s\n", text.c_str());
+        std::fflush(stdout);
+    }
+    if (!piece || !enabled) {
+        return false;
+    }
+    if (copied) {
+        // A GPU write to the destination: its aliases copy from it before their next read.
+        PublishAliasWrite(dst_id);
+        std::scoped_lock lock{mutex};
+        const Image& source = slot_images[src_id];
+        const Image& target = slot_images[dst_id];
+        last_piece_copy = {src_id, dst_id, source.image_uid, target.image_uid,
+                           source.alias_generation, target.alias_generation};
+    }
+    return true;
 }
 
 ImageView& TextureCache::FindTexture(ImageId image_id, const ImageDesc& desc, ViewMemo* memo,

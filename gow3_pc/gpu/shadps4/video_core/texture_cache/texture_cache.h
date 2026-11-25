@@ -144,6 +144,16 @@ public:
     /// Retrieves image whose address matches provided
     [[nodiscard]] ImageId FindImageFromRange(VAddr address, size_t size, bool ensure_valid = true);
 
+    /// gow3 25 Nov 2026 (The Temple's water): a guest memory copy (`what`: CP DMA, which moves
+    /// at most 2 MiB - 1 per packet, or a compute copy) of a piece of a GPU-written colour image.
+    /// Such a copy reads guest memory or the buffer cache, where that image's contents are only
+    /// at its base address (BufferCache::SynchronizeMemoryFromImage), so the pieces after the
+    /// first copy old bytes. Logged once per image pair. GOW3_SURFACE_PIECE_COPY=1: when the
+    /// destination is an image of the same layout at the same offset (IsSurfacePieceCopy), the
+    /// whole image is copied there at the first piece and true is returned for it and the
+    /// following pieces of that copy (the caller skips them).
+    bool CopySurfacePiece(VAddr src, VAddr dst, u64 size, const char* what);
+
     /// gow3: a FindView result remembered by the caller for the same image and view info.
     struct ViewMemo {
         ImageId image_id{};
@@ -608,6 +618,12 @@ private:
     [[nodiscard]] bool CommitAliasWriter(AliasState& state);
     void CopyAlias(ImageId src_id, ImageId dst_id, const Extent3D& extent);
     void InvalidateAlias(Image& image);
+    // gow3 (GOW3_SURFACE_PIECE_COPY): the last image copied for surface pieces, with the alias
+    // generations after it; the later pieces of the same copy match it (guarded by `mutex`).
+    struct SurfacePieceCopy {
+        ImageId src{}, dst{};
+        u64 src_uid{}, dst_uid{}, src_generation{}, dst_generation{};
+    } last_piece_copy;
     // gow3: FindImage results for unchanged image registrations (guarded by `mutex`).
     struct FindImageCacheEntry {
         VAddr address = 0;

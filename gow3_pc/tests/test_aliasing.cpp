@@ -60,6 +60,51 @@ int main() {
         dst.resources.levels = 2;
         assert(!GetAliasCopyExtent(src, dst));
     }
+    // Pieces of a surface copy (CP DMA moves at most 2 MiB - 1 per packet): the scene colour
+    // into the refraction texture, both RGBA16F 1920x1080 of the same layout elsewhere in memory.
+    {
+        const auto surface = [](VAddr address) {
+            ImageInfo info = Make({1920, 1080, 1}, vk::Format::eR16G16B16A16Sfloat);
+            info.num_bits = 64;
+            info.guest_address = address;
+            info.guest_size = 1920ull * 1088 * 8;
+            return info;
+        };
+        const ImageInfo scene = surface(0x1135ab0000), refraction = surface(0x1149d40000);
+        constexpr u64 piece = 0x1ffffc;
+        assert(IsSurfacePieceCopy(scene, scene.guest_address, refraction, refraction.guest_address,
+                                  piece));
+        assert(IsSurfacePieceCopy(scene, scene.guest_address + 3 * piece, refraction,
+                                  refraction.guest_address + 3 * piece, piece));
+        // The last piece ends at the surface's end; one byte more is past it.
+        const u64 tail = scene.guest_size - 7 * piece;
+        assert(IsSurfacePieceCopy(scene, scene.guest_address + 7 * piece, refraction,
+                                  refraction.guest_address + 7 * piece, tail));
+        assert(!IsSurfacePieceCopy(scene, scene.guest_address + 7 * piece, refraction,
+                                   refraction.guest_address + 7 * piece, tail + 1));
+        // The whole surface in one copy is left to the buffer cache; other offsets, formats,
+        // layouts or sizes are not the same piece.
+        assert(!IsSurfacePieceCopy(scene, scene.guest_address, refraction, refraction.guest_address,
+                                   scene.guest_size));
+        assert(!IsSurfacePieceCopy(scene, scene.guest_address + piece, refraction,
+                                   refraction.guest_address, piece));
+        assert(!IsSurfacePieceCopy(scene, scene.guest_address - 4, refraction,
+                                   refraction.guest_address - 4, piece));
+        ImageInfo other = refraction;
+        other.pixel_format = vk::Format::eR32G32Uint;
+        assert(!IsSurfacePieceCopy(scene, scene.guest_address, other, other.guest_address, piece));
+        other = refraction;
+        other.tile_mode = AmdGpu::TileMode::Thin1DThin;
+        assert(!IsSurfacePieceCopy(scene, scene.guest_address, other, other.guest_address, piece));
+        other = refraction;
+        other.size.height = 540;
+        assert(!IsSurfacePieceCopy(scene, scene.guest_address, other, other.guest_address, piece));
+        other = refraction;
+        other.props.is_depth = true;
+        assert(!IsSurfacePieceCopy(scene, scene.guest_address, other, other.guest_address, piece));
+        assert(!IsSurfacePieceCopy(scene, scene.guest_address, refraction, refraction.guest_address,
+                                   0));
+    }
     std::puts("aliasing-test: OK");
     return 0;
 }

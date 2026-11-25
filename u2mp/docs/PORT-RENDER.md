@@ -372,3 +372,130 @@ Test (no build needed): put `GOW3_HTILE_KEEP_CLEARS=1` in `analysis/uncharted-us
 and look at the pools; `boot.log` then shows `HTILE fill by cs ...` / `HTILE clear kept for depth ...` when the
 case occurs. If the water stays black: a frame capture at the pool (`capture.trigger`) and the water draw's inputs
 (`GOW3_TRACE_PS` with the water pixel shader) are the next step, and the launcher line goes back to `u1` only.
+
+### After the HTILE fix: reflection back, floor still missing (2026-11-25)
+
+Owner test with `GOW3_HTILE_KEEP_CLEARS=1`: the pools are no longer black and show the pillar / ceiling
+reflection, but the floor under the water is not seen (PS3: floor clearly seen, reflection on top). `boot.log`
+shows the case: `HTILE fill by cs e8746089` and `HTILE clear kept for depth D32SfloatS8Uint 960x540 at
+0x114d290000` (the half-size reflection pass), so the HTILE fix is what brought the reflection back. Keep it on.
+
+The water pixel shaders, found by their binary hash (`OrbShdr` footer) in the retail `treasure-multi.pak` through
+the materials' EFFECT_TABLE entries, and all three in the owner's shader cache since the 14:20 run:
+
+| material | vertex | pixel (used) | second pixel (not drawn) |
+| --- | --- | --- | --- |
+| `temple-mp-water-reflect` | e8f0881a | 7147ab5e | 32b53e3d |
+| `temple-mp-water-foam-reflect` | 9c1b5177 | 8e326238 | d272e100 |
+| `temple-mp-water-foam-env` | 9c1b5177 | f8ba0158 | 56ca2b69 |
+
+What 7147ab5e computes (its recompiled SPIR-V, `spirv-cross` of `cache/CUSA02320/0x000000007147ab5e_0.spv`):
+
+* images 0-2: the bump, flow and ripple maps, at mesh UVs and world positions;
+* image 3 (point sampler), screen position: only `.w` is read, the scene depth behind the water. Its difference
+  to the water's own depth is the water thickness: it scales the refraction offset and gives the edge alpha
+  (`alpha = c72 + (1 - c72) * c71 * thickness`), so deep water is opaque (alpha 1);
+* image 4, screen position (and the same position moved by the bump normal when image 3 says the moved point is
+  still behind the water): the refraction colour, the scene behind the water;
+* image 5, projected position: the planar reflection (the 960x540 pass);
+* colour = lerp(reflection, refraction, w), w from the Fresnel constants (0.9 looking straight down, 0.1 at a
+  grazing angle, exponent 2.2). Base colour 0 0 0 only shows where both brightnesses are 0.
+
+So everything under the water that PS3 shows comes from image 4. With the reflection now right and the floor
+gone, image 4 samples black: at the owner's view angle w is about 0.8, i.e. the shot shows about 20 % of the
+reflection over black, which is what the PC screenshot looks like. The depth (image 3) cannot hide the floor: a
+wrong depth changes the alpha (transparent water would show the floor) or the refraction offset, not the colour.
+In the game these two are the engine's global textures `FullScreenRefractionSampler` (image 4) and
+`FullScreenRefractionDepthSampler` (image 3), filled by the pass the GPU markers call `.CopyFp16ForRefraction`
+(the HDR scene colour copied before the water); their T# slots are at image offsets 0x1062ba0 / 0x1062bc0
+(entries of the global texture name table, the colour one at 0x109e768). The game's debug menu has `Show
+Refraction Color` / `Show Refraction Depth` views of them.
+
+Not yet known: whether image 4 is a null T# (the copy pass never ran or never set the slot in a match: a game-side
+case for `src/u2mp`), an image the runtime made again from guest memory (the copy's GPU result lost, like the
+HTILE case: a texture cache case), a read of the draw's own render target, or a copy that really holds black.
+Each needs a different fix, so none is guessed. The runtime now prints, for traced shaders, the image each
+binding resolved to (`PS trace image: shader .. binding N -> address WxH format flags (gpu modified 0/1) target
+0/1`; vk_rasterizer.cpp BindTextures, diagnostics only).
+
+Test (owner, one run, add to `analysis/uncharted-user/test-env.txt` next to `GOW3_HTILE_KEEP_CLEARS=1`):
+
+    GOW3_TRACE_PS=7147ab5e,8e326238,f8ba0158
+
+Play The Temple, look at a pool for a few seconds, quit, send `boot.log`. Lines to read: `PS trace: ps 7147ab5e
+...` (render target and depth of the water draw) and `PS trace texture: shader 7147ab5e image 4 ...` (the T#:
+address 0 or format 0 = null slot). With the build of this branch also `PS trace image: shader 7147ab5e binding
+4 ...`: `gpu modified 0` = the runtime lost the copy, `target 1` = a feedback read of the draw's own target. A
+second run can then watch who writes that address (`GOW3_WATCH_RANGE=<lo>:<hi>`, the image 4 address and size).
+
+### The copy pass, and why its colour can be lost (2026-11-25, open until tested)
+
+Owner's traced run (release 0.10.167, 15:26): all three water shaders read images 3 and 4 from the same texture,
+`0x1149d40000` 1920x1080 RGBA16F (format 12/7), one level. The slot is not null: `.CopyFp16ForRefraction` has to
+fill that texture with the scene colour (rgb) and the depth behind the water (w). The water draws into the scene
+target `0x1135ab0000` (RGBA16F 1920x1080) with depth `0x1134f38000`.
+
+The pass that fills it (static, the game's own shader names from `u2data/build/main/bin.psarc`, matched by the
+`OrbShdr` hash): `PS_FsRefractionBufferNonMsaa` (ps `5e0b720c`) with `VS_ScreenSpace` (vs `f585649d`). Its cached
+pipeline key (`cache/CUSA02320/g_0x18428fc1a4fd4952.key`): one RGBA16F colour target, no depth buffer, no blending,
+write mask RGBA, a rect list. It writes `rgb = texelFetch(image 1).rgb` and `w = 1 / (a * d + b)` with
+`d = texelFetch(image 0).x` (the depth, linearized; 1.0 where d is not in (0, 1]). So the refraction texture is the
+colour target of a full-screen draw: not a compute or storage write and not a resolve. The MSAA variant
+(`PS_FsRefractionBuffer`, `7f7cf848`) and a `...NonMsaaDepth` one (`3eb7e7cc`) exist but did not run. Uncharted 1
+and 3 ship the same three shaders (same engine code).
+
+What the picture says. The water blends with SrcAlpha / OneMinusSrcAlpha, RGB only (its pipeline key), and its
+alpha is `c72 + (1 - c72) * c71 * (c73 + thickness)`, thickness = image 3 `.w` minus the water's own view depth
+(clip w), with the material's edge blend values (factor 7, offsets 0). A texture still holding guest-memory zeros
+(w = 0) would make the water transparent: floor seen, no reflection, the opposite of what the owner sees (and of the
+opaque black before the HTILE fix). So `w` holds depths behind the water: the texture the water reads is the one
+this pass drew, and what is missing is its colour, i.e. what the pass read through its image 1.
+
+Two cases remain; the runtime code was read for both:
+
+* image 1 is the scene target `0x1135ab0000`, sampled directly. The texture cache hands a texture at a render
+  target's address with the same size and format the render target's image (`FindImage`'s exact match ignores
+  the tile mode; `ResolveOverlap` gives a view; images at one address copy each other's writes, `alias_states`).
+  No fault found there.
+* image 1 is the refraction texture itself (the pass adds the depth in place), its colour put there before by a
+  memory copy, `.CopyFp16ForRefraction`. A CP DMA_DATA packet moves at most 2 MiB - 1 (21-bit byte count;
+  `pm4_cmds.h`), so a 16.6 MB surface comes as 8 pieces (the game has such a copy helper, 0x1ffffc bytes per packet,
+  at 0xd68d70; no direct callers were found, so DMA is not proven); the game's compute copy `Cs_MemCpy`
+  (`6a6422a9`) also moves surfaces. In the runtime such a copy is right only for the piece that starts at the image's
+  base address: `BufferCache::SynchronizeMemoryFromImage`, `TextureCache::FindImageFromRange` and
+  `InvalidateMemoryFromGPU` all compare the base. Every later piece reads guest memory (`Rasterizer::CopyBuffer`
+  even makes it as a CPU memcpy), where the GPU-drawn scene never was, and the destination gets old bytes: black
+  colour, then the depth added in place. That is exactly what the owner sees.
+
+Which case it is cannot be told from the data. Side note: the launcher's "no depth of field" option pins
+`0x1247cfd` = the debug menu's "Enable Depth of Field" (registered at 0xbca021); the game reads it only for the
+post-processing pass mask (0xc7ddd2) and the DOF constants (0xc83fc5). No link to the refraction pass was found.
+
+Runtime change (this branch):
+
+* Diagnostics, always on, at most 16 lines: `GPU: surface piece copy (dma | compute 6a6422a9) <src> -> <dst>
+  (<bytes>, +<offset>) from GPU-written image <address> WxH <format> tile <n> pitch <n> into <image or "no image">:
+  ...` for every copy of 64 KiB or more that takes a piece of a GPU-written colour image other than the whole image
+  from its base (`TextureCache::CopySurfacePiece`, called from `Rasterizer::CopyBuffer` and the `6a6422a9` HLE).
+* `GOW3_SURFACE_PIECE_COPY=1` (test switch, off by default): when the destination is an image of the same format,
+  size and memory layout at the same offset (`IsSurfacePieceCopy`, `texture_cache/aliasing.cpp`, unit-tested in
+  `tests/test_aliasing.cpp`), the first piece copies the whole image on the GPU (the alias copy) and the copy's
+  other pieces are skipped. Uncharted 1 and 3 are unchanged unless the switch is set; the same hole would apply to
+  them (same copy helpers), but no case there is known.
+* `PS trace texture` lines now also print the T#'s tile mode index.
+
+Test (owner, one run; `analysis/uncharted-user/test-env.txt`):
+
+    GOW3_HTILE_KEEP_CLEARS=1
+    GOW3_TRACE_PS=5e0b720c,7147ab5e
+    GOW3_SURFACE_PIECE_COPY=1
+
+Play The Temple, look at a pool, quit, send `boot.log` and a screenshot. Lines that decide it:
+
+* `GPU: surface piece copy (...) 0x1135ab.... -> 0x1149d4.... ... into 0x1149d40000 1920x1080
+  R16G16B16A16Sfloat ...: the image is copied (GOW3_SURFACE_PIECE_COPY)` and the floor seen under the water:
+  case 2, fixed (the switch can then go into the launcher's Uncharted 2 environment).
+* `PS trace: ps 5e0b720c vs f585649d; rt0 <target>` and `PS trace texture: shader 5e0b720c image 1 at <address>`:
+  image 1 = `0x1149d40000` (the target) is the in-place case, `0x1135ab0000` the direct read (case 1); then
+  `PS trace image: shader 5e0b720c binding 1 -> ... (gpu modified 0/1) target 0/1` tells whether that image holds
+  the GPU's drawing. No `surface piece copy` line with case 1 means the loss is elsewhere (next: a frame capture).
