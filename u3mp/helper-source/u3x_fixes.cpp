@@ -49319,7 +49319,7 @@ using v7252::R_KEY;
 // image offsets (SPEC-handshake [H5] [H6], SPEC-host-leaves [L4])
 constexpr uintptr_t PROC_START = 0x71d6b0, PROC_DONE = 0x71d3f0, SEND_START = 0x6aa8a0, FACTORY = 0x6c2b50,
                     SEND_ALL = 0x733d90, LEAVE_SLOT = 0x16d3810 + 0x20, LEAVE_PROCESS = 0x6d3800,
-                    MAKE_NET_PLAYER = 0x72eca0, R_MEMBER = 0x574;   // v7.259: find-or-make, the record's member id
+                    MAKE_NET_PLAYER = 0x72eca0;   // v7.259: find-or-make
 HS_RO const char ht_made[] = "handshake: no net player of the host yet, made one before ConnectionDone: ";
 // the first 12 bytes of the manager's send to every connection (the check the co-op spoiler message makes)
 HS_RO const uint8_t code_send_all[12] = {0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x54, 0x53, 0x49};
@@ -49448,13 +49448,9 @@ HS_FN void u3x_hs_tick(uintptr_t base) {
         // before it ever made the host's record (PS4 makes the members' records only at the load; PS3's member match
         // setup made one for every room member first). With no record the answer went nowhere and the host waited at
         // 0x2c for ever. The host's record is made first when it is missing (the game's find-or-make, as PS3: no team,
-        // not ready).
-        bool have = false;
+        // not ready). v7.262: the test reads the record's member id at +0x1e4 (u3x_host_record_there).
         const uint32_t host_id = rd<uint32_t>(host, 0x2c);
-        for (int i = 0; i < 10; i++) {
-            const uint8_t *r = v7252::record(base, i);
-            if (r && r[R_IN_USE] && !r[R_GONE] && rd<uint32_t>(r, R_MEMBER) == host_id) have = true;
-        }
+        const bool have = u3x_host_record_there(base, host_id);
         if (!have) {
             uint8_t *p = game_call<uint8_t *>(base + MAKE_NET_PLAYER, reinterpret_cast<void *>(base + v7252::NGM), ms,
                                               host, uint32_t{0}, uint32_t{0});
