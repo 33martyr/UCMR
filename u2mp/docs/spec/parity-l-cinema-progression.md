@@ -104,7 +104,9 @@ entry) and the settle wait of RePlay::Update (900 ticks of the clock it reads).
 ### 2.2 L-T1: multiplayer trophies (DROPPED; PS3 `1735b8`, `4c5268`, stat updaters)
 
 Dropped for good by the owner (2026-11-25): PC has no trophies. Nothing below is implemented and no trophy code
-is changed; the text stays as a record of the PS3 behaviour.
+is changed; the text stays as a record of the PS3 behaviour. PAGE_NET_TROPHIES and its Trophies button
+(BUTTON_NETTROPHIES on PAGE_MULTIPLAYER) are DROPPED (owner) too: the import's menu overlay removes the button, so
+the page named below is never shown on PC (MENUS.md 3.1, 3.8).
 
 PS3 facts:
 

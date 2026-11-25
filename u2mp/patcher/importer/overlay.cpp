@@ -16,6 +16,8 @@
 //   PAGE_PROFILE (with saves): Continue, Chapters (hidden), Multiplayer (with this page's button flags), the spacer (a
 //     row break), then Options and Bonuses in the left column and New Game and Load Game in the right one, as in the
 //     original game (no Multiplayer Medals here, as on PS3).
+// PAGE_MULTIPLAYER loses its Trophies mode button (BUTTON_NETTROPHIES, to PAGE_NET_TROPHIES; owner 2026-11-25: PC has
+// no trophies): a new list with the other controls in their order (the page's default control, Matchmaking, stays).
 //
 // menu.bin is Naughty Dog DC data ('00CD', version 1): u32 data end at +8; 64-bit pointers are offsets into the file;
 // after the data a u32 byte count and a bitmap with one bit per 8-byte slot (least significant bit first), set where
@@ -31,7 +33,8 @@ namespace u2imp {
 namespace {
 
 const char *MENU = "u2data/build/main/dc1/ps4/menu.bin";
-// bump when the overlay changes for the same sources (5: Multiplayer is a code button; 6: Multiplayer Medals kept)
+// bump when the overlay changes for the same sources (5: Multiplayer is a code button; 6: Multiplayer Medals kept, no
+// Trophies button)
 const int VERSION = 6;
 const size_t RECORD = 0x70;
 
@@ -187,13 +190,31 @@ std::vector<Rec> profile_records(const Bytes &d, size_t bitmap, Rec mp) {
     return {old(0), old(1), mp, old(2), old(5, 0), old(6, 0), old(3, 1), old(4, 1)};
 }
 
+// PAGE_MULTIPLAYER's controls without its one BUTTON_NETTROPHIES record (a mode button), the others in their order.
+std::vector<Rec> multiplayer_records(const Bytes &d, size_t bitmap) {
+    const auto [count, base] = page_controls(d, "PAGE_MULTIPLAYER");
+    std::vector<size_t> trophies;
+    for (size_t i = 0; i < count; i++) {
+        const size_t at = size_t(base) + i * RECORD;
+        if (cstring(d, u64(d, at)) == std::optional<std::string>("BUTTON_NETTROPHIES")) trophies.push_back(i);
+    }
+    if (trophies.size() != 1) throw std::runtime_error(fmt("ValueError: expected one Trophies button on PAGE_MULTIPLAYER, found %zu", trophies.size()));
+    const size_t at = size_t(base) + trophies[0] * RECORD;
+    if (u32(d, at + 8) != name_id("BUTTON_NETTROPHIES") || u32(d, at + 0x10) != 2)
+        throw std::runtime_error("ValueError: PAGE_MULTIPLAYER's Trophies button is not as expected");
+    std::vector<Rec> v;
+    for (size_t i = 0; i < count; i++)
+        if (i != trophies[0]) v.push_back(old_record(d, bitmap, base, i));
+    return v;
+}
+
 size_t patch_menu(Bytes &d) {
     if (strings(d, "PAGE_MULTIPLAYER").empty()) throw std::runtime_error("ValueError: menu.bin has no PAGE_MULTIPLAYER (not Uncharted 2?)");
     const auto [bitmap, bsz] = pointer_bitmap(d);
     (void)bsz;
     const uint32_t end = u32(d, 8);
     const size_t profile = page_record(d, bitmap, "PAGE_PROFILE"), fresh = page_record(d, bitmap, "PAGE_NEWPROFILE"),
-                 beta = page_record(d, bitmap, "PAGE_NEWPROFILE_BETA");
+                 beta = page_record(d, bitmap, "PAGE_NEWPROFILE_BETA"), multiplayer = page_record(d, bitmap, "PAGE_MULTIPLAYER");
     const uint64_t fresh_base = expect_controls(d, "PAGE_NEWPROFILE", {"BUTTON_NEWGAME", "BUTTON_LOADGAME", "BUTTON_OPTIONS", "BUTTON_MULTIMEDALS"});
     const uint64_t beta_base = expect_controls(d, "PAGE_NEWPROFILE_BETA", {"BUTTON_BETA_TRAILER", "BUTTON_OPTIONS", "BUTTON_MULTIMEDALS"});
     expect_medals(d, bitmap, size_t(fresh_base) + 3 * RECORD, "PAGE_NEWPROFILE");
@@ -213,6 +234,7 @@ size_t patch_menu(Bytes &d) {
         {profile, profile_records(d, bitmap, fresh_mp)},
         {fresh, {fresh_old(0), fresh_old(1), fresh_mp, fresh_old(2), fresh_old(3)}},
         {beta, {beta_mp, beta_old(0), beta_old(1), beta_old(2)}},
+        {multiplayer, multiplayer_records(d, bitmap)},
     };
     std::vector<size_t> pointers, headers;
     for (const auto &[page, records] : pages) {
@@ -276,7 +298,7 @@ fs::path build_overlay(const fs::path &game, const fs::path &out, const std::opt
     fs::rename(tmp, target, ec);
     if (ec) throw std::runtime_error("cannot write " + S(target) + ": " + ec.message());
     write_text(state, want);
-    log(fmt("u2mp: Multiplayer button in the main menus, Multiplayer Medals kept (%zu pages) -> %s", n, S(target).c_str()));
+    log(fmt("u2mp: Multiplayer button in the main menus, Multiplayer Medals kept, no Trophies button (%zu pages) -> %s", n, S(target).c_str()));
     return out;
 }
 

@@ -17,7 +17,9 @@ Uncharted 2 multiplayer notes or code were used. Code: `gow3_pc/src/u2mp/menus.c
    columns, labels and condition numbers on both**, and the page records keep the same panel query
    (`+0x58..+0x5c` on PS4: action 22, condition 97..101/130/137, help-bar id). The only menu.bin
    difference that matters is the missing Multiplayer button in the main menus, which
-   the menu overlay (`u2import --overlay`, overlay.cpp) already adds. Nothing else is patched in menu.bin.
+   the menu overlay (`u2import --overlay`, overlay.cpp) already adds. The overlay also takes the Trophies mode
+   button (BUTTON_NETTROPHIES) off PAGE_MULTIPLAYER (owner 2026-11-25: PC has no trophies; 3.1). Nothing else is
+   patched in menu.bin.
    Since overlay version 6 (`spec/parity-n-remaining.md` N3) the overlay gives the three main menus new control
    lists with a new Multiplayer code button and leaves BUTTON_MULTIMEDALS as shipped, in the PS3 order:
    PAGE_NEWPROFILE New Game, Load Game, Multiplayer, Options, Multiplayer Medals; PAGE_NEWPROFILE_BETA Multiplayer,
@@ -63,7 +65,7 @@ State: **stub** = `ret`; **wrap** / **port** = changed by menus.cpp; otherwise i
 | 48 | BUTTON_MULTIPLAYER_INVITES | `659b50` | `4b8e08` | **port**: remaining.cpp `invites_query` (blank while no invite waits, column 1 = `online::invite_count()`); button callback remaining.cpp |
 | 49 | status line under the party list (PAGE_MULTIPLAYER, PAGE_LOBBY) | `659a90` | `4bae1c` | **wrap**: count = party size (text 69cbee70 from the import) |
 | 50 | BUTTON_MULTIPLAYER_STARTMATCH | `655c40` | `4b7d80` | intact (callback: session.cpp) |
-| 51..53, 131, 136 | MATCHMAKING / CUSTOM / CINEMA / LEADERBOARD / NETTROPHIES labels | `655cf0` | `4b9a88` | intact; mode table `0xdef390` (texts 47a936dc, c21027d1, f1b9728c, 067e1f80 added) |
+| 51..53, 131, 136 | MATCHMAKING / CUSTOM / CINEMA / LEADERBOARD / NETTROPHIES labels | `655cf0` | `4b9a88` | intact; mode table `0xdef390` (texts 47a936dc, c21027d1 added); 136 is never asked: the overlay removes BUTTON_NETTROPHIES (DROPPED, owner) |
 | 54 | (pause) | `655f90` | `4c1348` | intact |
 | 55 | PAGE_LOBBY: PLAYLIST | `6562d0` | `4bd9c8` | **wrap**: playlists built, choice applied, picture as type 3 |
 | 57..63, 65, 66 | PAGE_LOBBY custom game carousels and team | `656550`..`657900` | `4bb898`.. | intact; game type name `+0`, description `+4` (column 3), image `+8` of `f985c7b6` |
@@ -101,7 +103,11 @@ State: **stub** = `ret`; **wrap** / **port** = changed by menus.cpp; otherwise i
 - **Restored:** NetPlayerData (progression.cpp, on event 0 through `64e810`), party rows
   (session.cpp), panel name = `UNCHARTED_U2MP_NAME` (written to netInfo+0x298 before the panel
   query), status line "[A] daily players" (PS3 text, from the import) with the party size (netInfo+0x10 set around the
-  call, then restored), the four mode texts.
+  call, then restored), the Leaderboards label and description.
+- **Removed:** the Trophies mode button. The overlay gives the page a new control list without BUTTON_NETTROPHIES
+  (the 5th of 22 controls), the other 21 in their order; the page's default control (Matchmaking, page record
+  `+0x58`) and the mode dispatcher are untouched, the cursor moves over the remaining buttons. Mode 5 and
+  PAGE_NET_TROPHIES are no longer reachable (DROPPED, owner 2026-11-25: PC has no trophies).
 
 ### 3.2 PAGE_LOBBY (handler `5ebac0`, PS3 `0x443bc8`)
 
@@ -190,10 +196,13 @@ and the hint line e2186a0c is drawn under it (`spec/gameplay.md` 1, `spec/parity
 PAGE_MULTIPLAYER's stats ticker (k24): ticker.cpp hands online.cpp's line to the game's add function `5d6500`
 every 10 s while the strip is drawn and the previous line has come in (`spec/parity-ticker-respawn.md` 1).
 
-### 3.8 Leaderboards (PAGE_MENU_LEADERBOARD) and Trophies (PAGE_NET_TROPHIES)
+### 3.8 Leaderboards (PAGE_MENU_LEADERBOARD) and Trophies (PAGE_NET_TROPHIES, DROPPED)
 
-Leaderboard rows: progression.cpp (local boards). Net trophies (LIST_STATS) read NetPlayerData.
-Restored: the page title MENU_TITLE_TROPHIES (85ed01cc "TROPHIES") and the button texts (3.1).
+Leaderboard rows: progression.cpp (local boards). Leaderboard texts: 3.1.
+PAGE_NET_TROPHIES: DROPPED (owner 2026-11-25: PC has no trophies). Its only route, BUTTON_NETTROPHIES, is removed by
+the overlay (3.1); the page stays in menu.bin unused and its title MENU_TITLE_TROPHIES (85ed01cc) and the button label
+f1b9728c are no longer served. Its list LIST_STATS stays: it is the game's own code (it reads NetPlayerData), and
+PAGE_STATS has a LIST_STATS control too.
 
 ### 3.9 Cinema pages
 
@@ -208,7 +217,6 @@ title updates and its server; they are in the BCUS dlc-patch7 networking bank, w
 |---|---|---|
 | f67d9ad2, 70c81d2e, c0cd1b00 | profile panel k23 (`59ddb0`) stat labels | Competitive Wins / Competitive Kills / Cash |
 | 47a936dc, c21027d1 | mode 4 label / mode 4 and 5 description (`0xdef390`) | Leaderboards (GOTY base bank: "Rankings") / View your stats |
-| f1b9728c, 85ed01cc | mode 5 label, MENU_TITLE_TROPHIES | Trophies / TROPHIES |
 | 780b62e0, e663a74e, b9602dbb, 966fa9ae, 4915c4b7, 7d24a9f9 | stats ticker k24 (`5b3240`) | Time Played, Global, Wins, Losses, Ratio, Rank |
 | 320a6fc8, 8994a031, 5ba2fdfb, d82785e7 | help bar table `0x1041560` (leaderboard footer) | Go to Top, Next, Previous, Filter |
 | 69cbee70 | status line, cond 49 | [A] players today |
@@ -216,7 +224,9 @@ title updates and its server; they are in the BCUS dlc-patch7 networking bank, w
 | 64370402, 9b0dd3c2, e012d5e3 | scoreboard countdown `65cc80`, leave-game confirm `65e750` | Quit Penalty [A]... / If you leave now, you will get a [TEXT] second wait penalty ... |
 | 9811415d, b7e89ee7, 6cff3670, c4c378d1, bde6ab5b | DLC notes and messages | DLC / Requires the ... Pack / You didn't finish your last game ... |
 
-(`067e1f80`, which earlier versions served as a text, is the Trophies **icon** id of the mode table.)
+(`067e1f80`, which earlier versions served as a text, is the Trophies **icon** id of the mode table.) Not served any
+more (owner 2026-11-25, the Trophies button is removed, 3.1): f1b9728c (mode 5 label "Trophies") and 85ed01cc
+(MENU_TITLE_TROPHIES, the PAGE_NET_TROPHIES title).
 
 47a936dc comes from the GOTY base bank (the import merges every GOTY archive). The other 25 are our own texts in
 all 22 languages (texts.cpp `kOwn`), with the other ids no bank has: 041a85ca (DLC pack bought), 63801125
@@ -274,12 +284,12 @@ Three causes cover most of the gaps:
 
 | page (reference) | PS3 | before | now |
 |---|---|---|---|
-| PAGE_MULTIPLAYER (6) | mode icons, labels Leaderboards / Trophies (14%), panel: name, Competitive Wins / Kills / Money / Co-op, rank badge 28, booster icons; party leader with badge; "0 daily players"; ticker "Time Played: name: 10h 5m"; footer Profile / Party Up / R1 Store | no icons, stat labels UNTRANSLATED, no badge, "1 players in party", empty ticker | labels, Leaderboards, Trophies (n%), ticker and status texts from the PS3 bank; "N daily players" = party size; mode icons for Matchmaking / Custom Game / Cinema once the net table is set (the PS4 net.pak has no Leaderboards / Trophies button images: `mode-buttons:` cinema, customgame, matchmaking only). Rank badge and booster pair: cause 3 |
+| PAGE_MULTIPLAYER (6) | mode icons, labels Leaderboards / Trophies (14%), panel: name, Competitive Wins / Kills / Money / Co-op, rank badge 28, booster icons; party leader with badge; "0 daily players"; ticker "Time Played: name: 10h 5m"; footer Profile / Party Up / R1 Store | no icons, stat labels UNTRANSLATED, no badge, "1 players in party", empty ticker | labels, Leaderboards, no Trophies button (removed by the overlay, owner 2026-11-25), ticker and status texts from the PS3 bank; "N daily players" = party size; mode icons for Matchmaking / Custom Game / Cinema once the net table is set (the PS4 net.pak has no Leaderboards / Trophies button images: `mode-buttons:` cinema, customgame, matchmaking only). Rank badge and booster pair: cause 3 |
 | PAGE_LOBBY, matchmaking (7) | Find Match, playlist "Deathmatch" with picture card | playlist "Machinima", empty picture box | Machinima (the cinema game type, text 5614c769) is no playlist; Deathmatch first; picture: type 0x25 replaced by the type 3 net image `general/net/playlists/<deathmatch, objective, coop, survival, default>` chosen by game type (the PS4 net.pak has these five) |
 | PAGE_LOBBY, custom game (8, 14-18) | Game Type with mode icon, Map with card + name, Variation, Score / Time Limit, Friendly Fire; party leader with badge; Team | rows on one line ("Variation/Game Type"), party leader and members empty | party rows: cond 26..35 have table args 10..19 and the roster query read them as rows 10..19 (empty); now row = arg % 10 as PS3 `0x4bc780` (and the PARTY_PLAYERn callback likewise). Rows / icons / map cards: cause 2. DLC map cards are not in the PS4 net.pak (IMPORT.md). Leader badge: cause 3 |
 | PAGE_MULTIPLAYER_PLAYER_OPTIONS, Profile (9-11) | rank ring and money, Boosters Slot 1/2 with names and icons, Clan Tag, Hero / Villain portraits, Co-op Difficulty, Taunt, Matchmaking, Golden Guns; booster carousel with descriptions | empty, footer UNTRANSLATED | Clan Tag label and "Enter Clan Tag..."; footer texts; booster and portrait images are type 3 (cause 2). Rank badge in the k19 widget (type 0x27): cause 3. Why the whole page was empty is not explained by the code (all its queries are intact): check with the new build |
 | PAGE_MENU_LEADERBOARD (12) | Rank, Level badge, Players, Kills, Deaths, Ratio; footer Filter / Prev / Next / Top of List | footer UNTRANSLATED | footer texts; rows from progression.cpp; level badge = type 0x27 (cause 3) |
-| PAGE_NET_TROPHIES (13) | list with icons, progress bars, counts, description | title / label only | texts; icons are net images (cause 2) |
+| PAGE_NET_TROPHIES (13) | list with icons, progress bars, counts, description | title / label only | DROPPED (owner 2026-11-25: PC has no trophies): no button leads there (3.1, 3.8) |
 | PAGE_CINEMA (19) | Local Files, map picture, Author / Players / Length / Size / Date | not reported | texts; the list picture uses type 0x22 (cause 3) |
 
 Check in game (log `u2mp`): `texts: N strings from 2 imported bank(s) for language 2` (N about 2,700),
@@ -343,7 +353,8 @@ The import converts only those (the rule: what PS4 has stays the PS4 one) into
 differences in `u2mp/patcher/importer/netimg.cpp`: the U2 PS3 MATERIAL_TABLE_1 (two tables, texture hashes in a shared
 array on another page, no name array), a few textures that share one path under several hashes get a
 unique name, and each material takes the effect of a PS4 net material of its set (the PS4 net.pak is
-the effect reference). The registry gets a `net-u2mp` level / package entry.
+the effect reference). The registry gets a `net-u2mp` level / package entry. The trophies button image stays in that
+general rule (no per-image exception) but is not shown since the overlay removes the Trophies button (3.1).
 
 In game: `keep_net_package` requests `net-u2mp` next to `net` when the file exists; the image lookup
 (0x5558c0 port) answers a net id that neither the net table nor its PS3-name pass finds from the

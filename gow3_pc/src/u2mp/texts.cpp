@@ -93,18 +93,13 @@ const Text kOwn[] = {
      "Ανταγωνιστικές εξοντώσεις", "Zabití v soutěži", "Rekabetçi Leşler"}},
     {0xc0cd1b00u, {"Cash", "Argent", "Denaro", "Geld", "Dinero", "Kontanter", "Dinheiro", "Geld", "キャッシュ", "캐쉬",
      "Rahat", "Penger", "Pengar", "現金", "Деньги", "Pieniądze", "Efectivo", nullptr, "Μετρητά", "Peníze", "Para"}},
-    // ---- Multiplayer mode table 0xdef390: Leaderboards (47a936dc: GOTY) and Trophies
+    // ---- Multiplayer mode table 0xdef390: the Leaderboards description (its label 47a936dc: GOTY). No Trophies
+    //      texts: the import's menu overlay removes that button (PC has no trophies).
     {0xc21027d1u, {"View your stats", "Consultez vos stats", "Guarda le tue statistiche", "Ihre Statistik ansehen",
      "Consulta tus estadísticas", "Se din statistik", "Consulta as tuas estatísticas", "Bekijk je statistieken",
      "自分の成績を確認します", "내 통계를 확인합니다", "Katso tilastosi", "Se statistikken din", "Se din statistik", "查看你的統計資料",
      "Посмотреть свою статистику", "Sprawdź swoje statystyki", nullptr, "Veja suas estatísticas",
      "Δες τα στατιστικά σου", "Zobrazit vaše statistiky", "İstatistiklerine göz at"}},
-    {0xf1b9728cu, {"Trophies", "Trophées", "Trofei", "Trophäen", "Trofeos", "Trofæer", "Troféus", "Trofeeën",
-     "トロフィー", "트로피", "Trophyt", "Troféer", "Troféer", "獎盃", "Призы", "Trofea", nullptr, nullptr, "Τρόπαια",
-     "Trofeje", "Kupalar"}},
-    {0x85ed01ccu, {"TROPHIES", "TROPHÉES", "TROFEI", "TROPHÄEN", "TROFEOS", "TROFÆER", "TROFÉUS", "TROFEEËN",
-     "トロフィー", "트로피", "TROPHYT", "TROFÉER", "TROFÉER", "獎盃", "ПРИЗЫ", "TROFEA", nullptr, nullptr, "ΤΡΟΠΑΙΑ",
-     "TROFEJE", "KUPALAR"}},
     // ---- Stats ticker k24 (0x5b3240) and leaderboard columns
     {0x780b62e0u, {"Time Played", "Durée de jeu", "Tempo di gioco", "Spielzeit", "Tiempo de juego", "Spilletid",
      "Tempo de jogo", "Speeltijd", "プレイ時間", "플레이 시간", "Peliaika", "Spilletid", "Speltid", "遊戲時間", "Время игры",
