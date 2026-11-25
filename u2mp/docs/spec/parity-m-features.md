@@ -25,8 +25,8 @@ only as hints; every fact below was checked against the PS3 or PS4 binary or dat
 | MP menu pages (every page of menu.bin) | 40 MP pages; same controls, conditions and labels on PS3 and PS4 (`MENUS.md` 1) | every page reachable on PS3 is reachable, except the four below | COVERED, with M7-M9 | `MENUS.md` 2-9, `parity-b/d/e/f/g` |
 | Loading screen | black fill, card table in perspective, fort picture, coins, edges, rosters sliding in, band, map name, description, letter-by-letter tip | all of it, PS3 timings | COVERED (three PS3 details left out on purpose, M10) | `loading.md`, `PORT-FRONTEND5.md` |
 | Death camera / watching others | native camera kinds (net death, follow teammate, map spot), D-pad cycles | the PS4 code still has them and runs them | COVERED (CHECK) | M5 |
-| Dead-player hint line | "\|SELECT\| Scoreboard    \|D-PAD\| Camera" at the bottom while the death camera runs | drawn while the local player is dead (2026-11-25, `scoreboard.cpp`) | CHECK (camera field, menu-blocking word, glyph open) | M1, section 9 |
-| Scoreboard / result overlay rules | four overlay entries, priority, PS3 fade and slide, open / close sounds, auto-open rules | four entries, PS3 fade / priority / slide, sounds, auto open on death; result pages still from our timers; no dim | CHECK / **MISSING** (dim, states) | M2, M3, section 9 |
+| Dead-player hint line | "\|SELECT\| Scoreboard    \|D-PAD\| Camera" at the bottom while the death camera runs | drawn while the local player is dead (2026-11-25, `scoreboard.cpp`) | CHECK; PS4 facts settled (section 10), code still on the old stand-ins; glyph open | M1, sections 9, 10 |
+| Scoreboard / result overlay rules | four overlay entries, priority, PS3 fade and slide, open / close sounds, auto-open rules | four entries, PS3 fade / priority / slide, sounds, auto open on death; result pages still from our timers; no dim | CHECK / **MISSING** (dim, states, 4x fade rate): spec ready (section 10) | M2, M3, sections 9, 10 |
 | Respawn countdown / co-op tries | in the scoreboard header (query cond 44) | the query is intact; the board now opens by itself on death | CHECK | M4 |
 | Film spectating HUD | score panel and the watched player's name at the top, boosters on the left, compact camera bar | theater bar only | CHECK / possibly MISSING | M6 |
 | Leaderboard tables | 4 boards, global / friends filter, "my page", 11 rows, Rank / badge / name / score columns, footer Filter / Previous / Next / Go to Top | local + RPCN boards, same list object | COVERED | `progression.md` 1.5.11-1.5.15, `parity-a` |
@@ -59,7 +59,7 @@ Ranked list of the work (section 6 repeats it with files).
   (`FUNCTIONS-FRONTEND-NET.md`). Both tracker functions are absent on PS4. (The two tsv rows were corrected on
   2026-11-25; a regeneration by `u2_match_report.py` must keep them.)
 
-### M1. Dead-player hint line (PS3 `0x4cbc10` second half, fade in `0x4cbf00` end) - DONE except open parts (section 9)
+### M1. Dead-player hint line (PS3 `0x4cbc10` second half, fade in `0x4cbf00` end) - DONE except open parts (section 9; PS4 facts section 10)
 
 What PS3 shows: while the local player is watching through a death camera, the line
 "|SELECT| Scoreboard    |D-PAD| Camera" (text `e2186a0c`, the button glyphs drawn by the game's text printer) fades in
@@ -69,23 +69,24 @@ Behaviour to implement:
 
 1. A hint fade value h in 0..1, process-wide, starts at 0; it lives with the scoreboard overlay (PS3 tracker overlay
    `+0x4`).
-2. Every frame (the scoreboard frame hook, after the scoreboard work), with dt = elapsed seconds (the same dt the
-   scoreboard uses), h rises by `1.0 x dt` when ALL of the following hold, else it falls by `2.0 x dt`; then it is
-   clamped to 0..1:
-   - no menu page is blocking the HUD (PS3: the menu manager's word at `+0x5b4` is 0; the same word gates the
-     loading-screen rosters, `loading.md` 1 "not in scope"; its PS4 field is open question 1);
-   - there is a local player tracker (NGM `+0`, the local tracker pointer) and it has a running death camera (the
-     tracker's death-camera handle resolves to a live process);
+2. Every frame (the scoreboard frame hook, after the scoreboard work), with T = the game's own frame step in clock
+   ticks (s32 `[0x1116180 + 0x110]`, 1/300 s units; section 10.1), h rises by `1.0 x T / 75` when ALL of the
+   following hold, else it falls by `2.0 x T / 75`; then it is clamped to 0..1. (T / 75 is 4 x the frame's
+   seconds: the line fades in at 4.0 per second, out at 8.0 per second. An earlier version of this rule said 1.0 /
+   2.0 per real second; that was 4 x too slow.)
+   - no menu is up: s32 `[0x1136640 + 0x1014]` (the menu manager's state word, PS3 `+0x5b4`) is 0 (section 10.2;
+     the same word gates the loading-screen rosters);
+   - there is a local player tracker (u64 `[0x113b760]`, not 0) and its death camera runs: PS4 `0x664b90(tracker)`
+     answers true (section 10.5);
    - the NGM match state is "playing" (PS3 NGM `+0x1a8c` == 2; PS4 `ngm+0x1e80` == 2, as `scoreboard.cpp` reads);
-   - NOT "every active player is out": for each of the 10 trackers that is active, at least one of its three
-     out-of-play conditions holds (it died after its last spawn, its character carries the "killed" state flag, or
-     its character carries the second down state flag; PS3 `0x494178` called with a threshold of 0, conditions
-     `0x4c892c`, `0x4c8aa4`, `0x4c89f8`). When every active player is out, the hint fades.
+   - NOT "every player is out" (section 10.6; threshold 0). When every player is out, the hint fades.
 3. Drawing, every frame while h > 0, except when the current net game's game type is 11 (the Machinima / cinema
-   type: nothing drawn):
-   - overlay alpha A = 1.0 when the NGM match state is 3, 4 or 5, or the game is co-op (game types 4, 8, 9), or the
-     game type is 3 or 8; otherwise A = the HUD fade value (PS3 `0xe1a660`; most likely the PS4 value
-     `scoreboard.cpp` already reads at `0x104ed74`: open question 2);
+   type: nothing drawn), and nothing at all of the overlay (no page, no dim request, no hint) while the game is
+   paused (PS4: f32 `[0x1116180 + 0x4c]` == 0.0, section 10.3):
+   - overlay alpha A = 1.0 when the NGM match state is 3, 4 or 5, or the game is co-op (game types 4, 8, 9 or 12),
+     or the NGM end reason (s32 `ngm+0x1e84`, PS3 `+0x1a90`, section 10.7) is 3 or 8; otherwise A = the HUD alpha,
+     f32 `[0x104ed0c]` (PS3 `0xe1a660`, section 10.3). Correction: this rule used to say "game type 3 or 8" and
+     "co-op 4, 8, 9"; and `0x104ed74` is not the HUD alpha but the menu's own fade (section 10.3);
    - the text is drawn white with alpha `A x h`, scale 0.8, colour-transform offset slot [5] = 3.0 (as the loading
      screen's map name, `loading.md` 3.5), centred in the rectangle x 0, y 500, w 1280, h 240 of the 1280 x 720
      menu canvas, with the same text-in-rect call and mode values (1, 1, flags 0, empty clip) the loading screen
@@ -97,7 +98,7 @@ Behaviour to implement:
    the button that really opens the scoreboard (open question 3).
 5. Log once per process when the hint first becomes visible: `scoreboard: death camera hint shown`.
 
-### M2. Scoreboard and result overlay rules (PS3 `0x4cbf00` / `0x4cbc10` first half) - rules 1-3, 5-7 DONE; 4, 8 open (section 9)
+### M2. Scoreboard and result overlay rules (PS3 `0x4cbf00` / `0x4cbc10` first half) - rules 1-3, 5-7 DONE (rate and edge corrections, section 9); 4, 8 spec ready (section 10)
 
 The overlay has four entries (PS4 data at `0x104f544 + 8 + 0x14 x k`: u8 shown, f32 fade, f32 speed, u8 dim flag,
 u32 page id). PS4 data: entry 0 = PAGE_MULTIPLAYER_SCOREBOARD (`f650325d`, speed 1.0, no dim), entry 1 =
@@ -106,37 +107,76 @@ PAGE_MULTIPLAYER_ROUND_RESULTS again (dim). Our `scoreboard.cpp` draws one page 
 
 PS3 rules that differ from ours (each a visible difference):
 
-1. **Fade speed.** Every entry fades toward its shown flag at `speed` per second (fade += speed x dt when shown,
-   -= when hidden, clamped 0..1). Speed is 1.0, and entry 0 gets 2.0 from the moment the player toggles it by
-   button. Ours: in at 4.0/s, out at 2.0/s.
+1. **Fade speed.** Every entry fades toward its shown flag: fade += speed x T / 75 when shown, -= when hidden,
+   clamped 0..1, with T = the frame step in ticks (s32 `[0x1116180 + 0x110]`, section 10.1). T / 75 is 4 x the
+   frame's seconds, so speed 1.0 = 4.0 per second (0.25 s for a full fade) and the button speed 2.0 = 8.0 per second.
+   Speed is 1.0, and entry 0 gets 2.0 from the moment the player toggles it by button (and 1.0 again whenever the
+   automatic rule 6 opens or closes it). Correction 2026-11-25: this rule used to say "speed per second"; the PS3
+   multiplier is 1/75 per tick, not 1/300 (the built code fades 1.0 / 2.0 per real second: 4 x too slow).
 2. **Which page draws.** Only the highest entry with fade > 0 draws (3 before 2 before 1 before 0), with alpha
    `A x fade` (A as in M1 3).
 3. **Slide.** While its entry is shown (fading in): ease = 1 - (1 - fade)^2 and the page's y offset = -20 x (1 - ease)
    (it slides down into place from 20 units above). While hidden (fading out): ease = fade^2, y = +20 x (1 - ease)
    (it slides on downward). x is 0. Ours slides in from below and out upward.
-4. **Background dim.** When the drawn entry has its dim flag (entries 1..3), the game's menu background dim is set
-   to `ease` for that frame (PS3 `0x421b00`: menu manager `+0x5d0` = value, `+0x5d8` = 1, once per frame). Ours does
-   not dim. PS4 field: open question 4.
+4. **Background dim.** When the drawn entry has its dim flag (entries 1..3), the game's menu background dim target
+   is requested to be `ease` for that frame (PS3 `0x421b00`). PS4 (section 10.2): if u8 `[0x1136640 + 0x1038]` is 0,
+   write f32 `[0x1136640 + 0x1030]` = ease and u8 `[0x1136640 + 0x1038]` = 1; if it is already 1, do nothing (the
+   first request of a frame wins). The request is made even when the page itself is not drawn because a menu is up
+   (rule 2a). The menu's own per-frame update clears the byte and moves its drawn dim (f32 `+0x1034`) toward the
+   target; nothing else is needed from us.
+   2a (page gate, PS3 `0x423410`): the page of the top entry is drawn only while the menu state word s32
+   `[0x1136640 + 0x1014]` is 0 (no menu up). Fades, slide and the dim request continue regardless.
 5. **Sounds.** Toggling entry 0 by button plays a menu sound: `d9b465e1` when it opens, `2f118f31` when it closes.
-   An automatic open / close plays nothing. Ours plays none.
-6. **Automatic opening (entry 0) while playing (NGM state 2), not in a film:** the scoreboard opens by itself (speed
-   1.0, no sound) when the "auto" condition becomes true, and closes again when it becomes false, unless the player
-   opened it by button. The auto condition (PS3 `0x6b6b3c`) is read from the local player's object: true when the
-   player object gives no answer to the state query `1a9688ee`, or the answer's state flags carry bit 15. Our reading:
-   it is true while the player is dead and waiting to respawn, which is when PS3 shows the "Respawn in [A]..."
-   header (M4). Open question 5 (one RPCS3 check settles it). It is forced false while the HUD is in the state PS3
-   tests with `0x8a0348` (unidentified) and the board was not opened by button. Also, while every active player is
-   out (M1 2, last point), entry 0 is shown.
-7. **Button toggle.** A press of the scoreboard button toggles entry 0 (speed 2.0, sound), except while the
-   blocking conditions hold (PS3: a second pad bit held, or an unidentified global word non-zero); when not toggled
-   in state 2, entries 2 and 3 are hidden.
-8. **Match states.** NGM state 3: entries 0, 1, 3 cleared, entry 2 (RESULTS) shown. State 4: entry 3 (ROUND_RESULTS)
-   shown, the others cleared. State 5: entry 3 shown when the NGM round sub-state (PS3 `+0x1a94`) is 3, else entry 0.
-   Three request bytes of a net object (PS3 object at `0xf2264c`, `+0x54` -> entry 2, `+0x55` -> entry 3, `+0x56` ->
-   entry 1) also show one entry and clear the rest. A DC switch (`e68ae001`) set true clears every shown flag.
-   In a cinema game (type 11) only states 3 / 4 show entries 2 / 3. Ours uses the round-end word `ngm+0x1e84` and
-   fixed timers (12 s, 60 s) instead; keep that until the PS4 fields of these states and request bytes are mapped
-   (open question 6), then replace the timers by the state rules.
+   An automatic open / close plays nothing. PS4 names: `d9b465e1` = "scoreboard-open", `2f118f31` =
+   "scoreboard-close", both sound records of `dc1/ps4/audio.bin`, samples in `sound1/banks/ps4/menu.bnk` (section
+   10.9). PS4 still has the PS3 entry setter with this exact sound choice at `0x666b50` (uncalled).
+6. **Automatic opening (entry 0) while playing (NGM state 2).** Every frame in state 2, with prev = last frame's
+   automatic flag:
+   - auto = PS4 `0x9766f0()` (the exact PS4 twin of PS3 `0x6b6b3c`, section 10.4): true when there is no local
+     character, or the character gives no answer to state query `1a9688ee`, or its state record has bit 0x01 of
+     byte `+0x3c` (PS3 bit 15). In a film (NGM `+0x209c` set, PS3 `+0x1ba4`) auto comes from the film controller
+     instead (section 10.8).
+   - If the HUD notification test PS4 `0x555550(0x1130008)` (PS3 `0x8a0348`, section 10.8) is true and the board
+     was not opened by button, auto = false.
+   - out = "every player is out" (section 10.6).
+   - If not out: auto rising (prev false, auto true) -> entry 0 shown with speed 1.0, no sound. Auto falling (prev
+     true, auto false) -> entry 0 hidden with speed 1.0 and the "opened by button" mark cleared, **also when the
+     player had opened it by button** (correction: this rule used to keep a board opened by button; PS3 does not;
+     open question 10 settled in favour of `parity-ticker-respawn.md` 2.2).
+   - If out: entry 0 shown with speed 1.0 every frame; if prev was true and auto is false, the falling-edge hide
+     above still runs in the same frame (so the board flickers off for that one frame; PS3 does exactly this).
+   - If the NGM state of the previous frame was 5: entries 3 and 0 hidden, mark cleared.
+   - Then entries 2 and 3 are hidden (always, in state 2).
+7. **Button toggle (state 2 only).** Skipped entirely while out. Otherwise, when the scoreboard button was pressed
+   this frame and none of the blocks holds: entry 0's speed = 2.0, entry 0 toggled with its sound (rule 5), mark =
+   the new shown value. PS3 blocks: a second pad button held (PS3 held word bit 0x4000) and the engine pause
+   object's word `+0x10` non-zero; neither is mapped on PS4 (section 10.10). The toggle is the PS3 SELECT button,
+   ours `UNCHARTED_U2MP_SCOREBOARD_BUTTON` (touchpad).
+8. **Match states (replaces our 12 s / 60 s timers).** Every frame, before rule 6:
+   - Cinema game (type 11): all four shown flags cleared; then state 3 -> entry 2 shown; state 4 -> entry 3 shown;
+     other states: entries 2 and 3 hidden. Nothing else.
+   - State 2: rules 6 and 7.
+   - State 5: entry 0 shown (speed unchanged) unless the round sub-state s32 `ngm+0x1e88` (PS3 `+0x1a94`) is 3; in
+     both cases entries 2 and 3 end hidden. (PS3 sets entry 3 when the sub-state is 3 and clears it again in the
+     same frame, so with sub-state 3 nothing new is shown; entry 0 keeps its flag.)
+   - States 0, 1, 3, 4 (and any other): entry 0 shown only when the film controller is in state `9f514949` and the
+     end reason `ngm+0x1e84` is 3 or 8 (section 10.8; outside films entry 0 is therefore hidden). Then:
+     state 3 -> all four flags cleared and entry 2 (RESULTS) shown; state 4 -> all four cleared and entry 3
+     (ROUND_RESULTS) shown; other states -> entries 2 and 3 hidden.
+   - When a shown flag is set from 0 to 1, the entry's page is asked to lay out again (page `+0xf8` = 2, as
+     `scoreboard.cpp` does). In states 3 and 4 the flags are cleared and set again every frame, so PS3 repeats that
+     request every frame.
+   - After the state rules: the three PS3 "request bytes" (`0xf2264c` `+0x54/+0x55/+0x56`) are debug-menu switches
+     ("Force Results Scoreboard", "Force Round Results Scoreboard", "Force Wave Results Scoreboard"): always 0 in a
+     retail game; do not implement. Then the film query `e68ae001` (section 10.8): when answered true, all four
+     shown flags are cleared (fades run on).
+   - Then the fades (rule 1), the stored "previous state" (for the state-5 rule) and the hint (M1).
+   Where the states come from (section 10.7): state 4 when the script event `15f1cf05` arrives with value 3 (its
+   value is the round sub-state), state 3 at match end (event `bcc3b05b` or `0x648c30`), state 2 at every round
+   start (sub-state and end reason reset to 0), state 5 in the leave sequence, state 0 on the exit paths and at the
+   next game start. The timers and the `UNCHARTED_U2MP_SCOREBOARD_STATES` opt-in can go: a stale state 3 cannot
+   draw over the lobby because the lobby is a menu (menu state word non-zero, rule 2a) and PS4 resets the state to 0
+   on the way out (section 10.7).
 
 Not a difference: the page draw itself (`gameplay.md` 1.4 "Draw the page") matches PS3 `0x423410`.
 
@@ -212,7 +252,8 @@ single-player bonus pages, nothing to do. Open question 8.
 `loading.md` covers every element. Its "not in scope" list: (a) PS3 letterbox bars: only drawn when the display has
 fewer than 719 lines: never on PC, nothing to do; (b) the tunable read at the start of the PS3 draw (`0x158ff8`, id
 `cdf70794`, default 30): identify its use before deciding; (c) "rosters only while a menu field is 0": the field is
-the menu manager word PS3 `+0x5b4` that also gates M1. Once open question 1 maps it on PS4, apply it to both.
+the menu manager word PS3 `+0x5b4` that also gates M1; on PS4 it is s32 `[0x1136640 + 0x1014]` (section 10.2): draw
+  the rosters only while it is 0 (PS3 skips the in-place page draw `0x423410` entirely while it is not 0).
 
 ### Leaderboard tables - COVERED
 
@@ -235,10 +276,10 @@ hud.bnk sounds, MP banks, music cues, MP vox and DLC voices, per-mode actors, dc
 
 1. M2 rule 6 + M4: scoreboard opens by itself while dead (with the respawn countdown / co-op tries header).
 2. M1: dead-player hint line "|SELECT| Scoreboard |D-PAD| Camera".
-3. M2 rules 1-3: PS3 fade speeds, entry priority, slide direction.
+3. M2 rules 1-3: PS3 fade speeds (4 x the built rate, section 10.1), entry priority, slide direction, page gate 2a.
 4. M2 rule 5: open / close sounds on the scoreboard toggle.
 5. M2 rule 4: background dim behind the result pages.
-6. M2 rule 8: result pages from the NGM states instead of timers (after open question 6).
+6. M2 rule 8: result pages from the NGM states instead of timers (PS4 facts in section 10.7 / 10.8).
 7. M6: film spectating HUD parts (check first).
 8. M7: Mute Players lists (check).
 9. M9: Multiplayer Medals page (check).
@@ -252,10 +293,11 @@ added; docs: `u2mp/docs/spec/gameplay.md` 1 (scoreboard behaviour updated), `fun
 
 ## 7. Test scenarios
 
-1. Team Deathmatch, two PCs: A kills B. On B: death camera; the board opens by itself (fade 1/s, slides down from
-   above), header "Respawn in 5..." counting down, then "Respawning"; the hint line fades in at y 500 (1/s); on
-   respawn both go (hint 2/s). No sound on the automatic open.
-2. Same, B presses the scoreboard button while alive: board opens at 2/s with sound `d9b465e1`; press again: closes
+1. Team Deathmatch, two PCs: A kills B. On B: death camera; the board opens by itself (fade 4/s: 0.25 s, slides down from
+   above), header "Respawn in 5..." counting down, then "Respawning"; the hint line fades in at y 500 (4/s); on
+   respawn both go (board 4/s, hint 8/s), also when B had opened the board by button. No sound on the automatic
+   open.
+2. Same, B presses the scoreboard button while alive: board opens at 8/s with sound `d9b465e1`; press again: closes
    with `2f118f31`.
 3. Elimination: B dies, watches A; D-pad cycles to the next living teammate. The hint stays while any active player
    is still in play and fades only when every active player is out.
@@ -263,45 +305,214 @@ added; docs: `u2mp/docs/spec/gameplay.md` 1 (scoreboard behaviour updated), `fun
 5. Co-op Arena: down / die: "[A] Tries Remaining" / "Last Try" in the header.
 6. Machinima / film: no hint line; M6 comparison.
 7. Pause during a match: Mute Players lists both teams; toggling mutes voice.
-8. A pause / menu page up while dead: hint fades out (menu-blocking word).
+8. A pause / menu page up while dead: hint fades out (menu state word `+0x1014` not 0) and the board page is not
+   drawn while the menu is up; it is back when the menu closes.
+9. Elimination / co-op round end: RESULTS / ROUND_RESULTS appear exactly while NGM state is 3 / 4 (log lines
+   `scoreboard: NGM state ...`), gone at the next round start; after the match, back in the lobby, nothing of the
+   overlay is drawn.
+10. A HUD notification on screen while dying (e.g. an objective message): the board does not open by itself until
+    the message is gone (M2 rule 6 override).
 
 ## 8. Open questions
 
-1. PS4 field of the PS3 menu manager word `+0x5b4` (non-zero while a menu page blocks the HUD); shared with
-   `loading.md`'s roster gate.
-2. Is PS4 `0x104ed74` (used by `scoreboard.cpp` as the fade scale) the PS3 HUD fade value `0xe1a660`?
+Settled on 2026-11-25 by section 10: 1 (10.2), 2 (10.3), 4 (10.2), 6 (10.7, 10.8), 9 (10.9), 10 (M2 rule 6: PS3
+hides the board on the falling edge even when it was opened by button), 11 (10.4, 10.5). Still open:
+
 3. Which glyph the text printer draws for `|SELECT|` on PC, and whether it should name our scoreboard button
    (touchpad by default).
-4. PS4 fields of the menu background dim (PS3 menu manager `+0x5d0` value, `+0x5d8` set-this-frame flag).
-5. The auto-open condition (M2 rule 6): confirm on RPCS3 that the PS3 board opens by itself on every death in
-   Team Deathmatch (and closes on respawn). If not, it means something narrower and rule 6 must be re-read.
-6. PS4 fields of the NGM round sub-state (PS3 `+0x1a94`), of the three result request bytes (PS3 object `0xf2264c`
-   `+0x54..+0x56`), and the meaning of DC switch `e68ae001`.
+5. CHECK in a run (no longer a reading question): PS4 `0x9766f0` is the exact twin of the PS3 auto-open test, so
+   calling it gives PS3 behaviour whatever bit 0x01 of the state record means. Evidence that it means "dead, waiting
+   to respawn": the PS4 competitive-only query `0x65b490` (next to cond 44) calls it to decide whether to fill the
+   killer row. Still to see in a run: TDM death opens the board, respawn closes it; co-op "down" (flags A / B) opens
+   it only if PS4 sets that bit while down.
 7. M6: what exactly PS3 shows in a film (capture needed).
 8. M9: where BUTTON_MULTIMEDALS sits (MP page or PS4 bonus page only).
-9. Names / banks of sound ids `d9b465e1` and `2f118f31` on PS4 (expected in the menu or HUD bank).
-10. M2 rule 6 against `parity-ticker-respawn.md` 2.2 when the automatic flag turns off: M2 keeps a board the player
-    opened with the button, 2.2 hides it and clears the mark. Ours follows M2; one RPCS3 check (open by button while
-    dead, then respawn) settles it.
-11. The PS4 tracker fields of the running death camera (PS3 tracker `+0x15c` / `+0x160`) and the call that gives a
-    character's state record (process vtable `+0x88`, its arguments) with flags A / B and PS3 bit 15.
+12. M2 rule 7 blocks (section 10.10): which PS4 pad bit is the PS3 held bit 0x4000, and the PS4 form of the engine
+    pause object's word `+0x10`.
+13. M2 rule 8 film branch: the PS4 form of PS3's "process is in state `9f514949`" test for the film controller
+    (section 10.8). Films only.
+14. M6 / films: the HUD notification element (10.8) and the film controller events are mapped; their visible
+    effect in a film still needs one capture.
 
-## 9. Implementation status (2026-11-25, branch `u2mp-scoreboard`)
+## 9. Implementation status (2026-11-25, branch `u2mp-scoreboard`; PS4 facts of section 10 added the same day)
 
 Code: `gow3_pc/src/u2mp/scoreboard.cpp` (the overlay), `overlay_rules.cpp` / `.h` (pure rules, test
 `gow3_pc/tests/test_u2mp_overlay.cpp`), `loading.cpp` `menu_text_in_rect` (the text-in-rect call shared with the
-loading screen). Behaviour as built: `gameplay.md` 1.4.
+loading screen). Behaviour as built: `gameplay.md` 1.4. "Spec ready" = every PS4 fact the rule needs is in section
+10; the code has not been changed yet.
 
-| Item | Status | What is built / what stays open |
+| Item | Status | What is built / what the spec now says |
 |---|---|---|
-| 1. M2 rule 6 + M4: board opens by itself while dead | DONE (CHECK) | Automatic flag = local character gone or died time >= spawn time (the cond 44 dead test fields, used only when `0x65b830`'s bytes match). Opens at speed 1.0 without sound, closes on respawn unless opened by button (open question 10). Not built: the state-record bit 15 / flags A, B (open question 11), the `0x8a0348` override and NGM `+0x1ba4` path, "every active player out shows entry 0" (threshold of `0x494178` not recovered; the local player's own death opens the board anyway). Co-op "down" (flag A / B, character alive) therefore does not open the board; full death does. |
-| 2. M1: hint line | DONE (CHECK) | Fade 1/s in, 2/s out, drawn as specified (y 500, scale 0.8, slot [5] 3.0), not in type 11, nothing without text. "A death camera runs" is taken as "the local player is dead" (open question 11); the menu-blocking word is not tested (open question 1), so a pause page while dead keeps the line; A = 1.0 (open question 2); the `\|SELECT\|` glyph is whatever the text printer draws on PC (open question 3). "Every active player out" = every tracker with a name is out by the test above. |
-| 3. M2 rules 1-3 | DONE | Every entry fades at its speed (1.0; entry 0 2.0 after a button press); only the highest entry with fade > 0 draws; slides down from 20 above, out downward. A = 1.0 as in item 2. |
-| 4. M2 rule 5: sounds | DONE (CHECK) | `d9b465e1` on open, `2f118f31` on close, button only, through `0x3dd780` / `0x9b5c20`; logged once each. Silent if no loaded bank has them (open question 9). |
-| 5. M2 rule 4: dim | OPEN | The PS4 menu dim fields are unknown (open question 4): logged once when a dimmed entry draws, nothing dimmed. |
-| 6. M2 rule 8: pages from match states | PARTLY, opt-in | States 3 -> entry 2, 4 -> entry 3, 5 -> entry 0 (round sub-state unknown: PS3 shows entry 3 when it is 3), cinema only 3 / 4, only while in the match and when the page is loaded, only with `UNCHARTED_U2MP_SCOREBOARD_STATES=1`: it is not known whether PS4 keeps a stale state 3 after the match (that would draw RESULTS over the lobby). NGM state changes are logged so a run shows it. Our round-end timers still come first (stand-in for the request bytes). Request bytes and DC switch `e68ae001`: open question 6. |
-| 7-10 (M6, M7, M9, M10 b) | not started | Checks first, as written in their sections (open questions 7, 8; M10 b unidentified tunable). |
+| 1. M2 rule 6 + M4: board opens by itself while dead | DONE (CHECK), **spec ready for the exact rule** | Built: automatic flag = local character gone or died time >= spawn time; closes on respawn unless opened by button. Spec now: auto = PS4 `0x9766f0()` (10.4), film path (10.8), HUD notification override `0x555550` (10.8), "every player out" with threshold 0 (10.6), falling edge also closes a board opened by button (M2 rule 6), the state-5 rule. Co-op "down" then behaves as PS3 by construction (open question 5 is a run check). |
+| 2. M1: hint line | DONE (CHECK), **spec ready** | Built: 1/s in, 2/s out, dead = death camera, no menu test, A = 1.0. Spec now: 4/s in, 8/s out from the game's tick step (10.1); menu state word `+0x1014` (10.2); death camera `0x664b90` (10.5); A from the HUD alpha `0x104ed0c` (10.3) with the corrected 1.0 cases; nothing drawn while paused (10.3). `\|SELECT\|` glyph: open question 3. |
+| 3. M2 rules 1-3 | DONE, **rate correction** | Built at 1.0 / 2.0 per second; PS3 is 4.0 / 8.0 per second (speed x T / 75, 10.1). Page drawn only while the menu state word is 0 (rule 2a). |
+| 4. M2 rule 5: sounds | DONE (CHECK) | Ids confirmed: "scoreboard-open" / "scoreboard-close" in `dc1/ps4/audio.bin`, samples in `menu.bnk` (10.9). |
+| 5. M2 rule 4: dim | **spec ready** | Menu fields `+0x1030` target, `+0x1034` drawn value, `+0x1038` set-this-frame (10.2). |
+| 6. M2 rule 8: pages from match states | PARTLY, opt-in; **spec ready** | Spec now: sub-state `ngm+0x1e88`, end reason `ngm+0x1e84`, the request bytes are debug switches (not implemented), `e68ae001` is a film-controller query (10.8), state 5 detail, stale state 3 harmless (10.7). Timers and the opt-in can be removed. |
+| 7. M2 rule 7: button blocks | OPEN (minor) | Only in state 2 and not while every player is out (spec ready); the two PS3 blocks are not mapped (open question 12). |
+| 8-11 (M6, M7, M9, M10 b) | not started | Checks first, as written in their sections (open questions 7, 8, 14; M10 b unidentified tunable). |
 
-Remaining visible differences from PS3: no background dim; pause / menu pages do not hide the hint; co-op down
-state does not open the board; result pages come from our timers (12 s / 60 s) unless the state rules are turned on;
-the button toggle has no blocking conditions (PS3: a second pad bit, an unidentified word).
+Remaining visible differences from PS3 once section 10 is built: the two unmapped toggle blocks (12), the film-only
+controller-state test (13), the `|SELECT|` glyph (3). Owner rules that touch this overlay: minimum 2 players in
+every mode, 1 in co-op (the "every player out" test then covers the lone co-op player: when that player is out,
+entry 0 stays up and the hint fades); trophies are out of scope.
+
+## 10. PS4 facts for the overlay (settled 2026-11-25)
+
+Addresses are PS4 1.02 image offsets (`boot-linked.bin` file offset = address + `0x183ce8`; `eboot.elf` file offset
+= address + `0x4000`). Each fact names the PS4 code that shows it and the bytes to verify before use. PS3 addresses
+are 1.10 (TOC `0xe183b8`). Calls are System V x86-64 (`U2MP_GUEST`), main thread.
+
+### 10.1 Frame step
+
+- s32 `[0x1116180 + 0x110]` = this frame's step of the game clock in ticks of 1/300 s (PS3 `[0xe60a00 + 0xf8]`; most
+  PS4 users multiply it by 1/300). The PS3 overlay multiplies it by 1/75 (TOC word `0x3c5a740e`), so every overlay
+  rate "r" means r x 4 per second. The PS3 menu dim code multiplies the same field by 1/150 on both consoles (PS3
+  `0x3bda740e`, PS4 constant `0xe62000`), which confirms the field is the same on both.
+- Verify: `0x5a3c74`: `48 8d 05 05 25 b7 00 c5 fa 2a 88 10 01 00 00` (lea of `0x1116180`, int-to-float of `+0x110`).
+
+### 10.2 Menu manager state word and background dim (menu manager `0x1136640`)
+
+- s32 `+0x1014` = PS3 `+0x5b4`, the menu state: 0 = no menu up; 5 / 6 = closing; 7 / 8 = popping / pushing a page;
+  other values 1..15 for the other phases. Set together with s32 `+0x1018` = 0 (state time) and f32 `+0x101c` = 1.0
+  (rate), between two calls of `0x5cd5c0` (PS3 setter `0x4298b8`; PS4 inlines it, e.g. `0x5e5b82`:
+  `c7 83 14 10 00 00 05 00 00 00 c7 83 18 10 00 00 00 00 00 00 c7 83 1c 10 00 00 00 00 80 3f`). The menu start
+  sets -1 then 0 (`0x5c524e`).
+  - Same meaning on PS4: the death-camera D-pad advance in the tracker camera update runs only while it is 0
+    (`0x665151`: `48 8d 05 e8 14 ad 00 83 b8 14 10 00 00 00`), and the helpers "a menu is open" test it against 0
+    (`0x5cc460`, `0x4cbc18`: `48 8d 05 21 aa c6 00 83 b8 14 10 00 00 00`).
+  - Users of the PS3 word in the overlay: the hint rule (M1 2), the page draw gate (M2 rule 2a: PS3 `0x423410`
+    draws nothing while it is not 0), and the loading-screen roster draw (`loading.md`, same PS3 function).
+- Dim: f32 `+0x1030` = requested dim (PS3 `+0x5d0`), u8 `+0x1038` = "requested this frame" (PS3 `+0x5d8`), f32
+  `+0x1034` = the dim actually drawn (PS3 `+0x5d4`). The menu's per-frame update clears `+0x1038` (`0x5d06a4`:
+  `41 c6 85 38 10 00 00`) and then moves `+0x1034` toward `+0x1030` (`0x5d0704`:
+  `c4 c1 7a 10 8d 30 10 00 00 c4 c1 7a 10 85 34 10 00 00`); in a net game with NGM state not 0 and the film flag
+  set it forces both to 0. The PS4 setter pattern "only if the byte is 0: write the value, set the byte" is at
+  `0x5d1afd`: `80 bb 38 10 00 00 00 75 0f c5 fa 11 83 30 10 00 00 c6 83 38 10 00 00 01` (inside the menu's own
+  page-transition dim `0x5d1a00` = PS3 `0x422d68`, which reads `+0x1014` at `0x5d1a55`: `8b 93 14 10 00 00`). PS3's
+  stand-alone setter `0x421b00` has no PS4 copy (its only caller was the removed overlay draw): write the fields.
+
+### 10.3 HUD alpha, menu fade, pause
+
+- f32 `[0x104ed0c]` = the HUD alpha (PS3 `0xe1a660`): the PS4 HUD textured quad `0x555c60` (= PS3 `0x89ff3c`, which
+  reads `0xe1a660`) multiplies by it (`0x555cd1`: `48 8d 05 34 90 af 00 c4 e2 79 18 30`); also the HUD text draws
+  `0x555767`, `0x55e0b6`. This is A of M1 3 / M2 rule 2.
+- f32 `[0x104ed74]` is not the HUD alpha: it is the menu's item fade target, moved each frame toward 0 when the top
+  page has flag `+0xb1` bit 0x08 and toward 1.0 otherwise (`0x5a3c66..0x5a3cc7`). `scoreboard.cpp`'s use of it as the
+  page item-fade scale (`gameplay.md` 1.4) stays as it is; only A changes.
+- Paused: PS3 skips the whole overlay draw while the engine pause flag (byte `+9` of PS3 `0xe1eb1c`) is set. PS4 has
+  no such byte: its main loop counts "unpaused frames" while f32 `[0x1116180 + 0x4c]` is not 0 where PS3 tests the
+  byte (`0x3faf57`: `49 ff 47 28 c5 f8 57 c0 c4 c1 78 2e 47 4c 74 04`). Rule: draw nothing of the overlay while
+  that f32 is 0.0. (Net games do not pause; this matters for films.)
+
+### 10.4 Automatic flag and the character state record
+
+- PS4 `0x9766f0`, `bool fn(void)` = PS3 `0x6b6b3c`, intact and uncalled by the overlay: takes the local character
+  (u64 slot pointer `[0x115bd20]`, u32 id `[0x115bd28]`; process valid when the slot holds a process whose `+0x44`
+  equals the id), sends it query `1a9688ee` through `0x4c4090`, answers true when the reply status (reply `+0x10`) is
+  below 2 (no character or no answer), else bit 0x01 of byte `+0x3c` of the returned record (false when the record
+  pointer is 0). Verify (the prologue alone also matches its sibling `0x9765d0`, so check all three):
+  `0x9766f0`: `55 48 89 e5 53 48 81 ec 88 00 00 00`; `0x9767c9`: `be ee 88 96 1a e8 bd d8 b4 ff b0 01 83 7d e8 02 72 12`;
+  `0x9767e4`: `8a 40 3c 24 01`.
+- The record is the character's state record: the character answers `1a9688ee` with exactly what its process
+  vtable `+0x88` returns (responders `0x7f3520`, `0x24910e`: `call [vtable+0x88]`, reply type 10). The vtable call
+  takes only the process (rdi) and returns the record pointer (`0x65b902`: `48 8b 07 ff 90 88 00 00 00 8a 48 3d 80 e1 01`).
+  Flags in it: bit 0x01 of `+0x3c` = PS3 bit 15 (auto flag); flag A = bit 0x40 of `+0x3c` (PS3 bit 9); flag B =
+  bit 0x01 of `+0x3d` (PS3 bit 7). A / B are the "down" states of cond 44 and of 10.6. PS3 reads them as a
+  big-endian halfword at record `+0x38`; PS4 uses bytes at `+0x3c`.
+- Meaning of bit 0x01: not named in either binary. Evidence for "dead, waiting to respawn": the PS4
+  competitive-only menu query `0x65b490` calls `0x9766f0` to decide whether to fill the killer row. Implementers do
+  not need the name: calling `0x9766f0` is the PS3 rule (open question 5 is only a run check).
+
+### 10.5 Death camera handle
+
+- Tracker (NGM `+0x10 + 0x2c0 x i`, local tracker u64 `[0x113b760]`): u64 `+0x168` = slot pointer of the running
+  death camera, u32 `+0x170` = its process id (PS3 `+0x15c` / `+0x160`), written by the spot camera `0x664200`
+  (`0x6644f5`) and the teammate camera `0x664550` (`0x664b57`).
+- PS4 `0x664b90`, `bool fn(tracker *)` = PS3 `0x4c7b90`: true when the slot pointer and id are not 0, the slot holds a
+  process, and its `+0x44` equals the id. Verify `0x664b90`:
+  `48 8b 87 68 01 00 00 48 85 c0 74 19 8b 8f 70 01 00 00 85 c9 74 12 48 8b 00 48 85 c0 74 0d 39 48 44 0f 94 c0`.
+
+### 10.6 "Every player out" (PS3 `0x494178`, no PS4 copy)
+
+The threshold is 0: both PS3 calls in the overlay store 0 in the threshold word right before the call (in the
+automatic rule and in the hint rule). Rule, with clock = s32 `[0x1116180 + 0x204]` (the net clock, as cond 44):
+for each of the 10 trackers (NGM `+0x10 + 0x2c0 x i`) whose byte `+0x20` is not 0 (PS3 `+0x18`), the tracker is out
+when any of these holds:
+1. died after its last spawn: s32 `+0x180` (spawn) < s32 `+0x17c` (died), strictly, and clock - `+0x17c` >= 0;
+2. its character's record has flag A and clock - s32 `+0x178` >= 0;
+3. its character's record has flag B and clock - s32 `+0x184` >= 0.
+The character is the tracker's u64 `+0x10` slot / u32 `+0x18` id (process `+0x44` must match); when it does not
+resolve, flags A and B count as not set. "Every player out" is true when every tracker in use is out; a tracker not
+in use counts as out, so with no tracker in use the answer is true. Field map: PS3 `+0x164 / +0x168 / +0x16c /
++0x170` = PS4 `+0x178 / +0x17c / +0x180 / +0x184` (the PS4 tracker reset clears these four at `0x6626b5`:
+`48 c7 83 80 01 00 00 00 00 00 00 48 c7 83 78 01 00 00 00 00 00 00`). Note the strict "<" here, against ">=" in the
+cond 44 dead test.
+
+### 10.7 NGM states, round sub-state, end reason (NGM `0x113b760`)
+
+| PS3 | PS4 | Meaning, writers |
+|---|---|---|
+| `+0x1a8c` | s32 `+0x1e80` | match state |
+| `+0x1a90` | s32 `+0x1e84` | end reason: set during play by `0x64a7c0` (`0x64a7c7`: `89 b7 84 1e 00 00`, with `+0x1e8c` value and `+0x1e90` frame); 3 or 8 make A = 1.0 and feed the film rule |
+| `+0x1a94` | s32 `+0x1e88` | round sub-state: the value of script event `15f1cf05` (handlers `0x5e53b0`, `0x5efd62`; `0x5e53f0`: `89 88 88 1e 00 00`); when it is 3 the state becomes 4 (`0x5e5409`: `83 f9 03 75 0b c7 80 80 1e 00 00 04 00 00 00`) |
+| `+0x1ba4` | u8 `+0x209c` | film playback flag (set at match setup `0x641518`; the HUD tests it before asking the film controller, `0x577f9f`: `80 b8 9c 20 00 00 00`) |
+
+State writers: 2 with sub-state and end reason 0 at every round start (`0x647a82`:
+`48 c7 83 80 1e 00 00 02 00 00 00 c7 83 88 1e 00 00 00 00 00 00`, = PS3 `0x4a85a0`); 3 at match end (`0x648c65`:
+`41 c7 87 80 1e 00 00 03 00 00 00`) and on script event `bcc3b05b` (`0x5e5396`); 4 as above; 5 in the leave
+sequence `0x641b50` (`0x641f63`: `41 c7 84 24 80 1e 00 00 05 00 00 00`), called right after the menu is closed and
+before the local tracker pointer is cleared; 0 on the exit paths (`0x5e8907`: `41 c7 86 80 1e 00 00 00 00 00 00`,
+`0x5f0225`) and when the next game starts (`0x649120`, `0x64914b`); 1 during match setup (`0x64150d`).
+Stale state 3: it lasts from match end until the leave / exit path; during that time PS3 shows RESULTS (intended),
+and on the way back the lobby menu makes the menu state word non-zero, which stops the page draw (M2 rule 2a), and
+the exit paths then write 0. Our extra "in the match" gate can stay as a safety net but is not PS3 behaviour.
+
+### 10.8 Film controller, HUD notification override, request bytes
+
+- The film controller process handle: u64 slot pointer `[0x1164080]`, u32 id `[0x1164088]` (PS3 `0xfdbc3c`). The
+  PS4 HUD sends it `e68ae001` under the film flag at `0x577fac..0x57806a` through `0x4c4310(reply, id, slot, handle
+  id, four empty argument records)`; reply value at `+0`, status at `+0x10` (0 = no answer). Its event handler
+  (around `0x5e9180`) answers:
+  - `8a87d1da` -> s32: index of the watched player (`0x5e91d8`: `3d da d1 87 8a 0f 85 b5 00 00 00 49 8b 46 08 8b 80 68 01 00 00`);
+  - `f498c2b5` -> bool: "following a player" (byte `+0x16d` of its data; `0x5e9180`: `3d b5 c2 98 f4 0f 85 0d 01 00 00 49 8b 46 08 8a 80`);
+  - `e68ae001` -> bool: the film camera mode s32 `[0x113a990 + 0x678]` == 1 (`0x5e9336`:
+    `3d 01 e0 8a e6 75 7a 48 8d 05 4c 16 b5 00 83 b8 78 06 00 00 01`). The mode is 1 after the controller's camera
+    event `806c9824` and 0 / 2 after the others. This is not a DC switch: outside films no controller exists, no
+    answer comes, nothing happens.
+- Film automatic flag (M2 rule 6, NGM `+0x209c` set): auto = false; if `8a87d1da` is answered and the index is
+  below 10 and that tracker died after its last spawn (10.6 condition 1 without the clock part), auto = true; then
+  if `f498c2b5` is not answered or answers false, auto = false.
+- Film entry-0 rule (M2 rule 8, states 0 / 1 / 3 / 4): PS3 also needs the controller process to be in its state
+  `9f514949` (PS3 `0x70db88`: the process's current state name). PS4 has no caller of that test with this id;
+  open question 13. Until mapped: treat as false (entry 0 hidden in those states), films only.
+- HUD notification override (PS3 `0x8a0348` = `0x8a4784` on HUD `+0x118`): PS4 `0x555550`, `bool fn(hud)` with
+  rdi = `0x1130008` (the HUD manager), uncalled: true while the HUD notification queue element (HUD `+0x310`, PS3
+  `+0x118`, PS3 ctor `0x8a47dc`, PS4 `0x5579a0`; up to 8 queued messages) has an entry in its first or second
+  display slot (u64 pointers `+0x138` / `+0x140`, each to a non-zero s32). The PS4 HUD update raises HUD flag 0x400
+  while it is true (`0x554251..0x55427e`). Verify `0x555550`:
+  `48 8b 8f 10 03 00 00 48 8b 91 38 01 00 00 48 85 d2 74 07 b0 01 83 3a 00 75 15 48 8b 89 40 01 00 00 48 85 c9 74 07 b0 01 83 39 00 75 02 31 c0 c3`.
+- Request bytes: PS3 `0xf2264c` `+0x54 / +0x55 / +0x56` are registered (PS3 `0x4b4244`) as the debug-menu switches
+  "Force Results Scoreboard" (entry 2), "Force Round Results Scoreboard" (entry 3), "Force Wave Results
+  Scoreboard" (entry 1). Always 0 in retail: entry 1 is therefore never shown in a normal PS3 game.
+
+### 10.9 Entry setter and sounds
+
+- PS4 `0x666b50(overlay, k, on, with_sound)` = PS3 `0x4cbac0`, intact and uncalled: when the shown byte changes and
+  k = 0 with sound, plays `d9b465e1` on open / `2f118f31` on close through `0x3dd780` / `0x9b5c20`; when it turns on,
+  sets `+0xf8` = 2 on the loaded page with the entry's id. Verify `0x666b8b`:
+  `85 f6 75 2f 80 f1 01 75 2a 84 db b8 e1 65 b4 d9 be 31 8f 11 2f`.
+- `d9b465e1` = sound record "scoreboard-open", `2f118f31` = "scoreboard-close": PS4 `dc1/ps4/audio.bin` id table
+  entries at file `0xf258` / `0x3618`, records at `0x78518` / `0x28820` (each: id, pointer to its name string, then
+  the shared field `0xf19e22dc`); the sample names are in `sound1/banks/ps4/menu.bnk` (the menu bank). The ids are
+  not the CRC string ids of these names (U2 sound ids use their own hash), so look them up by id.
+
+### 10.10 Button and its blocks (M2 rule 7)
+
+- PS3 reads the toggle from the frame object's "pressed this frame" word (`0xe60a00 + 0x814`, bit 0x2000) and the
+  block from its "held" word (`+0x81c`, bit 0x4000). PS4 keeps the two words at `0x1116180 + 0x864` / `+0x86c`
+  (the camera D-pad test `0x66516c`: `8b 80 64 08 00 00 a8 20`). The PS4 bits are a different layout (PS3 D-pad
+  right / left 0x8 / 0x4 became 0x20 / 0x80 in the same camera code); the PS4 bit of PS3 held 0x4000 was not found.
+- The other block, PS3 `0xe1eb1c + 0x10` (the engine pause object, default 0), has no PS4 counterpart found; PS4
+  rewrote pause handling (10.3).
+- Our own pad word (`0x14b7fb0`, touchpad) stays the toggle.

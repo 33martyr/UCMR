@@ -49,7 +49,9 @@ Hook points:
 
 Not in scope (nothing is drawn for them): the PS3 letterbox bars (only below 719 lines), a PS3 tunable
 read at the start of the PS3 draw, and the PS3 condition "draw rosters only while a certain menu field
-is 0".
+is 0". (2026-11-25: that field is now mapped: PS4 s32 `[0x1136640 + 0x1014]`, the menu manager's state
+word, 0 = no menu up; PS3 skips the in-place page draw that shows the rosters while it is not 0. Facts and
+verification bytes: `parity-m-features.md` 10.2. Adding the gate is a separate change.)
 
 ## 2. Interface
 
