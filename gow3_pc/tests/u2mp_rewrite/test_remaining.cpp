@@ -91,9 +91,9 @@ void call_rel(uint64_t at, uint64_t target) {   // E8 rel32 at `at`
     put<int32_t>(at + 1, int32_t(int64_t(target) - int64_t(at + 5)));
 }
 
-const uint64_t kRetStubs[20] = {0x61b900, 0x5ec490, 0x5ec460, 0x5ebde0, 0x5ec4a0, 0x5ec4b0, 0x5ec480,
+const uint64_t kRetStubs[18] = {0x61b900, 0x5ec490, 0x5ec460, 0x5ebde0, 0x5ec4a0, 0x5ec4b0, 0x5ec480,
                                 0x5ec4c0, 0x5ecb70, 0x5ebdd0, 0x5ebea0, 0x5ec000, 0x5ed8a0, 0x5ed8b0,
-                                0x5ed8c0, 0x64e900, 0x6769d0, 0x6769e0, 0x5e4510, 0x5e4520};
+                                0x5ed8c0, 0x64e900, 0x5e4510, 0x5e4520};
 
 // the clean image: every check of install_remaining passes
 void base() {
@@ -863,7 +863,7 @@ int main() {
         q_call_ns(ns, 1, 1);
     });
 
-    // ======== B22 .. B27 and clantag.cpp ========
+    // ======== B22 .. B25 and clantag.cpp ========
     run("B22 clan tag begin fails", [] { st.begin_result = 0; }, [](const Ns &ns) {
         cb(0x5ed8a0);
         rec("edit -> %d", ns.edit() ? 1 : 0);
@@ -937,15 +937,8 @@ int main() {
         cb_null(0x64e900);
         cb(0x64e900, 0, 0, 0xffffffffu);
     });
-    run("B26 twitter page event 6, 2, NULL", nullptr, [](const Ns &) {
-        cb(0x6769d0, 6);
-        cb(0x6769d0, 2);
-        cb_null(0x6769d0);
-    });
-    run("B27 twitter button", nullptr, [](const Ns &) { cb(0x6769e0); });
     run("message box with NULL descriptor", [] { put<uint64_t>(MENU + 0x17d0, 0); }, [](const Ns &ns) {
         cb(0x5ed8c0);
-        cb(0x6769e0);
         ns.notice("text");
     });
     run("message box words overwrite old content", [] { std::memset(mem + BOX, 0x77, 0x80); }, [](const Ns &) { cb(0x5ed8c0); });

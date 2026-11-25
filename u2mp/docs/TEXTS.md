@@ -69,6 +69,9 @@ text anywhere. All 98, the 5 playlist texts and the 11 PC texts are in `kOwn` (1
 "Still English" in 3..20: `Buy Game`, `BUY GAME` and the copyright line (only English has them; not
 multiplayer), in every language; in greek, czech and turkish also the texts that are blank in English too.
 
+Removed since (owner, 2026-11-25): the Twitter PC text (`kOwn`), the two Message of the Day texts c70beaa3 / 307e3705
+(`kMenu`) and the alias of the net-patch9 Message of the Day id 7a89e967. Their pages are never shown.
+
 ## 4. Left
 
 - PS4's own untranslated strings are kept (rule: a real PS4 string is never changed), e.g. the Japanese and

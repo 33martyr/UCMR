@@ -3,7 +3,7 @@
 //
 // - two net event Applies (NpcDealDamage, KickGriefer);
 // - the frontend menu callbacks of the party, player, friends, players-met, invites, clan tag,
-//   store, Twitter and cinema-sharing buttons, answered with PC popups, message boxes and the
+//   store and cinema-sharing buttons, answered with PC popups, message boxes and the
 //   session / online layers;
 // - the NULL-read sites (level record package, tracker values, empty tag table search, NetStatGame
 //   host name);
@@ -675,7 +675,7 @@ U2MP_GUEST void invites_query(void *query) {
     }
 }
 
-// ---- B22 .. B27: clan tag, player options page, store, matchmaking box, Twitter -----------------------
+// ---- B22 .. B25: clan tag, player options page, store, matchmaking box ---------------------------------
 
 U2MP_GUEST void clan_tag_button(void *, void *, void *) {
     if (!edit_clan_tag()) message_box(kTextClanTag);
@@ -696,14 +696,6 @@ U2MP_GUEST void matchmaking_box(void *arg, void *, void *) {
     if (answer) g_matchmaking_answered = true;
     log("matchmaking message box answered (%u)", answer);
 }
-
-U2MP_GUEST void twitter_page(void *arg, void *, void *) {
-    if (arg_word(arg, 0) != 6) return;
-    pop_page();
-    message_box(kTextTwitter);
-}
-
-U2MP_GUEST void twitter_button(void *, void *, void *) { message_box(kTextTwitter); }
 
 // ---- B28 / B29: cinema files to and from friends --------------------------------------------------------
 
@@ -993,8 +985,6 @@ void install_remaining(int &installed) {
         {0x5ed8b0, "PAGE_MULTIPLAYER_PLAYER_OPTIONS", reinterpret_cast<void *>(&player_options_page), false},
         {0x5ed8c0, "store browse", reinterpret_cast<void *>(&store_browse), false},
         {0x64e900, "matchmaking box (24df6961)", reinterpret_cast<void *>(&matchmaking_box), false},
-        {0x6769d0, "PAGE_TWITTER", reinterpret_cast<void *>(&twitter_page), false},
-        {0x6769e0, "BUTTON_TWITTER_*", reinterpret_cast<void *>(&twitter_button), false},
         {0x5e4510, "cinema send to friend (fe0e7de7)", reinterpret_cast<void *>(&cinema_send), false},
         {0x5e4520, "cinema receive from friend (6b2970e2)", reinterpret_cast<void *>(&cinema_receive), false},
     };

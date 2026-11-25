@@ -523,14 +523,6 @@ const Text kOwn[] = {
      "Теги кланов недоступны на ПК.", "Tagi klanów nie są dostępne na PC.", nullptr,
      "As tags de clã não estão disponíveis no PC.", "Οι ετικέτες κλαν δεν είναι διαθέσιμες στο PC.",
      "Klanové značky nejsou na PC k dispozici.", "Klan etiketleri PC'de kullanılamaz."}},
-    {kTextTwitter, {"Twitter is not available on PC.", "Twitter n'est pas disponible sur PC.",
-     "Twitter non è disponibile su PC.", "Twitter ist auf dem PC nicht verfügbar.",
-     "Twitter no está disponible en PC.", "Twitter er ikke tilgængelig på pc.",
-     "O Twitter não está disponível no PC.", "Twitter is niet beschikbaar op pc.", "PC版ではTwitterを利用できません。",
-     "PC에서는 Twitter를 이용할 수 없습니다.", "Twitter ei ole käytettävissä PC:llä.", "Twitter er ikke tilgjengelig på PC.",
-     "Twitter är inte tillgängligt på PC.", "PC 版無法使用 Twitter。", "Twitter недоступен на ПК.",
-     "Twitter nie jest dostępny na PC.", nullptr, nullptr, "Το Twitter δεν είναι διαθέσιμο στο PC.",
-     "Twitter není na PC k dispozici.", "Twitter PC'de kullanılamaz."}},
     {kTextCinemaSend, {"Sending cinema files to friends is not available on PC.",
      "L'envoi de fichiers cinéma à des amis n'est pas disponible sur PC.",
      "L'invio di file cinema agli amici non è disponibile su PC.",
@@ -774,7 +766,6 @@ const struct { uint32_t id, to; } kAliases[] = {
     {0x828d76dbu, 0xa30341e7u},   // net-patch9 Deathmatch playlist -> PS4 Deathmatch
     {0x7c60126eu, 0x3b8de400u},   // net-patch9 Elimination playlist -> PS4 Elimination
     {0xf0a21209u, 0xadbc5c93u},   // net-patch9 Siege game type -> PS4 Siege
-    {0x7a89e967u, 0x307e3705u},   // net-patch9 message of the day -> PS4 welcome text
     {0x74aff594u, kTextAllCompetitive},   // net-patch9 playlist
     {0x9a13e8f3u, kTextAllCompetitiveDesc},   // net-patch9 playlist
     {0x893405b5u, kTextTheLab},   // net-patch9 playlist
@@ -1376,14 +1367,6 @@ const MenuText kMenu[] = {
     {0xb29dc38du, "Το κύμα 7 ολοκληρώθηκε", "Vlna 7 dokončena", "7. Dalga Tamamlandı"},   // Wave 7 Complete
     {0x8ad27e30u, "Το κύμα 8 ολοκληρώθηκε", "Vlna 8 dokončena", "8. Dalga Tamamlandı"},   // Wave 8 Complete
     {0x8e136387u, "Το κύμα 9 ολοκληρώθηκε", "Vlna 9 dokončena", "9. Dalga Tamamlandı"},   // Wave 9 Complete
-    {0xc70beaa3u,
-     "Καλώς ήρθες στο Uncharted 2: Among Thieves Πολλοί παίκτες!\\\\Ευχαριστούμε που παίζεις!\\\\Δες τα στατιστικά σου και τα τελευταία νέα στο www.naughtydog.com\\Διασκέδασε με τη beta και απόκτησε το πλήρες παιχνίδι για ακόμα περισσότερους χάρτες και λειτουργίες!\\\\Ευχαριστούμε και καλή διασκέδαση!",
-     "Vítejte ve hře více hráčů Uncharted 2: Among Thieves!\\\\Děkujeme, že hrajete!\\\\Své statistiky a nejnovější zprávy najdete na www.naughtydog.com\\Užijte si betu a pořiďte si plnou hru s dalšími mapami a režimy!\\\\Děkujeme a bavte se!",
-     "Uncharted 2: Among Thieves Çok Oyunculu'ya hoş geldin!\\\\Oynadığın için teşekkürler!\\\\İstatistiklerine ve en son haberlere www.naughtydog.com adresinden göz at\\Beta'nın tadını çıkar ve daha fazla harita ve mod için oyunun tamamını edin!\\\\Teşekkürler, iyi eğlenceler!"},   // Welcome to Uncharted 2: Among Thieves Multiplayer!  Thanks f
-    {0x307e3705u,
-     "Καλώς ήρθες στο Uncharted 2: Among Thieves Πολλοί παίκτες!\\\\Ευχαριστούμε που παίζεις!\\\\Δες τα στατιστικά σου και τα τελευταία νέα στο www.naughtydog.com\\Θα ενημερώνουμε το παιχνίδι τακτικά, οπότε έχε τον νου σου εδώ για νέα.\\\\Ευχαριστούμε και καλή διασκέδαση!",
-     "Vítejte ve hře více hráčů Uncharted 2: Among Thieves!\\\\Děkujeme, že hrajete!\\\\Své statistiky a nejnovější zprávy najdete na www.naughtydog.com\\Hru budeme pravidelně aktualizovat, sledujte proto toto místo.\\\\Děkujeme a bavte se!",
-     "Uncharted 2: Among Thieves Çok Oyunculu'ya hoş geldin!\\\\Oynadığın için teşekkürler!\\\\İstatistiklerine ve en son haberlere www.naughtydog.com adresinden göz at\\Oyunu düzenli olarak güncelleyeceğiz, yenilikler için burayı takip et.\\\\Teşekkürler, iyi eğlenceler!"},   // Welcome to Uncharted 2: Among Thieves Multiplayer!  Thanks f
     {0xf03b77d4u, "Όταν στέκεσαι ακίνητος, πάτησε το πάνω κουμπί για να βλέπεις τους εχθρούς μέσα από τους τοίχους",
      "Když stojíte, stiskem tlačítka nahoru uvidíte nepřátele skrz zdi",
      "Hareketsiz dururken düşmanları duvarların ardından görmek için yukarı tuşuna bas"},   // When standing still, press the up button to see enemies thro
