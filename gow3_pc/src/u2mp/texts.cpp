@@ -15,7 +15,8 @@
 //  1. the game's text (TextDb::Find), unless it is the placeholder;
 //  2. an alias: an id whose text is another id's (net-patch9 ids for PS4 texts / our playlists);
 //  3. the imported bank of the language (text1/ps4/<n>.<category>, u2text.py: the PS4 bank completed
-//     from the GOTY PS3 bank of that language, sam-spanish from spanish, brazilian from portuguese);
+//     from the GOTY PS3 bank of that language, sam-spanish from spanish, brazilian from portuguese); in
+//     English the few ids of kOwnFirstInEnglish (a GOTY base text PS3 replaced later) take step 4 first;
 //  4. our own text (kOwn, every language; kMenu: greek, czech and turkish for every text their PS4
 //     banks have only as "_": the 96 common menu texts and the 396 networking texts);
 //  5. unlocks_text (a label from a GOTY skin's package name);
@@ -27,9 +28,11 @@
 // English, 19..23 PS4 only.
 #include "texts.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cstdio>
 #include <cstring>
+#include <iterator>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -91,10 +94,16 @@ const Text kOwn[] = {
      "Competitieve kills", "対戦の撃破数", "경쟁 플레이 처치", "Kilpailutapot", "Konkurransedrap", "Tävlingsdödningar", "對戰擊殺數",
      "Убийства в соперничестве", "Zabicia w rywalizacji", "Eliminaciones en competitivo", "Abates no Competitivo",
      "Ανταγωνιστικές εξοντώσεις", "Zabití v soutěži", "Rekabetçi Leşler"}},
-    {0xc0cd1b00u, {"Cash", "Argent", "Denaro", "Geld", "Dinero", "Kontanter", "Dinheiro", "Geld", "キャッシュ", "캐쉬",
-     "Rahat", "Penger", "Pengar", "現金", "Деньги", "Pieniądze", "Efectivo", nullptr, "Μετρητά", "Peníze", "Para"}},
-    // ---- Multiplayer mode table 0xdef390: the Leaderboards description (its label 47a936dc: GOTY). No Trophies
-    //      texts: the import's menu overlay removes that button (PC has no trophies).
+    // c0cd1b00 is also the Money board's title and money column (board table 0xdef0a0, list cells 0x5b3240); PS3
+    // shows "Money" in all three places.
+    {0xc0cd1b00u, {"Money", "Argent", "Denaro", "Geld", "Dinero", "Penge", "Dinheiro", "Geld", "マネー", "돈",
+     "Rahat", "Penger", "Pengar", "金錢", "Деньги", "Pieniądze", nullptr, nullptr, "Χρήματα", "Peníze", "Para"}},
+    // ---- Multiplayer mode table 0xdef390: the Leaderboards label and description. The label 47a936dc is in the GOTY
+    //      base bank, whose English text "Rankings" PS3 replaced by "Leaderboards" later: English takes ours first
+    //      (kOwnFirstInEnglish); the other GOTY languages keep their bank text; greek, czech, turkish have no bank.
+    //      No Trophies texts: the import's menu overlay removes that button (PC has no trophies).
+    own_localized(0x47a936dcu, "Leaderboards", nullptr, nullptr, nullptr, nullptr, "Πίνακες κατάταξης", "Žebříčky",
+                  "Lider Tabloları"),
     {0xc21027d1u, {"View your stats", "Consultez vos stats", "Guarda le tue statistiche", "Ihre Statistik ansehen",
      "Consulta tus estadísticas", "Se din statistik", "Consulta as tuas estatísticas", "Bekijk je statistieken",
      "自分の成績を確認します", "내 통계를 확인합니다", "Katso tilastosi", "Se statistikken din", "Se din statistik", "查看你的統計資料",
@@ -117,13 +126,14 @@ const Text kOwn[] = {
      "Suhde", "Forhold", "Kvot", "比率", "Соотношение", "Stosunek", nullptr, "Proporção", "Αναλογία", "Poměr", "Oran"}},
     {0x7d24a9f9u, {"Rank", "Rang", "Posizione", "Rang", "Puesto", "Placering", "Posição", "Positie", "順位", "순위",
      "Sija", "Plassering", "Placering", "排名", "Место", "Miejsce", nullptr, nullptr, "Θέση", "Pořadí", "Sıra"}},
-    // ---- Leaderboard help bar 0x1041560
-    {0x320a6fc8u, {"Go to Top", "Haut de la liste", "Inizio elenco", "Zum Anfang", "Principio de la lista",
+    // ---- Leaderboard help bar 0x1041560 (English as PS3 shows it: Filter, L1 Prev, R1 Next, Top of List; L1 / R1
+    //      switch the board, square goes back to the first page)
+    {0x320a6fc8u, {"Top of List", "Haut de la liste", "Inizio elenco", "Zum Anfang", "Principio de la lista",
      "Til toppen", "Topo da lista", "Naar boven", "先頭へ", "맨 위로", "Alkuun", "Til toppen", "Till toppen", "回到頂端",
      "В начало", "Na początek", nullptr, "Topo da lista", "Στην κορυφή", "Na začátek", "Başa Dön"}},
     {0x8994a031u, {"Next", "Suivant", "Successivo", "Weiter", "Siguiente", "Næste", "Seguinte", "Volgende", "次へ",
      "다음", "Seuraava", "Neste", "Nästa", "下一頁", "Далее", "Dalej", nullptr, "Próximo", "Επόμενο", "Další", "Sonraki"}},
-    {0x5ba2fdfbu, {"Previous", "Précédent", "Precedente", "Zurück", "Anterior", "Forrige", "Anterior", "Vorige",
+    {0x5ba2fdfbu, {"Prev", "Précédent", "Precedente", "Zurück", "Anterior", "Forrige", "Anterior", "Vorige",
      "前へ", "이전", "Edellinen", "Forrige", "Föregående", "上一頁", "Назад", "Wstecz", nullptr, nullptr, "Προηγούμενο",
      "Předchozí", "Önceki"}},
     {0xd82785e7u, {"Filter", "Filtrer", "Filtro", "Filter", "Filtro", "Filter", "Filtro", "Filter", "絞り込み", "필터",
@@ -755,6 +765,9 @@ const Text kOwn[] = {
      "Fotbolls-Flynn (USA)", "足球費恩（美國）", "Флинн-футболист (США)", "Flynn piłkarz (USA)", nullptr,
      "Flynn do futebol (EUA)", "Flynn ποδοσφαιριστής (ΗΠΑ)", "Flynn fotbalista (USA)", "Futbolcu Flynn (ABD)"}},
 };
+
+// kOwn ids whose imported English (GOTY base bank) text PS3 replaced later: in English ours comes before the bank.
+constexpr uint32_t kOwnFirstInEnglish[] = {0x47a936dcu};   // "Rankings" -> "Leaderboards"
 
 // Ids whose text is another id's.
 const struct { uint32_t id, to; } kAliases[] = {
@@ -1516,6 +1529,9 @@ const char *resolve(void *db, uint32_t id, int language, const char *game, int h
         return t && !placeholder(t) ? t : resolve(db, a.to, language, game ? game : t, hops + 1);
     }
     std::lock_guard<std::mutex> lock(text_lock);
+    if (column(language) == EN && std::find(std::begin(kOwnFirstInEnglish), std::end(kOwnFirstInEnglish), id) !=
+                                      std::end(kOwnFirstInEnglish))
+        if (const char *t = own(id, language)) return t;
     if (const char *t = imported_text(language, id)) return t;
     if (const char *t = own(id, language)) return t;
     if (const char *t = unlocks_text(id)) return t;

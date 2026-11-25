@@ -16,6 +16,9 @@ void install_progression(int &installed);
 void progression_publish();
 // One career publish (progression.md 1.5.4: counter +1, store written) when NetPlayerData is connected, changed or not.
 void progression_publish_career();
+// Adds the leaderboard page's "shown" handler to the menu page registry (once; spec progression.md 1.5.19). For the
+// session layer to call with its own page handler, before PAGE_MULTIPLAYER can open the leaderboards.
+void progression_register_leaderboard_page();
 
 // The Players Met rows (local store, spec parity-g-friends.md G1): players added at a match start, no friend,
 // most recently seen first, at most 50. Online it is empty until the RPCN friend list is known.

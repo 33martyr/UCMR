@@ -9,7 +9,9 @@
 //   - the DcLookup call in Leave::Enter (0x5f0952): writes the block after the match stats were added,
 //     remembers who was in the match and posts the scores online when the online link is up;
 //   - the leaderboard list update (0x5b3000): fills the game's leaderboard object with rows from the
-//     online score service when linked, otherwise from the local store.
+//     online score service when linked, otherwise from the local store;
+//   - a "page shown" handler for PAGE_MENU_LEADERBOARD in the menu page registry: asks the list update
+//     to start over (fetch the board, set the columns), which nothing on PS4 does any more.
 // The store file format and the board maths live in progression_store.cpp.
 //
 // Reimplemented from the behaviour description u2mp/docs/spec/progression.md.
@@ -95,6 +97,16 @@ constexpr uint64_t kLbReset = 0x78;
 constexpr uint64_t kLbBoard = 0x80;
 constexpr uint64_t kLbFriends = 0x84;
 constexpr uint64_t kLbRefresh = 0x85;
+
+// The leaderboard page (menu.bin PAGE_MENU_LEADERBOARD, one LIST_LEADERBOARD control) and the menu manager's page
+// event registry: u32 count at +0x24f0, at most 32 entries of 0x18 bytes from +0x24f8 (u32 page id, 0 = every page;
+// u64 handler; u64 argument). A handler gets {u32 event, ...}; event 1 = the page was shown.
+constexpr uint32_t kLeaderboardPage = 0x8236d02a;
+constexpr uint64_t kMenuHandlerCount = 0x24f0;
+constexpr uint64_t kMenuHandlers = 0x24f8;
+constexpr uint64_t kMenuHandlerStride = 0x18;
+constexpr uint32_t kMenuHandlerMax = 32;
+constexpr uint32_t kPageShown = 1;
 
 // List object fields (the argument of the list update).
 constexpr uint64_t kListColumns = 0x40;
@@ -676,6 +688,16 @@ U2MP_GUEST void leaderboard_list_update(uint8_t *list) {
     store_at<uint32_t>(list + kListColumns, load_at<uint32_t>(reinterpret_cast<const uint8_t *>(uintptr_t(columns))));
 }
 
+// 1.5.19: the page was shown. PS4 builds the page's list object without its board / page / column fields and
+// nothing sets the reset request, so the first list update found "nothing changed", never fetched and left the
+// column set 0: the list control then draws nothing at all (no panel, title, headers or rows).
+U2MP_GUEST void leaderboard_page_event(const uint32_t *event) {
+    if (!event || event[0] != kPageShown) return;
+    lb()[kLbReset] = 1;
+    log("rankings: leaderboard page shown: board %u%s", load_at<uint32_t>(lb() + kLbBoard),
+        lb()[kLbFriends] ? ", friends" : "");
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------------------------
@@ -724,6 +746,27 @@ void progression_publish() {
 void progression_publish_career() {
     if (!image.base) return;
     publish();
+}
+
+void progression_register_leaderboard_page() {
+    if (!image.base) return;
+    uint8_t *mm = game(addr::menu_manager);
+    const uint32_t count = load_at<uint32_t>(mm + kMenuHandlerCount);
+    const uint64_t fn = uint64_t(reinterpret_cast<uintptr_t>(&leaderboard_page_event));
+    for (uint32_t i = 0; i < count && i < kMenuHandlerMax; ++i) {
+        const uint8_t *e = mm + kMenuHandlers + kMenuHandlerStride * i;
+        if (load_at<uint32_t>(e) == kLeaderboardPage && load_at<uint64_t>(e + 8) == fn) return;
+    }
+    if (count >= kMenuHandlerMax) {
+        log("rankings: menu page handler table full: the leaderboard page is not reset when shown");
+        return;
+    }
+    uint8_t *e = mm + kMenuHandlers + kMenuHandlerStride * count;
+    store_at<uint32_t>(e, kLeaderboardPage);
+    store_at<uint64_t>(e + 8, fn);
+    store_at<uint64_t>(e + 0x10, 0);
+    store_at<uint32_t>(mm + kMenuHandlerCount, count + 1);
+    log("rankings: leaderboard page handler registered (%u handlers)", count + 1);
 }
 
 // Players Met never shows a friend (PS3 parity G1): online, the RPCN friend list decides; LAN has none.
