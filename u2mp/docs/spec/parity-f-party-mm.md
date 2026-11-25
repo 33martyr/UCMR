@@ -378,19 +378,19 @@ result (the player ends in the friend's party lobby). Nothing to add.
 | 0x4af160 | send a message to every other match room member | COVERED | `session::send_message(-1)` |
 | 0x4af240 | publish member data (48 bytes) to match and party rooms | COVERED | progression.cpp `0x64e810` + online.cpp `member_blob` (+10..+47 zero, no visible use) |
 | 0x4af4fc | "Leave Matchmaking?" Yes: set the leave flag | COVERED | frontend3.cpp `leave_yes`; leader/member split F9 |
-| 0x4af524 | order of the slot list sort (share count, party id, position) | MISSING | F6 |
+| 0x4af524 | order of the slot list sort (share count, party id, position) | COVERED | session.cpp `balance_kick_slot` (F6) |
 | 0x4af568 | position of a party id in the colour list | COVERED | session.cpp `party_position` |
 | 0x4af5bc | static init: slot list empty, a -1 word | COVERED | - |
 | 0x4af604 | static-init thunk of 0x4af5bc | COVERED | - |
 | 0x4af614 | find the slot-list entry of an online id | COVERED | session.cpp `mm_list` / `mm_member_at` |
-| 0x4af6d0 | generic in-place sort (slot list) | MISSING | F6 (any stable sort giving the 0x4af524 order) |
-| 0x4afe48 | vote winner by majority / full tie random / undecided | MISSING | F7 |
+| 0x4af6d0 | generic in-place sort (slot list) | COVERED | session.cpp `balance_kick_slot` (std::stable_sort, F6) |
+| 0x4afe48 | vote winner by majority / full tie random / undecided | COVERED | frontend3.cpp `majority_winner` / `host_vote_step` (F7; gate see 7) |
 | 0x4afee8 | host applies the vote result (SetNetGame, phase 3, 0x109, preload) | COVERED | frontend3.cpp `end_vote` / `apply_result` |
 | 0x4b0008 | build the matchmaking slot list | COVERED | session.cpp `mm_list` (parity-b 11.6); sorted copy F6 |
 | 0x4b0670 | LIST_MATCHMAKING_VOTE press: my vote, count + 1, 0x10a to the room | COVERED | frontend3.cpp vote row + kMmVote |
-| 0x4b0700 | client opens the vote (block, phase 2, unmute strangers, preload) | MISSING | voice part only: F8; rest frontend3.cpp `open_vote` |
-| 0x4b0868 | host opens the vote (two games, 0x112, block, unmute strangers, preload) | MISSING | voice part only: F8; rest frontend3.cpp `start_vote` |
-| 0x4b0a58 | PAGE_MULTIPLAYER_MATCHMAKING machine | MISSING | F1, F5, F6, F7, F9, F10; rest frontend3.cpp / online.cpp `mm_*` |
+| 0x4b0700 | client opens the vote (block, phase 2, unmute strangers, preload) | COVERED | frontend3.cpp `open_vote` + `unmute_strangers`, voice.cpp `receive` (F8) |
+| 0x4b0868 | host opens the vote (two games, 0x112, block, unmute strangers, preload) | COVERED | frontend3.cpp `start_vote` / `open_vote` (F8) |
+| 0x4b0a58 | PAGE_MULTIPLAYER_MATCHMAKING machine | COVERED (PLATFORM parts, KEPT minimum) | F1, F5, F6, F7, F9, F10: frontend3.cpp / online.cpp `mm_*` (see 7) |
 | 0x4b3f40 | matchmaking tunables defaults | COVERED | values used as constants by F1/F6 (1.4) |
 | 0x4b405c | static init: -1 word + tunables | COVERED | - |
 | 0x4b40c8 | static-init thunk of 0x4b405c | COVERED | - |
@@ -423,10 +423,41 @@ result (the player ends in the friend's party lobby). Nothing to add.
 | 0x4c3dc8 | 0x103 {room} to every party member | PLATFORM | frontend3.cpp kMmLeave relay; F1 step 5 |
 | 0x4c3e38 | 0x102/0x113 room info to the party, optional slot reservation | PLATFORM | session.cpp kFollow / online.cpp follow; F2 |
 | 0x4c40f0 | party member joined: debug "%s joined party", activate link, unmute | COVERED | online.cpp `connect_member`; voice default on (F8 for strangers) |
-| 0x4c41f8 | party room machine (create / join / owner check / leave / error) | MISSING | F11 (team auto-pick, 5 s owner check); rest online.cpp |
+| 0x4c41f8 | party room machine (create / join / owner check / leave / error) | COVERED | online.cpp `create_room` / `party_team_pick` / `party_owner_tick` (F11) |
 | 0x4c4a30 | static init: party session class, a -1 word | COVERED | - |
 | 0x4c4a78 | static-init thunk of 0x4c4a30 | COVERED | - |
 | 0x4c4a88 | request "leave the party room" (second class slot) | PLATFORM | as 0x4c36c8 |
 | 0x4c4aa0 | class constant 23 | COVERED | PS4 own class |
 
-Counts: 35 COVERED, 21 PLATFORM, 7 MISSING (plus one KEPT inside F1: the minimum of 2; F10 pending an owner decision).
+Counts (2026-11-25, after section 7): 42 COVERED, 21 PLATFORM, 0 MISSING; KEPT: the minimum players of F1 (owner rule); F10 decided (PS3 behaviour). F7 has one open fact (the net-game record field, 7).
+
+## 7. Implementation (2026-11-25, branch `u2mp-ps3-parity-2`)
+
+Owner decisions: **minimum players** (F1 and every place a minimum decides whether matchmaking or a match may begin):
+2 in every game mode, 1 in co-op (types 4, 8, 9, 12) - frontend3.cpp `matchmaking_min_players`, session.cpp
+`type_min_players` (custom game "too few players"; PS3 asked 2 only for type 10 and co-op). PS3 wait times otherwise.
+**F10**: PS3 behaviour (no lobby host migration in matchmaking). **Question 5/6**: a player whose game join failed
+drops out of its party (PS3 behaviour).
+
+| Item | Status | Where / what |
+|---|---|---|
+| F1 | COVERED, KEPT minimum | frontend3.cpp `host_gather_online`: reference = room creation (kMmHosting) + 8 s, never restarted; wait table `kGatherWait` by N = `session::member_count() - 1` (players that completed the transport hello); no decision while `online::mm_pending_members()` (a room member joined < 6 s ago and is not on the transport yet = PS3 open reservation); "Game starting in %i seconds" when N changes; too few: "time out %i players", `mm_research`, NET_SM 19, criteria 1, no extra delay. LAN keeps 3 s / 10 s (no strangers). PLATFORM: party members of a gathering host are not members of its RPCN room on PC, so there is nobody to send 0x103 to. |
+| F2 | COVERED | online.cpp `room_state`: a custom game room sets 0x53 = 1 only when every transport member (`session::member_npids`) is in the match room; otherwise waits up to 20 s, then `abort_custom_lobby` ("A party member couldn't talk to the game host", kOpPartyIn {0} to the party, room left, session.cpp `online_match_abort`: match+0x99 = 0, match session cleared, PAGE_MULTIPLAYER, NET_SM 18). A member's refused join sends kOpJoinResult {0} (PS3 0x10d) and the leader aborts at once. Members of an online custom game wait in JOINING 12 (session.cpp `on_follow`, `online::follow_match_room` returns true) until kOpPartyIn {1} (PS3 0x10e) posts 0x10e; {0} posts 0x10e {0} (page pops, NET_SM 18) or, from 17, back to PAGE_MULTIPLAYER; no word in 25 s: they give up themselves. |
+| F3 | COVERED (PLATFORM order) | online.cpp `select_join`: "Selected game", JOINING shown at once with NET_SM 12 for a custom row; failures (`join_page_fail`) post 0x10e {0}: no free slot by the search data, join refused / closed room, no owner, party does not fit by the room service's count at our join (fresh, = the owner's refusal of (d)), owner not reached ("Joining Request timed out"). Admit limit 10 s after the link to the owner is up (`admit_armed`, link limit 20 s). JoinRoom refusals and owner-not-reached drop the player out of its party (`drop_out_after_failed_join`, question 5); a party that does not fit only goes back (PS3 state 9). No message boxes. |
+| F4 | COVERED | the abort is kOpPartyIn {0} (F2). A member that cannot follow its leader (JoinLeader refused) leaves the party and goes back to PAGE_MULTIPLAYER with NET_SM 18, no error box (before: network error box). |
+| F5 | COVERED (distance PLATFORM) | frontend3.cpp `start_search_pass` / `host_start_matchmaking_step`: passes = rows of `b25ab071` (at most 3, read at run time; stride 0x14, ping limit s32 at +8), "Searching Game with Criteria %i", tip index = pass, created-by-me 0 while searching; online.cpp `mm_search_done` / `mm_pick`: pass 1 only rooms within 20 ranks, the fullest room wins (no location: no distance score, no party-size penalty); `mm_check_tick`: after the RPCN join the link to the owner comes up (20 s), RTT vs the row's limit ("retRtt", "PingCriteria failed"), too slow / failed -> room marked bad, next room of the same pass (`mm_room_failed`); only then the transport and the party go to the owner, which must admit within 6 s. No room: kMmNoRoom -> random 1..3 s -> next pass; after the last: `mm_create` (GATHER). The row's limit applies on every pass (PS3 state 7). |
+| F6 | COVERED | frontend3.cpp `host_gather_online` + session.cpp `balance_kick_slot`: N odd, playlist maximum even (not co-op only), last of the sorted slot list alone -> kMsgBalanceKick to it, 5 s quiet, gathering goes on; the kicked player: "removed to balance the teams", room marked bad, searches again (`online::mm_host_gone(.., true)`). The room is not hidden for the kick. |
+| F7 | COVERED, one open fact | frontend3.cpp `majority_winner` with n = all players of the room (`session::member_count()`), h = n / 2. Note: the rule text says "other members", but only n = all players gives scenario 6 (2 players, 1 vote each -> random) and a real majority; implemented so. Gate: `early_vote_allowed` = the current net game has a `*net-games*` record (PS3 `0x499908` returns that record); **the field the PS3 check reads is not given by this spec: still to be named.** |
+| F8 | COVERED | frontend3.cpp `strangers_muted` (online room, phase 1, from `begin` until `open_vote`), voice.cpp `receive` drops the voice of `session::party_stranger` players; party members never; the player's own mute (`voice::muted`) is separate and unchanged. After a match a new gathering mutes strangers again (question 2 still open). |
+| F9 | COVERED | frontend3.cpp `update` (leave branch) + `leave(.., Exit)`: transport host (LAN host, gather host, solo) -> kMsgLeave, its party back to the lobby, strangers search again; a member (LAN too) -> `session::leave_party` (online `drop_out_of_party`; LAN: transport closed, UDP host of its own); a leader inside a stranger's room -> kMsgPartyLeave {party id} relayed by the host (PS3 0x108), leaves 0.3 s later; its members `mm_leave_to_leader` (room left, transport back to the leader, lobby). The host only logs a member's kMsgLeave now. |
+| F10 | COVERED (owner decision PS3) | online.cpp `on_host_lost` (transport host lost), MEMBER_LEFT of the host, kMsgLeave from a stranger host ("Host Asked to leave the room") -> `mm_host_gone` -> next frame "HOST %s LEFT", room left, then alone / leader: own party + `matchmaking::on_host_left(true)` (NET_SM 19, criteria 1; a leader waits up to 10 s for `party_missing()` members to come back); party member: transport back to the leader, waits in 19. The party room is now kept while in a matchmaking room (`join_succeeded`), so party ids, colours and the leader are known there. In-match host handling unchanged. |
+| F11 | COVERED | online.cpp `create_room` (party, team 0 -> 1 or 2 at random), `party_team_pick` (joined a party: the team with fewer members by member data +9, tie random, NPD+0x114, republish), `party_owner_tick` (after the link to the party owner was up once, 5 s without it: "Couldn't talk to the party host", party room left, own party when it hosted us; first contact keeps 20 s). |
+
+Not possible without a new online call: none needed. All PS3 messages travel as session messages (transport) or
+room events; the ABI and the online program are unchanged.
+
+Remaining differences from PS3: no distance / region in the criteria (no location on PC) and no party-size penalty in
+the room score (fullest room instead); the slot reservation is the RPCN join + transport admit, so a player is briefly a
+room member before a ping or fit refusal; F7's record field; F8 re-mute after a match; a leader that drops out after a
+refused list join leaves its members without a host (no party migration on PC: they get the host-lost path); a leader
+not admitted after its party was told to follow leaves the members in that room on their own.

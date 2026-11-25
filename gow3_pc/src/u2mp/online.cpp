@@ -63,12 +63,14 @@ constexpr uint64_t kNetInfo = 0x104f1c8;      // PS3 0xf1fa48
 constexpr uint64_t kNpd = 0x11474f8;          // NetPlayerData
 constexpr uint64_t kNgm = 0x113b760;          // NetGameManager
 constexpr uint64_t M_SEARCH_DONE = 0xa8, M_SEARCH_RESULT = 0xac;   // read by PAGE_MULTIPLAYER_JOIN 0x609640
-constexpr uint64_t NI_VERSION = 0x00, NI_ERROR = 0x1c, NI_MODE = 0x2c4;
+constexpr uint64_t NI_VERSION = 0x00, NI_MODE = 0x2c4;
 constexpr uint64_t NPD_TEAM = 0x114;          // custom game team preference 1 / 2 (PS3 NetPlayerData+211)
 constexpr uint64_t fButtonJoin = 0x6095d0;    // BUTTON_MULTIPLAYER_JOIN (PS3 0x4655b0), intact but SearchRoom
 constexpr uint64_t fPopPage = 0x5cc6f0;
 constexpr uint32_t kPageJoin = 0xe8d59d98;    // PAGE_MULTIPLAYER_JOIN
 static_assert(sid("PAGE_MULTIPLAYER_JOIN") == kPageJoin, "page id");
+constexpr uint32_t kPageJoining = 0x1af4bdd2;   // PAGE_MULTIPLAYER_JOINING (PS4 0x609790)
+static_assert(sid("PAGE_MULTIPLAYER_JOINING") == kPageJoining, "page id");
 // NET_SM values
 enum : int32_t { kServerLobby = 16, kChooseHostJoin = 18, kUpdate = 26, kReset = 27, kReplay = 28, kResults = 29,
                  kRoundResults = 30 };
@@ -97,7 +99,9 @@ constexpr size_t kBlobSize = 48;                     // member bin 0x59 (PS3 0x4
 constexpr double kJoinTimeout = 20.0, kCreateTimeout = 15.0, kSwitchDelay = 0.3, kRttLogPeriod = 10.0;
 // online message ops (session message type session::kOnlineMessage)
 enum : uint8_t { kOpFollowRoom = 1,     // leader -> party: {u64 room id}: I joined that room, come along
-                 kOpPromote = 2 };      // leader -> party: {u64 room id, npid}: that player leads now (PS3 GrantRoomOwner)
+                 kOpPromote = 2,        // leader -> party: {u64 room id, npid}: that player leads now (PS3 GrantRoomOwner)
+                 kOpPartyIn = 3,        // leader -> party: {u8 ok}: the whole party is in the custom game room (PS3 0x10e)
+                 kOpJoinResult = 4 };   // member -> leader: {u8 ok}: joining the custom game room (PS3 0x10d)
 // Presence data (RPCN presence of this game, what friends' lists read): "U2MP", what we do, which room.
 // Version 1 is the first 32 bytes; version 2 (48 bytes) adds what the PS3 friends list and friend card show
 // (spec parity-b-menus.md 5); version 3 (80 bytes) adds the career stats PAGE_MULTIPLAYER's friends ticker shows
@@ -221,11 +225,20 @@ struct Member {
     uint16_t id = 0;
     std::string npid, name;
     uint64_t party = 0;   // the party room id its member data 0x59 names (+0), 0 none
+    uint8_t team = 0;     // the team preference its member data names (+9): 1 or 2, 0 none
+    double joined_at = 0; // when it joined while we were in the room (0: it was there before us)
 };
 uint64_t blob_party(const U2oMember &m) {
     uint64_t party = 0;
     if (m.bin_len >= 8) std::memcpy(&party, m.bin, 8);
     return party;
+}
+uint8_t blob_team(const U2oMember &m) {
+    const uint8_t t = m.bin_len >= 10 ? m.bin[9] : 0;
+    return t == 1 || t == 2 ? t : 0;
+}
+Member member_of(const U2oMember &m, double joined_at = 0) {
+    return Member{m.id, std::string(m.npid, strnlen(m.npid, 20)), m.name, blob_party(m), blob_team(m), joined_at};
 }
 struct Room {
     uint64_t id = 0;
@@ -293,8 +306,22 @@ uint64_t waiting_room = 0;
 bool following_leader = false; // the old host closes on purpose (session.cpp host_change_expected)
 net::Address switch_owner{};
 double switch_at = 0;          // the leader switches its transport once the follow went out
+double switch_admit = 20.0;    // the admit limit of that switch
 double next_rtt_log = 0, next_blob_check = 0;
 double join_page_deadline = 0;  // reached a host from the join list: no follow in 3 s -> back to PAGE_MULTIPLAYER
+double admit_limit = kJoinTimeout;  // the owner must let us in this long after the link to it is up (PS3 10 s / 6 s)
+bool admit_armed = false;       // the admit limit runs (the link to the owner came up)
+bool joining_page = false;      // PAGE_MULTIPLAYER_JOINING is up for a join from the list (PS3 0x465808)
+bool party_in_wait = false;     // member: the leader tells when the whole party is in its custom game room
+double party_in_deadline = 0;
+double party_wait_since = 0;    // leader: the custom game lobby waits for the party to be in the match room
+std::string party_owner_tracked;   // member: the party owner whose link is watched (PS3 party state 6)
+bool party_owner_seen_up = false;
+double party_owner_down_since = 0;
+bool host_gone_pending = false; // a stranger's matchmaking room is over for us (mm_host_gone), done next frame
+bool host_gone_bad = false;
+std::string host_gone_why;
+bool leave_to_leader_pending = false;
 int32_t last_net_state = -1;
 bool in_match = false;
 bool start_hidden = false;      // the leader pressed Start Match: the party room is hidden until the match runs
@@ -333,11 +360,19 @@ constexpr double kBoardTimeout = 10;   // PS3's limit on its stats storage reque
 constexpr int kMaxScorePosts = 4;      // PS3's score post slots
 
 // stranger matchmaking (PORT-MATCHMAKING.md 3.3)
-enum class Mm { Idle, Searching, Joining, Creating, Hosting, Joined, Failed };
+// Checking: the room is joined and the link to its owner comes up; then the ping check of the pass (PS3 state 7)
+// and only then the transport (and the party) goes to the owner.
+enum class Mm { Idle, Searching, Joining, Checking, Creating, Hosting, Joined, Failed, NoRoom };
 Mm mm_state = Mm::Idle;
 uint64_t mm_search_req = 0;
 uint32_t mm_playlist_index = 0;
 std::vector<uint64_t> mm_bad_rooms;   // rooms that did not work out this session (PS3: dead-peer ring 0x4e8978)
+MmCriteria mm_criteria;               // the pass running
+std::vector<U2oRoomExt> mm_found;     // its search result: the next room is picked from it (PS3 state 6)
+uint64_t mm_room_id = 0;              // the room being joined / checked
+bool mm_lead_party = false;           // that join takes our party along
+double mm_check_deadline = 0;         // the link to its owner must come up by then
+constexpr double kMmAdmit = 6.0, kListAdmit = 10.0, kPartyHostLost = 5.0, kPartyInWait = 25.0;
 
 // host migration / promote (PORT-MATCHMAKING.md 3.7)
 bool migrating = false;
@@ -478,9 +513,7 @@ void take_room(Room &r, const U2oRoom &src, uint32_t kind) {
     r.lobby_started = false;
     r.blob_sent = false;
     r.members.clear();
-    for (uint32_t i = 0; i < src.member_count && i < U2O_MAX_MEMBERS; ++i)
-        r.members.push_back(Member{src.members[i].id, npid_text(src.members[i].npid), src.members[i].name,
-                                    blob_party(src.members[i])});
+    for (uint32_t i = 0; i < src.member_count && i < U2O_MAX_MEMBERS; ++i) r.members.push_back(member_of(src.members[i]));
 }
 bool in_room(const Room &r, const std::string &npid) {
     for (const Member &m : r.members)
@@ -574,6 +607,11 @@ uint64_t create_room(uint32_t kind) {
     };
     uint32_t attr_count = 9;
     if (kind == kKindMatchmaking) attrs[attr_count++] = {A_TIER, 0, uint32_t(session::rank()), nullptr};
+    if (kind == kKindParty && G<int32_t>(kNpd + NPD_TEAM) == 0) {
+        // PS3 party machine state 1: no team preference yet -> 1 or 2 at random, published with the member data
+        G<int32_t>(kNpd + NPD_TEAM) = 1 + std::rand() % 2;
+        log("online: party: team preference %d picked at random", G<int32_t>(kNpd + NPD_TEAM));
+    }
     const auto blob = member_blob();
     U2oCreate c{};
     c.max_slot = kMaxSlot;
@@ -655,41 +693,130 @@ void own_party(const char *why) {
     waiting_host = false;
     switch_at = 0;
     host_npid = my_npid;
-    if (mm_state == Mm::Joined || mm_state == Mm::Joining) mm_state = Mm::Failed;   // matchmaking searches again
     session::online_reopen(&link, nullptr);
 }
 
-void switch_to_owner(const net::Address &owner, uint64_t room) {
+// `admit`: how long the owner may take to let us in once the link to it is up (PS3 reservation deadline: 10 s for a
+// custom game, 6 s in matchmaking); the link itself has kJoinTimeout.
+void switch_to_owner(const net::Address &owner, uint64_t room, double admit = kJoinTimeout) {
     waiting_host = true;
     waiting_room = room;
     host_deadline = now() + kJoinTimeout;
+    admit_limit = admit;
+    admit_armed = false;
     const Peer *p = peer_at(owner);
     host_npid = p ? p->npid : std::string();
     session::online_reopen(&link, &owner);
 }
 
-void join_succeeded(const Pending &p, const U2oRoom &src) {
-    const uint32_t kind = p.room_kind ? p.room_kind : kKindCustom;
-    // The rooms we were in are left: the transport goes to the new room's owner.
-    if (party_room.id && party_room.id != src.room_id) leave_room(party_room, "joined another room");
-    if (match_room_.id && match_room_.id != src.room_id) leave_room(match_room_, "joined another room");
-    Room &r = kind == kKindParty ? party_room : match_room_;
-    take_room(r, src, kind);
-    log_room("joined", r);
-    for (uint32_t i = 0; i < src.member_count && i < U2O_MAX_MEMBERS; ++i) connect_member(src.members[i], src.my_id, r.id);
-    const Member *owner = r.member(r.owner_id);
-    if (!owner || owner->npid.empty()) {
-        log("online: room %llx has no owner in its member list: leaving it", (unsigned long long)r.id);
-        leave_room(r, "no owner");
-        own_party("join failed");
-        if (top_page_id() == kPageJoin) search_failed();
+const Member *party_owner() {
+    return party_room.id && !party_room.owned() ? party_room.member(party_room.owner_id) : nullptr;
+}
+
+// ---- PAGE_MULTIPLAYER_JOINING for a join from the list (PS3 0x465808 / 0x4661e0) -------------------------
+// Failure: the page pops by itself on 0x10e {0} and NET_SM becomes 18; no message box (PS3).
+void join_page_fail(const char *why) {
+    log("online: joining failed (%s): PAGE_MULTIPLAYER_JOINING pops, NET_SM 18", why);
+    joining_page = false;
+    join_page_deadline = 0;
+    session::online_party_in(false);
+}
+
+// A player whose game join failed drops out of its party (PS3 party "leave" flag, owner decision): the party room
+// is left when others are in it, and this PC hosts a party of its own.
+void drop_out_after_failed_join(const char *why) {
+    if (party_room.id && party_room.members.size() > 1) leave_room(party_room, why);
+    own_party(why);
+}
+
+// ---- stranger matchmaking: picking a room of the pass (PS3 0x4b0a58 state 6) -----------------------------
+constexpr int kTierSpan = 20;   // rank badges
+
+bool mm_bad(uint64_t room) { return std::find(mm_bad_rooms.begin(), mm_bad_rooms.end(), room) != mm_bad_rooms.end(); }
+
+void mm_pick() {
+    const int party = std::max(1, session::member_count());
+    const U2oRoomExt *best = nullptr;
+    for (const U2oRoomExt &x : mm_found) {
+        const int free_slots = int(x.max_slot) - int(x.cur_members);
+        const int dr = int(x.int_attr[A_TIER - A_KEY]) - session::rank();
+        const bool close_rank = dr <= kTierSpan && dr >= -kTierSpan;
+        if (mm_bad(x.room_id) || free_slots < party || room_by_id(x.room_id)) continue;
+        if (mm_criteria.rank_only && !close_rank) continue;
+        // PS3 scored by distance (no location on PC: every room is at distance 0); the fullest room wins, so
+        // players gather.
+        if (!best || x.cur_members > best->cur_members) best = &x;
+    }
+    if (!best) {
+        log("online: matchmaking: criteria %d: no room to join", mm_criteria.pass);
+        mm_state = Mm::NoRoom;
         return;
     }
+    const auto blob = member_blob();
+    const uint64_t id = api.join_room(best->room_id, blob.data(), uint32_t(blob.size()), 0);
+    log("online: matchmaking: *********** Joining Room %s %u players (room %llx, party of %d): request %llu",
+        best->owner_name, unsigned(best->cur_members), (unsigned long long)best->room_id, party, (unsigned long long)id);
+    if (!id) {
+        mm_bad_rooms.push_back(best->room_id);
+        mm_pick();
+        return;
+    }
+    mm_room_id = best->room_id;
+    mm_lead_party = session::is_host() && party > 1;
+    request(id, Pending{Req::JoinMatchmaking, best->room_id, kKindMatchmaking, mm_lead_party, "join (matchmaking)"});
+    mm_state = Mm::Joining;
+}
+
+// The room being joined did not work out (join refused, no room for the party, owner unreachable, too slow, not
+// admitted): mark it bad, leave it, pick the next room of the same pass.
+void mm_room_failed(const char *why) {
+    if (mm_state != Mm::Joining && mm_state != Mm::Checking) return;
+    log("online: matchmaking: room %llx: %s; next room", (unsigned long long)mm_room_id, why);
+    if (mm_room_id) mm_bad_rooms.push_back(mm_room_id);
+    if (Room *r = room_by_id(mm_room_id)) leave_room(*r, why);
+    if (waiting_host || switch_at) own_party(why);
+    mm_room_id = 0;
+    mm_pick();
+}
+
+// The transport did not reach the room owner (link dead, not in time, not admitted in time).
+void owner_not_reached(const char *why) {
+    if (mm_state == Mm::Checking && waiting_room && waiting_room == mm_room_id) {
+        mm_room_failed(why);
+        return;
+    }
+    if (Room *r = room_by_id(waiting_room)) leave_room(*r, why);
+    if (joining_page) {   // PS3 "Joining Request timed out": the page below again, and the player leaves its party
+        log("online: Joining Request timed out (%s)", why);
+        join_page_fail(why);
+        drop_out_after_failed_join(why);
+        return;
+    }
+    own_party(why);
+    if (top_page_id() == kPageJoin) search_failed();
+}
+
+// ---- party team auto-pick (PS3 party machine state 5 -> 6) --------------------------------------------------
+void party_team_pick() {
+    int on[3] = {0, 0, 0};
+    for (const Member &m : party_room.members)
+        if (m.npid != my_npid && m.id != party_room.my_id) on[m.team] += 1;
+    const int team = on[1] < on[2] ? 1 : on[2] < on[1] ? 2 : 1 + std::rand() % 2;
+    G<int32_t>(kNpd + NPD_TEAM) = team;
+    log("online: party: %d member(s) on team 1, %d on team 2: our team is %d", on[1], on[2], team);
+    publish_blob(party_room, true);
+}
+
+void back_to_multiplayer_page();
+
+// The transport (and the party, when we lead one) goes to the owner of room `r`.
+void go_to_owner(const Room &r, uint32_t kind, bool lead_party, double admit) {
+    const Member *owner = r.member(r.owner_id);
+    if (!owner) return;
     const net::Address addr = address_of(peer_index(owner->npid, true));
     log("online: the room owner is %s (%s): the transport joins it", owner->name.c_str(), owner->npid.c_str());
-    publish_blob(r, true);
     following_leader = false;
-    if (p.lead_party) {
+    if (lead_party) {
         // PS3: the leader's party followed through member data +0 / mailbox; here a session message,
         // then this PC switches once it went out.
         std::vector<uint8_t> b{session::kOnlineMessage, kOpFollowRoom, 0, 0, 0, 0, 0, 0, 0, 0, uint8_t(kind)};
@@ -699,10 +826,68 @@ void join_succeeded(const Pending &p, const U2oRoom &src) {
             (unsigned long long)r.id);
         switch_owner = addr;
         switch_at = now() + kSwitchDelay;
+        switch_admit = admit;
         waiting_room = r.id;
     } else {
-        switch_to_owner(addr, r.id);
+        switch_to_owner(addr, r.id, admit);
     }
+}
+
+void join_succeeded(const Pending &p, const U2oRoom &src) {
+    const uint32_t kind = p.room_kind ? p.room_kind : kKindCustom;
+    // The rooms we were in are left: the transport goes to the new room's owner. A matchmaking room is a match
+    // room beside the party room (PS3 keeps the party session while matchmaking): the party room stays.
+    if (party_room.id && party_room.id != src.room_id && kind != kKindMatchmaking) leave_room(party_room, "joined another room");
+    if (match_room_.id && match_room_.id != src.room_id) leave_room(match_room_, "joined another room");
+    Room &r = kind == kKindParty ? party_room : match_room_;
+    take_room(r, src, kind);
+    log_room("joined", r);
+    for (uint32_t i = 0; i < src.member_count && i < U2O_MAX_MEMBERS; ++i) connect_member(src.members[i], src.my_id, r.id);
+    const bool mm_join = p.kind == Req::JoinMatchmaking;
+    const bool list_join = p.kind == Req::JoinList && kind == kKindCustom;
+    const Member *owner = r.member(r.owner_id);
+    if (!owner || owner->npid.empty()) {
+        log("online: room %llx has no owner in its member list: leaving it", (unsigned long long)r.id);
+        if (mm_join) {
+            mm_room_failed("no owner");
+            return;
+        }
+        leave_room(r, "no owner");
+        if (list_join && joining_page) {
+            join_page_fail("the room has no owner");
+            drop_out_after_failed_join("join failed");
+            return;
+        }
+        own_party("join failed");
+        if (top_page_id() == kPageJoin) search_failed();
+        return;
+    }
+    // PS3 reservation 0x100 / 0x101: the owner's slot manager refused a party that does not fit. Here the room
+    // service's own member count at our join decides (fresh, not the search data): every member of our party
+    // needs a slot.
+    const int party = p.lead_party ? std::max(1, session::member_count()) : 1;
+    if ((mm_join || list_join) && int(src.max_slot) - int(src.member_count) < party - 1) {
+        log("online: room %llx has %d free slot(s) after our join, the party needs %d more: refused",
+            (unsigned long long)r.id, int(src.max_slot) - int(src.member_count), party - 1);
+        if (mm_join) {
+            mm_room_failed("no room for the party");
+        } else {
+            leave_room(r, "no room for the party");
+            join_page_fail("no room for the party");   // PS3 state 9 refusal: no party leave
+        }
+        return;
+    }
+    publish_blob(r, true);
+    if (kind == kKindParty && !r.owned()) party_team_pick();
+    if (mm_join) {
+        // PS3 state 7: the link to the owner first, then the ping check of the pass (mm_check_tick).
+        mm_state = Mm::Checking;
+        mm_room_id = r.id;
+        mm_lead_party = p.lead_party;
+        mm_check_deadline = now() + kJoinTimeout;
+        return;
+    }
+    go_to_owner(r, kind, p.lead_party, list_join ? kListAdmit : p.kind == Req::JoinLeader && kind == kKindMatchmaking ? kMmAdmit : kJoinTimeout);
     if (kind == kKindParty && p.kind == Req::JoinList && top_page_id() == kPageJoin) {
         // A party: back to PAGE_MULTIPLAYER (PS3 party join 0x4c4704 ended in NET_SM 18).
         guest<void(U2MP_GUEST *)(void *)>(fPopPage)(image.at<void>(addr::menu_manager));
@@ -997,42 +1182,140 @@ bool join_by_id(uint64_t room, uint32_t kind, const std::string &owner, unsigned
     return true;
 }
 
-// ---- stranger matchmaking (PS3 0x4b0a58 states 19 -> 5 -> 6 -> 7 / 3, PORT-MATCHMAKING.md 3.3) ------
-constexpr int kTierSpan = 20;   // rank badges
+// ---- stranger matchmaking (PS3 0x4b0a58 states 19 -> 5 -> 6 -> 7 -> 9 / 3, PORT-MATCHMAKING.md 3.3) --
+// State 5: the search result is listed, then state 6 picks a room from it (mm_pick). A failed search counts as a
+// pass without rooms.
 void mm_search_done(const U2oEvent &e) {
     if (mm_state != Mm::Searching) return;
-    const int party = std::max(1, session::member_count());
-    const U2oRoomExt *best = nullptr;
-    for (uint32_t i = 0; i < e.count && e.rooms; ++i) {
+    mm_found.clear();
+    if (e.error) log("online: matchmaking: criteria %d: search failed: error %d (%s)", mm_criteria.pass, e.error, error_hint(e.error));
+    for (uint32_t i = 0; i < e.count && e.rooms && !e.error; ++i) {
         const U2oRoomExt &x = e.rooms[i];
-        const int free_slots = int(x.max_slot) - int(x.cur_members);
-        const bool bad = std::find(mm_bad_rooms.begin(), mm_bad_rooms.end(), x.room_id) != mm_bad_rooms.end();
-        log("online: matchmaking: room %llx of %s, %u/%u players%s", (unsigned long long)x.room_id, x.owner_name,
-            unsigned(x.cur_members), unsigned(x.max_slot), bad ? " (failed before)" : free_slots < party ? " (no room for us)" : "");
-        if (bad || free_slots < party || room_by_id(x.room_id)) continue;
-        // PS3 0x4b13ac scored by distance and tier (no location on PC): rooms whose tier (0x51) is within
-        // kTierSpan of ours come first, then the fullest room wins, so players gather.
-        const int dr = int(x.int_attr[A_TIER - A_KEY]) - session::rank();
-        const bool close_rank = dr <= kTierSpan && dr >= -kTierSpan;
-        const int db = best ? int(best->int_attr[A_TIER - A_KEY]) - session::rank() : 0;
-        const bool best_near = best && db <= kTierSpan && db >= -kTierSpan;
-        if (!best || (close_rank && !best_near) || (close_rank == best_near && x.cur_members > best->cur_members)) best = &x;
+        // PS3 "%s, %i players %8.2f km": no location on PC, so no distance either
+        log("online: matchmaking: %s, %u players (room %llx, %u slots, rank %u)%s", x.owner_name, unsigned(x.cur_members),
+            (unsigned long long)x.room_id, unsigned(x.max_slot), unsigned(x.int_attr[A_TIER - A_KEY]),
+            mm_bad(x.room_id) ? " (failed before)" : "");
+        mm_found.push_back(x);
     }
-    if (e.error || !best) {
-        log("online: matchmaking: %s: creating a room of our own (PS3 GATHER)", e.error ? "search failed" : "no room to join");
-        mm_state = create_room(kKindMatchmaking) ? Mm::Creating : Mm::Failed;
+    mm_pick();
+}
+
+// State 7 on PC: the room is joined (the room service hands out the owner's address), the link to the owner comes
+// up, its round trip time is checked against the pass's ping limit, and only then the transport (and the party)
+// goes to the owner, which must let us in within 6 s (the PS3 reservation window of matchmaking).
+void mm_check_tick(double t) {
+    if (mm_state != Mm::Checking || waiting_host || switch_at) return;
+    const Room *r = room_by_id(mm_room_id);
+    const Member *owner = r ? r->member(r->owner_id) : nullptr;
+    if (!r || !owner) {
+        mm_room_failed("the room is gone");
         return;
     }
-    const auto blob = member_blob();
-    const uint64_t id = api.join_room(best->room_id, blob.data(), uint32_t(blob.size()), 0);
-    log("online: matchmaking: joining %s's room %llx (%u/%u players, party of %d): request %llu", best->owner_name,
-        (unsigned long long)best->room_id, unsigned(best->cur_members), unsigned(best->max_slot), party, (unsigned long long)id);
-    if (!id) {
-        mm_state = Mm::Failed;
+    uint32_t rtt_us = 0;
+    const int s = api.peer_state(owner->npid.c_str(), &rtt_us);
+    if (s == U2O_PEER_DEAD) {
+        mm_room_failed("the link to the owner failed");
         return;
     }
-    request(id, Pending{Req::JoinMatchmaking, best->room_id, kKindMatchmaking, session::is_host() && party > 1, "join (matchmaking)"});
-    mm_state = Mm::Joining;
+    if (s != U2O_PEER_ACTIVE) {
+        if (t >= mm_check_deadline) mm_room_failed("the link to the owner did not come up");
+        return;
+    }
+    const uint32_t rtt = rtt_us / 1000, limit = mm_criteria.ping_limit_ms;
+    log("online: matchmaking: retRtt = %u ms to %s (criteria %d limit %u ms)", rtt, owner->name.c_str(), mm_criteria.pass, limit);
+    if (limit && rtt > limit) {
+        log("online: matchmaking: PingCriteria failed %u < %u", limit, rtt);
+        mm_room_failed("too slow for this criteria");
+        return;
+    }
+    go_to_owner(*r, kKindMatchmaking, mm_lead_party, kMmAdmit);
+}
+
+// ---- a stranger's matchmaking room is over for us (PS3 0x4b0a58 state 17 -> 35 -> 19) ------------------------
+void mm_host_gone_now() {
+    host_gone_pending = false;
+    if (!started) return;
+    const uint64_t room = match_room_.kind == kKindMatchmaking && !match_room_.owned() ? match_room_.id : 0;
+    log("online: matchmaking: ********* HOST %s LEFT *********** (%s)", host_npid.c_str(), host_gone_why.c_str());
+    if (room) {
+        if (host_gone_bad) mm_bad_rooms.push_back(room);
+        leave_room(match_room_, host_gone_why.c_str());
+    }
+    mm_state = Mm::Idle;
+    mm_room_id = 0;
+    const Member *leader = party_owner();
+    if (leader && leader->npid != host_npid && !leader->npid.empty()) {
+        // a party member waits for its leader (PS3: it stays in the party room and waits in 19 for 0x113)
+        log("online: matchmaking: back to the party leader %s, waiting for it", leader->name.c_str());
+        switch_to_owner(address_of(peer_index(leader->npid, true)), 0);
+        matchmaking::on_host_left(false);
+    } else {
+        own_party(host_gone_why.c_str());
+        matchmaking::on_host_left(true);
+    }
+}
+
+void mm_leave_to_leader_now() {
+    leave_to_leader_pending = false;
+    if (!started) return;
+    if (match_room_.kind == kKindMatchmaking && !match_room_.owned()) leave_room(match_room_, "the party leader left matchmaking");
+    mm_state = Mm::Idle;
+    const Member *leader = party_owner();
+    if (leader && !leader->npid.empty() && leader->npid != host_npid) {
+        log("online: matchmaking: the party leader %s left matchmaking: back to it", leader->name.c_str());
+        switch_to_owner(address_of(peer_index(leader->npid, true)), 0);
+    } else if (host_npid != my_npid) {
+        own_party("the party leader left matchmaking");
+    }
+}
+
+// ---- the party owner must stay reachable (PS3 party machine state 6, 5 s) ----------------------------------
+void party_owner_tick(double t) {
+    const Member *o = party_owner();
+    if (!o || o->npid.empty()) {
+        party_owner_tracked.clear();
+        return;
+    }
+    if (party_owner_tracked != o->npid) {
+        party_owner_tracked = o->npid;
+        party_owner_seen_up = false;
+        party_owner_down_since = 0;
+    }
+    const int i = peer_index(o->npid, false);
+    const bool up = i >= 0 && peers[size_t(i)].state == U2O_PEER_ACTIVE;
+    if (up) {
+        party_owner_seen_up = true;
+        party_owner_down_since = 0;
+        return;
+    }
+    if (!party_owner_seen_up) return;   // the first contact has kJoinTimeout (waiting_host)
+    if (!party_owner_down_since) party_owner_down_since = t;
+    if (t - party_owner_down_since <= kPartyHostLost) return;
+    log("online: party: Couldn't talk to the party host %s (no link for %.0f s): leaving the party", o->name.c_str(),
+        kPartyHostLost);
+    const bool our_host = host_npid == o->npid;
+    party_owner_tracked.clear();
+    leave_room(party_room, "the party host is unreachable");
+    if (our_host) own_party("the party host is unreachable");
+}
+
+// ---- the custom game lobby waits for the party (PS3 0x465da0 states 10 / 16, 0x4c3b58) ---------------------
+bool party_in_match_room() {
+    for (const std::string &npid : session::member_npids())
+        if (!in_room(match_room_, npid)) return false;
+    return true;
+}
+
+void send_party_in(bool ok) {
+    session::send_message(-1, {session::kOnlineMessage, kOpPartyIn, uint8_t(ok ? 1 : 0)});
+}
+
+void abort_custom_lobby(const char *why) {
+    log("online: A party member couldn't talk to the game host (%s): the party goes back to PAGE_MULTIPLAYER", why);
+    send_party_in(false);
+    party_wait_since = 0;
+    leave_room(match_room_, "a party member could not join");
+    session::online_match_abort();
 }
 
 // ---- host migration (PS3 0x4409c4 / 0x440478 -> RoomOwnerChanged -> listener slot 6) ---------------
@@ -1235,17 +1518,27 @@ void on_event(const U2oEvent &e) {
         if (e.error || !e.room) {
             log("online: joining room %llx failed: error %d (%s)", (unsigned long long)p.room, e.error, error_hint(e.error));
             if (p.kind == Req::JoinList) {
-                if (top_page_id() == kPageJoin) search_failed();
+                // PS3 "sceNpMatching2JoinRoom() failed": the page below again, no box, and the player leaves its party
+                if (joining_page) {
+                    join_page_fail("sceNpMatching2JoinRoom() failed");
+                    drop_out_after_failed_join("could not join the game");
+                } else if (top_page_id() == kPageJoin) {
+                    search_failed();
+                }
             } else if (p.kind == Req::JoinMatchmaking) {
-                mm_bad_rooms.push_back(p.room);
-                mm_state = Mm::Failed;   // frontend3 searches again
+                mm_room_failed("join refused");
             } else if (p.kind == Req::Rejoin) {
                 own_party("could not rejoin the room after the promotion");
             } else if (p.kind == Req::JoinLeader) {
+                // PS3 JOINING 12 -> 14 JoinRoom refused: leave the party, back to the page below, NET_SM 18 (no box)
                 leave_room(party_room, "could not follow the leader");
                 leave_room(match_room_, "could not follow the leader");
                 own_party("could not follow the leader");
-                G<uint8_t>(kNetInfo + NI_ERROR) = 1;   // the multiplayer page shows the network error box
+                back_to_multiplayer_page();
+            } else if (p.kind == Req::JoinMatchMember) {
+                // PS3 0x10d {0}: "I did not reach the game host"; the leader takes the whole party back (abort)
+                log("online: could not join the leader's custom game room: telling the leader");
+                session::send_message(0, {session::kOnlineMessage, kOpJoinResult, 0});
             }
             break;
         }
@@ -1266,8 +1559,10 @@ void on_event(const U2oEvent &e) {
             const uint64_t id = api.leave_room(e.room->room_id);
             request(id, Pending{Req::Message, e.room->room_id, 0, false, "leave (closed room)"});
             if (p.kind == Req::JoinMatchmaking) {
-                mm_bad_rooms.push_back(e.room->room_id);
-                mm_state = Mm::Failed;   // frontend3 searches again
+                mm_room_failed("the room is closed");
+            } else if (joining_page) {   // PS3: JoinRoom refused on a closed room, no box
+                join_page_fail("the game has already started");
+                drop_out_after_failed_join("could not join the game");
             } else {
                 notice("That game has already started.");
                 if (top_page_id() == kPageJoin) search_failed();
@@ -1275,7 +1570,6 @@ void on_event(const U2oEvent &e) {
             break;
         }
         join_succeeded(p, *e.room);
-        if (p.kind == Req::JoinMatchmaking) mm_state = Mm::Joined;
         break;
     case U2O_EV_ROOM_LEFT:
         log("online: left room %llx: error %d (%s)", (unsigned long long)e.room_id, e.error, error_hint(e.error));
@@ -1322,12 +1616,16 @@ void on_event(const U2oEvent &e) {
         log("online: %s (%s) joined %s room %llx as member %u", e.member->name, npid_text(e.member->npid).c_str(),
             r ? kind_name(r->kind) : "an unknown", (unsigned long long)e.room_id, unsigned(e.member->id));
         if (!r) break;
-        r->members.push_back(Member{e.member->id, npid_text(e.member->npid), e.member->name, blob_party(*e.member)});
+        r->members.push_back(member_of(*e.member, now()));
         connect_member(*e.member, r->my_id, r->id);
-        if (r == &party_room) publish_blob(party_room, false);   // +0 party room id once the party has 2
+        if (r == &party_room) {
+            log("online: party: %s joined party", e.member->name);
+            publish_blob(party_room, false);   // +0 party room id once the party has 2
+        }
         if (r == &match_room_ && r->owned() && r->lobby_started) {
             set_state53(*r, 1);   // a joiner can miss the lobby-started flag sent before it joined
             log("online: custom game room %llx: state 0x53 re-sent after a member joined", (unsigned long long)r->id);
+            if (r->kind == kKindCustom) send_party_in(true);   // a late party member waits for it (members not waiting ignore it)
         }
         break;
     }
@@ -1346,6 +1644,11 @@ void on_event(const U2oEvent &e) {
             log("online: the owner of room %llx left; the new owner comes with the room update (U2O_EV_ROOM_UPDATED)",
                 (unsigned long long)r->id);
         const std::string npid = npid_text(e.member->npid);
+        // PS3 state 17: the host of a stranger's matchmaking room went away (not in a match: in-match host loss is the
+        // match's own business).
+        if (r == &match_room_ && r->kind == kKindMatchmaking && !r->owned() && !in_match && !npid.empty() &&
+            npid == host_npid && npid != my_npid)
+            mm_host_gone("the host left the room", false);
         const bool elsewhere = (r != &party_room && in_room(party_room, npid)) || (r != &match_room_ && in_room(match_room_, npid));
         if (!elsewhere && !npid.empty()) {
             api.peer_disconnect(npid.c_str());
@@ -1383,7 +1686,10 @@ void on_event(const U2oEvent &e) {
         }
         if (Room *r = e.member ? room_by_id(e.room_id) : nullptr)
             for (Member &m : r->members)
-                if (m.id == e.member->id) m.party = blob_party(*e.member);   // the matchmaking rows' party colours
+                if (m.id == e.member->id) {
+                    m.party = blob_party(*e.member);   // the matchmaking rows' party colours
+                    m.team = blob_team(*e.member);     // the team auto-pick of a party joiner
+                }
         break;
     case U2O_EV_PEER_ADDRESS: {
         const std::string npid = npid_text(e.npid);
@@ -1410,9 +1716,7 @@ void on_event(const U2oEvent &e) {
             if (o && o->npid == npid) {
                 log("online: the link to the room owner died before the transport reached it: leaving room %llx",
                     (unsigned long long)waiting_room);
-                if (r) leave_room(*r, "owner unreachable");
-                own_party("room owner unreachable");
-                if (top_page_id() == kPageJoin) search_failed();
+                owner_not_reached("room owner unreachable");
             }
         }
         break;
@@ -1539,8 +1843,25 @@ void room_state() {
     }
     if (match_room_.owned()) {
         if (s == kServerLobby && !match_room_.lobby_started) {   // 0x465fe8: the lobby task started
+            // PS3 0x465da0 state 16: a custom game room says "lobby" (0x53 = 1) only once every party member is in
+            // it (states 3 / 10, 0x4c3b58); a member that cannot join takes the whole party back.
+            const bool custom = match_room_.kind == kKindCustom;
+            if (custom && !party_in_match_room()) {
+                const double t = now();
+                if (!party_wait_since) {
+                    party_wait_since = t;
+                    log("online: custom game room %llx: waiting for the party to join it", (unsigned long long)match_room_.id);
+                }
+                if (t - party_wait_since >= kJoinTimeout) abort_custom_lobby("not in the room in time");
+                return;
+            }
+            party_wait_since = 0;
             match_room_.lobby_started = true;
             set_state53(match_room_, 1);
+            if (custom) {
+                log("online: custom game room %llx: the whole party is in", (unsigned long long)match_room_.id);
+                send_party_in(true);
+            }
         }
         if (ended && match_room_.state53 != 0) set_state53(match_room_, 0);   // Leave::Enter 0x445e9c
     }
@@ -1635,25 +1956,43 @@ void frame() {
         create_party_req = create_room(kKindParty);
         if (!create_party_req) next_party_try = t + 5;   // refused locally: not again every frame
     }
+    if (host_gone_pending) mm_host_gone_now();
+    if (leave_to_leader_pending) mm_leave_to_leader_now();
     if (switch_at && t >= switch_at) {
         switch_at = 0;
         log("online: transport switch: the party was told, joining the owner of room %llx", (unsigned long long)waiting_room);
-        switch_to_owner(switch_owner, waiting_room);
+        switch_to_owner(switch_owner, waiting_room, switch_admit);
+    }
+    mm_check_tick(t);
+    if (waiting_host && !admit_armed) {
+        // PS3: the reservation answer is due a fixed time after the link to the owner is up (10 s / 6 s)
+        const int i = peer_index(host_npid, false);
+        if (i >= 0 && peers[size_t(i)].state == U2O_PEER_ACTIVE) {
+            admit_armed = true;
+            host_deadline = std::min(host_deadline, t + admit_limit);
+        }
     }
     if (waiting_host && t >= host_deadline) {
-        log("online: the room owner was not reached in %.0f s: leaving room %llx", kJoinTimeout, (unsigned long long)waiting_room);
-        if (Room *r = room_by_id(waiting_room)) leave_room(*r, "owner not reached");
-        own_party("room owner not reached");
-        if (top_page_id() == kPageJoin) search_failed();
+        log("online: the room owner did not let us in in time (%s): leaving room %llx",
+            admit_armed ? "admit limit after the link was up" : "link limit", (unsigned long long)waiting_room);
+        owner_not_reached("room owner not reached");
     }
     if (join_page_deadline && t >= join_page_deadline) {
         join_page_deadline = 0;
-        if (top_page_id() == kPageJoin) {   // the host is not in its custom game lobby: we are in its party now
+        const uint32_t top = top_page_id();
+        if (top == kPageJoin || joining_page) {   // the host is not in its custom game lobby: we are in its party now
             log("online: no follow from the host (not in its lobby): back to PAGE_MULTIPLAYER, NET_SM 18");
-            guest<void(U2MP_GUEST *)(void *)>(fPopPage)(image.at<void>(addr::menu_manager));
-            G<int32_t>(kNetState) = kChooseHostJoin;
+            joining_page = false;
+            back_to_multiplayer_page();
         }
     }
+    if (party_in_wait && t >= party_in_deadline) {   // the leader went quiet: PS3 members time out themselves
+        party_in_wait = false;
+        log("online: no word from the leader about the custom game room in %.0f s: back to the page below", kPartyInWait);
+        if (match_room_.kind == kKindCustom && !match_room_.owned()) leave_room(match_room_, "the leader went quiet");
+        session::online_party_in(false);
+    }
+    party_owner_tick(t);
     if (match_waiting && t >= match_deadline) {
         match_waiting = false;
         log("online: no answer to the match room create in %.0f s: Start Match goes on without a room", kCreateTimeout);
@@ -1707,17 +2046,26 @@ bool create_match_room() {
 
 uint64_t match_room() { return started ? match_room_.id : 0; }
 
-void follow_match_room(uint64_t room_id) {
-    if (!started || !room_id) return;
+bool follow_match_room(uint64_t room_id) {
+    if (!started || !room_id) return false;
+    joining_page = false;   // a join from the list ends here: the host's follow came
+    join_page_deadline = 0;
     if (match_room_.id == room_id) {
         log("online: the leader's match room %llx: already a member", (unsigned long long)room_id);
-        return;
+        return false;
     }
     const auto blob = member_blob();
     const uint64_t id = api.join_room(room_id, blob.data(), uint32_t(blob.size()), 0);
     log("online: joining the leader's match room %llx as a member (the transport stays): request %llu",
         (unsigned long long)room_id, (unsigned long long)id);
+    if (!id) return false;
     request(id, Pending{Req::JoinMatchMember, room_id, kKindCustom, false, "join (party follow)"});
+    // PS3 JOINING 12: wait for the leader's 0x10e (kOpPartyIn) once the whole party is in a custom game room;
+    // a matchmaking follow (the vote's match) needs no such wait.
+    if (G<int32_t>(kNetInfo + NI_MODE) != 2) return false;
+    party_in_wait = true;
+    party_in_deadline = now() + kPartyInWait;
+    return true;
 }
 
 void on_host_reached(uint32_t net_id) {
@@ -1730,7 +2078,11 @@ void on_host_reached(uint32_t net_id) {
         waiting_host = false;
         log("online: transport switch done: reached the owner of room %llx, our net id %u", (unsigned long long)waiting_room,
             net_id);
-        if (top_page_id() == kPageJoin) join_page_deadline = now() + 3.0;   // the host's follow normally comes first
+        if (mm_state == Mm::Checking && waiting_room == mm_room_id) {
+            mm_state = Mm::Joined;   // PS3 state 9 granted -> JoinRoom -> 17 CLIENT_LOBBY (the host's messages follow)
+            log("online: matchmaking: the host of room %llx let us in", (unsigned long long)mm_room_id);
+        }
+        if (top_page_id() == kPageJoin || joining_page) join_page_deadline = now() + 3.0;   // the host's follow normally comes first
     }
 }
 
@@ -1753,6 +2105,12 @@ void on_transport_closed(const char *why) {
     promote_at = 0;
     mm_state = Mm::Idle;
     mm_search_req = 0;
+    mm_room_id = 0;
+    mm_found.clear();
+    joining_page = party_in_wait = false;
+    join_page_deadline = party_wait_since = 0;
+    host_gone_pending = leave_to_leader_pending = false;
+    party_owner_tracked.clear();
 }
 
 void on_message(uint8_t from, const uint8_t *data, size_t size) {
@@ -1772,6 +2130,15 @@ void on_message(uint8_t from, const uint8_t *data, size_t size) {
         }
         const uint32_t kind = size >= 10 && (data[9] == kKindParty || data[9] == kKindMatchmaking) ? data[9] : kKindCustom;
         request(id, Pending{Req::JoinLeader, room, kind, false, "join (follow the leader)"});
+    } else if (data[0] == kOpPartyIn && size >= 2 && from == 0 && !session::is_host()) {
+        if (!party_in_wait && data[1]) return;   // not waiting (a late "in", or a follow that needed no wait)
+        party_in_wait = false;
+        log("online: the leader says the party is %s the custom game room", data[1] ? "in" : "not in");
+        if (!data[1] && match_room_.kind == kKindCustom && !match_room_.owned()) leave_room(match_room_, "the party went back");
+        session::online_party_in(data[1] != 0);
+    } else if (data[0] == kOpJoinResult && size >= 2 && session::is_host()) {
+        if (!data[1] && match_room_.owned() && match_room_.kind == kKindCustom && party_wait_since)
+            abort_custom_lobby("a member's join was refused");
     } else if (data[0] == kOpPromote && size >= 9 && from == 0 && !session::is_host()) {
         std::memcpy(&promote_room, data + 1, 8);
         promote_target.assign(reinterpret_cast<const char *>(data + 9), std::min<size_t>(size - 9, 16));
@@ -1840,20 +2207,31 @@ bool select_join(int row) {
     const bool leader = session::is_host();
     const int party = leader ? std::max(1, session::member_count()) : 1;
     const int free_slots = int(x.max_slot) - int(x.cur_members);
+    const uint32_t kind = room_kind(x) == kKindParty ? kKindParty : kKindCustom;
+    // PS3 SELECT_JOIN_GAME 0x465808: "Selected game %i", "room %s"; the Joining page comes at once (NET_SM 12 here:
+    // the intact page 0x609790 then waits for 0x10e, which the host's follow or a failure posts).
+    log("online: Selected game %d, room %llx of %s (Distance to Host: no location on PC)", row, (unsigned long long)x.room_id,
+        x.owner_name);
+    if (kind == kKindCustom) {
+        show_page(kPageJoining);
+        G<int32_t>(kNetState) = 12;
+        joining_page = true;
+    }
     // PS3 RESERVE_SLOTS (mailbox 0x100 / 0x101 with the host's slot manager 0x4da278): the whole party
-    // must fit; simplified to the room data of the search.
+    // must fit; first by the room data of the search, then by the room service's count at our join (join_succeeded).
     if (free_slots < party) {
         log("online: join refused: room %llx has %d free slot(s), the party needs %d", (unsigned long long)x.room_id,
             free_slots, party);
+        if (joining_page) join_page_fail("no room for the party");
         return true;
     }
     const auto blob = member_blob();
     const uint64_t id = api.join_room(x.room_id, blob.data(), uint32_t(blob.size()), 0);
-    const uint32_t kind = room_kind(x) == kKindParty ? kKindParty : kKindCustom;
     log("online: joining %s room %llx of %s (%d free slot(s), party of %d): request %llu", kind_name(kind),
         (unsigned long long)x.room_id, x.owner_name, free_slots, party, (unsigned long long)id);
     if (!id) {
-        if (top_page_id() == kPageJoin) search_failed();
+        if (joining_page) join_page_fail("the join request was refused");
+        else if (top_page_id() == kPageJoin) search_failed();
         return true;
     }
     request(id, Pending{Req::JoinList, x.room_id, kind, leader && party > 1, "join"});
@@ -1870,6 +2248,12 @@ void member_data_changed() {
 // ---- host migration -------------------------------------------------------------------------------
 bool on_host_lost() {
     if (!started || link_state != U2O_READY) return false;
+    // PS3 0x4b0a58 state 17 (owner decision F10): the host of a stranger's matchmaking room went away outside a
+    // match: leave the room and search again (a party member goes back to its leader). No lobby host migration.
+    if (match_room_.kind == kKindMatchmaking && !match_room_.owned() && !in_match) {
+        mm_host_gone("the host is gone", false);
+        return true;
+    }
     log("online: host migration disabled: the host left, the session ends");
     return false;
 }
@@ -2094,16 +2478,20 @@ int invite_count() { return started ? int(invites.size()) : 0; }
 // ---- stranger matchmaking -------------------------------------------------------------------------
 bool mm_online() { return started && link_state == U2O_READY && world != 0; }
 
-void mm_begin(uint32_t playlist, uint32_t playlist_index) {
+void mm_begin(uint32_t playlist, uint32_t playlist_index, const MmCriteria &criteria) {
     if (!mm_online()) return;
     mm_playlist_index = playlist_index;
+    mm_criteria = criteria;
     if (match_room_.owned() && match_room_.kind == kKindMatchmaking) {   // our gather room is still open
         mm_state = Mm::Hosting;
         return;
     }
     // PS3 0x4b0f48 -> SearchRoom 0x4d3c50: 0x4C == key (version + playlist), open rooms only. PS3
-    // matchmaking rooms carry no 0x52, so the key is the only filter.
+    // matchmaking rooms carry no 0x52, so the key is the only filter. The criteria row's distance and region
+    // parts need a location, which PC has not: every pass searches the same rooms, the rank and ping parts differ.
     const uint32_t key = match_key(playlist_index);
+    log("online: matchmaking: criteria %d: ping limit %u ms, %s (no distance on PC)", criteria.pass, criteria.ping_limit_ms,
+        criteria.rank_only ? "rank within 20" : "any rank");
     U2oSearch s{};
     s.flag_filter = kFlagHidden | kFlagClosed;
     s.ints[0] = U2oIntFilter{1, 0, A_KEY, key};
@@ -2121,17 +2509,77 @@ void mm_begin(uint32_t playlist, uint32_t playlist_index) {
     mm_state = Mm::Searching;
 }
 
+void mm_create() {
+    if (!mm_online()) return;
+    log("online: matchmaking: no room after the last criteria: creating a room of our own (PS3 GATHER)");
+    mm_state = create_room(kKindMatchmaking) ? Mm::Creating : Mm::Failed;
+}
+
 int mm_step() {
     switch (mm_state) {
     case Mm::Idle: return kMmIdle;
-    case Mm::Searching: case Mm::Joining: case Mm::Creating: return kMmBusy;
+    case Mm::Searching: case Mm::Joining: case Mm::Checking: case Mm::Creating: return kMmBusy;
     case Mm::Hosting: return kMmHosting;
     case Mm::Joined: return kMmJoined;
+    case Mm::NoRoom: return kMmNoRoom;
     default: return kMmFailed;
     }
 }
 
-void mm_reset() { mm_state = Mm::Idle; }
+void mm_reset() {
+    mm_state = Mm::Idle;
+    mm_room_id = 0;
+    mm_found.clear();
+}
+
+int mm_pending_members() {
+    if (!match_room_.owned() || match_room_.kind != kKindMatchmaking) return 0;
+    const double t = now();
+    int n = 0;
+    for (const Member &m : match_room_.members)
+        if (m.id != match_room_.my_id && !m.npid.empty() && m.joined_at && t - m.joined_at < kMmAdmit &&
+            !session::net_id_of(m.npid))
+            ++n;
+    return n;
+}
+
+int party_missing() {
+    if (!started || !party_room.owned()) return 0;
+    int n = 0;
+    for (const Member &m : party_room.members)
+        if (m.id != party_room.my_id && !m.npid.empty() && !session::net_id_of(m.npid)) ++n;
+    return n;
+}
+
+bool host_in_party() {
+    if (!started || session::is_host() || host_npid.empty() || host_npid == my_npid) return true;
+    return party_room.id && in_room(party_room, host_npid);
+}
+
+bool party_member() { return started && party_room.id && !party_room.owned(); }
+
+void mm_host_gone(const char *why, bool bad_room) {
+    if (!started || host_gone_pending) return;
+    host_gone_pending = true;
+    host_gone_bad = bad_room;
+    host_gone_why = why ? why : "?";
+}
+
+void mm_leave_to_leader() {
+    if (started) leave_to_leader_pending = true;
+}
+
+bool drop_out_of_party(const char *why) {
+    if (!started) return false;
+    log("online: leaving the party (%s)", why);
+    mm_state = Mm::Idle;
+    start_hidden = false;
+    if (match_room_.id) leave_room(match_room_, why);
+    if (party_room.id && !party_room.owned()) leave_room(party_room, why);
+    else if (party_room.id && party_room.members.size() > 1) leave_room(party_room, why);
+    own_party(why);
+    return true;
+}
 
 void mm_research() {
     if (match_room_.owned() && match_room_.kind == kKindMatchmaking) {

@@ -199,6 +199,7 @@ bool Gate::update(const int16_t *pcm, int samples) {
 #include <mutex>
 #include <string>
 
+#include "frontend3.h"
 #include "gamenet.h"
 #include "net.h"
 #include "session_api.h"
@@ -421,6 +422,9 @@ void receive(uint8_t slot, const uint8_t *data, size_t size) {
     }
     if (!enabled() || !playback || !speaker || speaker >= kMaxSpeakers || speaker == session::local_id() || mutes[speaker])
         return;
+    // PS3 0x4b0700 / 0x4b0868: players outside our party stay muted while the matchmaking room gathers and are
+    // unmuted when the vote opens. A mute of its own, apart from the player's choice (muted() does not show it).
+    if (matchmaking::strangers_muted() && session::party_stranger(speaker)) return;
     const uint16_t sequence = uint16_t(data[1] | data[2] << 8);
     heard_ms[speaker].store(now_ms(), std::memory_order_relaxed);
     std::lock_guard<std::mutex> lock(play_mutex);

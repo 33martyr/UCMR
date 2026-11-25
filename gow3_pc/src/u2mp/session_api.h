@@ -36,5 +36,10 @@ std::string local_name();
 int rank();   // this PC's rank badge index (profile panel)
 // Players in the party, this PC included; 0 when not in one.
 int member_count();
+// Online: the player with this net id is on our transport but not in our party (a stranger of a matchmaking room).
+bool party_stranger(uint32_t net_id);
+// A member leaves its party and hosts a party of its own (Leave Matchmaking as a member, PS3 party "leave" flag):
+// online the rooms are left (online::drop_out_of_party), on LAN the transport is closed and opened again as host.
+void leave_party();
 
 }  // namespace u2mp::session

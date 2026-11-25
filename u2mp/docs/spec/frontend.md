@@ -145,7 +145,13 @@ Declared in `frontend3.h`, namespace `u2mp::matchmaking`:
   slot of the sender (a client only ever hears from slot 0, the host).
 - `void on_peer_joined(uint8_t slot);` called by session.cpp on the host when a peer joins while online.
 - `void on_migrated(bool host);` called by session.cpp `online_migrated` when matchmaking goes on under a
-  new room host.
+  new room host (not reached while lobby host migration is off).
+- `void on_host_left(bool host);` called by online.cpp when a stranger's matchmaking room ended for us (3.4.13).
+- `bool strangers_muted();` asked by voice.cpp (3.4.13).
+
+Also used (2026-11-25, spec parity-f 7): `online::mm_begin(playlist, index, MmCriteria)`, `mm_create()`,
+`mm_pending_members()`, `party_missing()`, `host_in_party()`, `party_member()`, `own_party_id()`, `match_room()`,
+`mm_host_gone(why, bad)`, `mm_leave_to_leader()`, `active()`; `session::mm_balance_slot()`, `session::leave_party()`.
 
 Declared in `u2mp_internal.h`: `void install_frontend3(int &installed);`.
 
@@ -246,10 +252,20 @@ Times (clock ticks, 300 per second):
 | start countdown | 3000 | 10 s |
 | create at | 600 | 2 s left |
 | tip period | 2400 | 8 s |
-| online gather | 6000 | 20 s |
-| online gather max | 12000 | 40 s |
-| research min | 13500 | 45 s |
+| online gather reference | 2400 | 8 s after the room was made (PS3 0x4b0a58 state 16), never restarted |
+| online gather wait by N other players | 300 x {0, 4, 8, 15, 20, 25, 30, 35, 40, 50, 0}[N] | PS3 timing data 0xb40710 |
+| balance kick quiet | 1500 | 5 s without a gather decision after a balance kick |
+| party back wait | 3000 | a leader waits up to 10 s for its party to come back before searching |
+| leader leave delay | 90 | 0.3 s between telling the party (0x19) and leaving a stranger's room |
+| criteria pause | 300 + rand() % 601 | random 1..3 s between two search passes |
 | retry after failure | 900 | 3 s |
+
+Criteria rows (PS3 data table `0xb25ab071`, one row per search pass): rows of 0x14 bytes from the table's record
+pointer (+8), s32 ping limit in ms at row+0x08 (0 or less: none), the status text the status line shows for tip index
+= pass. Passes: the table's row count, at most 3, 1 when the table is missing.
+
+Minimum players (owner rule 2026-11-25, also issue 104): 2 in every game mode, 1 for a playlist of co-op types only
+(4, 8, 9, 12); `UNCHARTED_U2MP_MM_MIN` (1..10) overrides it for tests.
 
 Session messages (type byte first; multi-byte fields little-endian, unaligned):
 
@@ -260,18 +276,21 @@ Session messages (type byte first; multi-byte fields little-endian, unaligned):
 | 0x12 | vote options | s16 game a, s16 game b, u32 ticks left (9 bytes total) | host -> all / slot |
 | 0x13 | vote | u8 choice (0 or 1) | voter -> host; host -> others |
 | 0x14 | result | s16 game, u32 ticks left (7 bytes total) | host -> all / slot |
-| 0x15 | leave | none | anyone |
+| 0x15 | leave | none | anyone (a member's leave is only logged by the host) |
 | 0x16 | leader back | none | host -> all |
 | 0x17 | starting | none (frontend6) | host -> all |
+| 0x18 | balance kick | none | host -> one stranger (F6: removed to balance the teams) |
+| 0x19 | party leave | u64 party room id (9 bytes total) | a party leader in a stranger's room -> host; the host relays it to every other slot (PS3 0x108) |
 
 ### 3.4 Behaviour
 
 #### 3.4.1 Machine state (host memory, not game memory)
 
-The file keeps, per process: running, leave requested, ready sent, created, gather start time,
-ready-slot bit set (32 bits), next tip time, last logged NET_SM (initially -1), last seen phase,
-online room flag, research time, retry time. "Reset the machine" means: all of these to false/0, except
-the last logged NET_SM to -1. The machine starts in the reset state. Every reset also forgets the last
+The file keeps, per process: running, leave requested, ready sent, created, gather start time (LAN),
+gather players (LAN), ready-slot bit set (32 bits), next tip time, last logged NET_SM (initially -1), last seen phase,
+online room flag, gather reference (online, 0 unset), gather count last logged (initially -1), retry time, criteria
+pass, party wait start, quiet-until time, strangers muted, leave-at time, follow-leader-out. "Reset the machine"
+means: all of these to false/0, except the last logged NET_SM and the gather count to -1. The machine starts in the reset state. Every reset also forgets the last
 logged NET_SM, so the `NET_SM` log line (3.4.6) prints again on the next update.
 
 Common operations (named here only to describe them once):
@@ -285,9 +304,13 @@ Common operations (named here only to describe them once):
 - **set net game(i)**: guest SetNetGame(base+0x113b760, i, NULL, 10).
 - **ensure page**: if the top page is not `0xe35f0f1a`, guest START_MATCHMAKING(NULL, NULL, NULL).
 - **begin(host)**: reset the machine; then running = true, gather start = clock, ready bits = 1 (bit 0),
-  next tip = clock + 2400; clear vote block; netInfo+0x34 = 1; u8 netInfo+0x08 = 1 if host else 0;
-  last seen phase = 1; log `matchmaking: started (%s)` with "host" or "member".
-- **open vote(a, b, t)**: vote block = active 1, closed 0, pad 0, mine -1, game0 a, game1 b, counts 0;
+  next tip = clock + 2400; clear vote block; netInfo+0x34 = 1; u8 netInfo+0x08 = 1 if host and not
+  `online::mm_online()`, else 0 (online the host first searches: the status line shows the criteria row text until
+  the host has its own room); last seen phase = 1; strangers muted = `online::mm_online()`; log
+  `matchmaking: started (%s)` with "host" or "member".
+- **open vote(a, b, t)**: first, if strangers muted: strangers muted = false and log
+  `matchmaking: the vote opens: players outside the party are heard now` (PS3 0x4b0700 / 0x4b0868).
+  Then vote block = active 1, closed 0, pad 0, mine -1, game0 a, game1 b, counts 0;
   netInfo+0x34 = 2; set deadline(t); then `frontend6::preload_net_game(true, true, true)`.
 - **apply result(g, t)**: vote+0x01 = 1; set net game(g); netInfo+0x34 = 3; set deadline(t); then
   `frontend6::preload_net_game(true, true, false)`. Other vote fields unchanged.
@@ -316,8 +339,15 @@ Common operations (named here only to describe them once):
 5. log `matchmaking: vote between net games %d and %d (%u players)` with a, b,
    `session::member_count()` as unsigned.
 
-**End the vote.**
-1. Winner = option 0 if count0 > count1; option 1 if count1 > count0; on a tie rand() % 2 (rand() is
+**Majority** (PS3 0x4afe48): n = `session::member_count()` (every player of the room), h = n / 2. Option 0 when
+count0 > h, else option 1 when count1 > h, else rand() % 2 when count0 + count1 == n and both counts are h, else none.
+Checked by the host every update while phase is 2, only when the current net game has a `*net-games*` record
+(table, records pointer non-NULL, 0 <= ngm+0x1ca0 < count; PS3 0x499908 - the PS3 record field is still open,
+parity-f 7).
+
+**End the vote(winner)** (winner from the majority, or none at the deadline).
+1. With a majority winner: log `matchmaking: the vote is decided by a majority (%d / %d of %d players)`. Else
+   winner = option 0 if count0 > count1; option 1 if count1 > count0; on a tie rand() % 2 (rand() is
    only called on a tie).
 2. g = the winner's game (low 16 bits, signed).
 3. apply result(g, 3000) (includes SetNetGame and the preload).
@@ -326,10 +356,12 @@ Common operations (named here only to describe them once):
 
 #### 3.4.3 Leave
 
-**Leave(tell)**, in this order:
+**Leave(tell, how)** (how: lobby (default), to leader, drop out), in this order:
 1. If tell: send(reply target, [0x15]).
-2. log `matchmaking: leaving%s` with "" when tell, else " (the party left)".
-3. `online::mm_leave()`.
+2. log `matchmaking: leaving%s` with " and leaving the party" (drop out), " (our leader left)" (to leader), "" when
+   tell, else " (the party left)".
+3. u8 netInfo+0x1c = 0. Drop out: `session::leave_party()`; to leader: `online::mm_leave_to_leader()`; lobby:
+   `online::mm_leave()`.
 4. Clear vote block; s32 netInfo+0x34 = 0; u32 netInfo+0x20 = 0; NET_SM = 18.
 5. If the top page is `0x719e9fec`, pop. Then (re-read) if the top page is `0xe35f0f1a`, pop.
 6. Reset the machine.
@@ -357,7 +389,7 @@ NULL `ev`: nothing. Else switch on the u32 at ev+0:
 - **0 (closed)**: do nothing when "created" is set, or s32 netInfo+0x34 == 3, or the top page is
   `0x719e9fec`. Otherwise: reset the machine; clear vote block; set net game(-1); guest `0x64e810()`.
 - **1 (shown)**: register the yes callback.
-- **2 or 3 (back)**: read NET_SM first. If "leave requested" is not set: ask "Leave Matchmaking?",
+- **2 or 3 (back)**: read NET_SM first. If neither "leave requested" nor a leave-at time is set: ask "Leave Matchmaking?",
   then u8 ev+0x10 = 1 (even if the ask set "leave requested" because the box pointer was NULL).
   If it is set: u8 ev+0x10 = 0 when NET_SM is 19 or 18, else 1.
 - **6 (update)**: see 3.4.6.
@@ -384,42 +416,55 @@ In this order:
 4. Last seen phase = phase.
 5. If "created": stop.
 6. If u8 netInfo+0x1c is nonzero: leave(false); stop.
-7. If "leave requested": leave(true); stop.
-8. host = `session::is_host()`. If not running: begin(host).
-9. **Member** (not host):
+7. If follow-leader-out: leave(false, to leader); stop. If a leave-at time is set: when (s32)(clock - it) >= 0
+   leave(true); stop either way.
+8. If "leave requested" (PS3 events 2/3, F9): host -> leave(true); else online off, or the transport host is in our
+   party (`online::host_in_party()`), or `online::party_member()` -> leave(true, drop out); else when
+   `online::own_party_id()` is non-zero (we lead a party inside a stranger's room): send(0, [0x19, party id u64]),
+   log `matchmaking: the party leader leaves matchmaking: the party is told (0x108)`, leave requested = false,
+   leave-at = clock + 90; else leave(true). Stop.
+9. host = `session::is_host()`. If not running: begin(host).
+10. **Member** (not host):
    - If "ready sent" is false and st is 19 or 17: send(0, [0x11]); ready sent = true.
    - If s32 netInfo+0x34 (read now, after a possible begin) is 1: tip step: if (s32)(clock - next tip)
      >= 0: next tip = clock + 2400; guest DC lookup(`0xb25ab071`); if the table is not NULL and its
      count > 0: s32 at `0x113ddac` = (that value + 1) % count.
    - stop.
-10. **Host**, by st:
-    - **19**: if `online::mm_online()`:
-      - call `online::mm_step()`:
-        - Idle (0): if (s32)(clock - retry time) >= 0: playlist = u32 NetPlayerData+0x104; log
-          `matchmaking: looking for players online (playlist 0x%x)` with it; `online::mm_begin(playlist)`.
-          (Retry time is not changed here; this repeats every update while Idle.)
-        - Hosting (2): online room = true; gather start = clock; research time =
-          clock + 13500 + (rand() % 15) * 300; NET_SM = 16.
-        - Joined (3): nothing.
-        - Failed (4): `online::mm_reset()`; retry time = clock + 900.
-        - other (Busy and unknown values): nothing.
-      - Not online: NET_SM = 16.
-    - **16** (gather): ready = number of set bits in the ready bits; waited = clock - gather start (u32).
-      - Online room set: players = `session::member_count()`; minimum = environment variable
-        `UNCHARTED_U2MP_MM_MIN` read with atoi, used when 1..10, else 2; missing variable = 2. The
-        variable is read once per process, the first time this branch runs, and the value is kept.
-        Start the vote when players >= 10, or when players >= minimum and (waited >= 6000 and
-        ready >= players, or waited >= 12000). Otherwise, if players < minimum and
-        (s32)(clock - research time) >= 0: log
-        `matchmaking: %d player(s) after %u s: looking for another room` with players and waited/300
-        (integer division); `online::mm_research()`; online room = false; NET_SM = 19.
-      - No online room: start the vote when waited >= 3000, or waited >= 900 and
-        ready >= `session::member_count()`. (member_count is only queried once waited >= 900 and
-        < 3000.)
-    - **20**: if s32 netInfo+0x34 is 2 and ticks left is 0: end the vote. Else if it is 3 and ticks left
-      <= 600: created = true; log `matchmaking: starting net game %d` with the s16 at ngm+0x1ca0;
-      `session::create_match()`; then s32 netInfo+0x34 = 3 (written after create_match, which may clear
-      it).
+11. **Host**, by st:
+    - **19**: if `online::mm_online()`, call `online::mm_step()`:
+      - Idle (0): nothing before (s32)(clock - retry time) >= 0. When `online::party_missing()` > 0 (after a lost
+        host the party comes back): the first time party wait = clock and log
+        `matchmaking: waiting for %d party member(s) to come back before searching`; nothing until 3000 ticks
+        passed. Then party wait = 0 and the **search pass**: the criteria rows (3.3); ping limit = row[pass]+0x08
+        when the row exists and the value is > 0, else 0; rank only = pass 0; when the row exists, s32 at
+        `0x113ddac` = pass; u8 netInfo+0x08 = 0; log `matchmaking: Searching Game with Criteria %d of %d (playlist
+        0x%x, index %d, %d criteria row(s))`; `online::mm_begin(playlist, index, {pass, limit, rank only})`.
+      - NoRoom (5): `online::mm_reset()`; if pass + 1 < passes: pass += 1, retry time = clock + 300 + rand() % 601,
+        log `matchmaking: next criteria %d in %u ms`; else `online::mm_create()` (GATHER).
+      - Hosting (2): online room = true; gather reference = clock + 2400 when it is 0; gather count logged = -1;
+        pass = 0; u8 netInfo+0x08 = 1; NET_SM = 16.
+      - Joined (3): nothing.
+      - Failed (4): `online::mm_reset()`; pass = 0; retry time = clock + 900.
+      - other (Busy): nothing.
+      Not online: u8 netInfo+0x08 = 1; NET_SM = 16.
+    - **16** (gather):
+      - Online room set (PS3 state 16): N = `session::member_count()` - 1 (0..10); due = gather reference +
+        300 x wait[N] (3.3). When N differs from the gather count logged: log `matchmaking: %d other player(s)
+        connected: Game starting in %d seconds` (whole seconds left, 0 when past) and remember N. Nothing before
+        due, before the quiet-until time, or while `online::mm_pending_members()` > 0 (an open reservation). Then,
+        when N + 1 >= the minimum (3.3): if N is odd and the playlist is not co-op only, `session::mm_balance_slot()`;
+        a slot > 0: log `matchmaking: %d players for a team playlist: slot %d came alone, removed to balance the
+        teams`, send(slot, [0x18]), quiet-until = clock + 1500, stop; otherwise start the vote. Below the minimum:
+        log `matchmaking: time out %d players: leaving the room, searching again`; `online::mm_research()`; online
+        room = false; gather reference = 0; pass = 0; retry time = clock; NET_SM = 19.
+      - No online room (LAN, no strangers can come): ready = number of set bits; waited = clock - gather start. On
+        a change of `session::member_count()` (more players: gather start = clock, log `matchmaking: %d player(s)
+        joined: gather timer restarted`). Below the minimum and online: log `matchmaking: %d player(s) after %u s:
+        searching again`, retry time = clock, NET_SM 19. Else start the vote when waited >= 3000, or waited >= 900
+        and ready >= players.
+    - **20**: phase 2 with a majority (3.4.2): end the vote(winner). Else phase 2 and ticks left 0: end the vote.
+      Else phase 3 and ticks left <= 600: created = true; log `matchmaking: starting net game %d` with the s16 at
+      ngm+0x1ca0; `session::create_match()`; then s32 netInfo+0x34 = 3.
     - any other st (17, 18, 21, ...): nothing.
 
 #### 3.4.7 Leader back-out callbacks `0x5eba80`, `0x5eba30`
@@ -470,12 +515,28 @@ data[0]:
   += 1. Then, on the host (whether counted or not), send(-1, [0x13, data[1]], except = from).
 - **0x14**: member only and size >= 7: apply result(s16 at +1, u32 at +3); log
   `matchmaking: net game %d chosen` with the s16.
-- **0x15**: ignore when not running and the top page is not `0xe35f0f1a`. Host with online room set:
-  log `matchmaking: a player left matchmaking`, nothing else. Host otherwise: leave(true) (so the host
-  sends 0x15 to all). Member: leave(false) only when from == 0.
+- **0x15**: ignore when not running and the top page is not `0xe35f0f1a`. Host: log
+  `matchmaking: a player left matchmaking (slot %u)`, nothing else (a member leaves the party by itself, F9).
+  Member, from == 0: when `online::host_in_party()` is false (a stranger hosts): log `matchmaking: Host Asked to
+  leave the room %llx` (`online::match_room()`) and `online::mm_host_gone("the host left matchmaking", false)`;
+  else leave(false) (our leader left matchmaking, PS3 0x108).
 - **0x16**: member only, from == 0, and (`frontend6::popup_up()` or the top page is `0x719e9fec`): pop.
 - **0x17**: member only and from == 0: `frontend6::member_starting()`.
+- **0x18**: member only and from == 0: log `matchmaking: removed to balance the teams`;
+  `online::mm_host_gone("removed to balance the teams", true)`.
+- **0x19**: size >= 9 (u64 party id at +1). Host: send(-1, the whole message, except `from`). Member, from == 0,
+  party id non-zero, equal to `online::own_party_id()` and `online::party_member()`: log `matchmaking: our party
+  leader left matchmaking: following it back`; follow-leader-out = true.
 - other types: nothing.
+
+#### 3.4.13 `matchmaking::on_host_left(host)` and `matchmaking::strangers_muted()`
+
+on_host_left (called by online.cpp after a stranger's room ended for us, F10): log `matchmaking: left the room
+(35 -> 19): %s` ("searching again from the first criteria" / "waiting for our leader"); reset the machine; clear
+vote block; netInfo+0x34 = 1; u32 netInfo+0x20 = 0; NET_SM = 19; ensure page.
+
+strangers_muted: running and strangers muted and s32 netInfo+0x34 == 1. voice.cpp drops received voice of
+`session::party_stranger(speaker)` while it is true (F8).
 
 ### 3.5 Install
 

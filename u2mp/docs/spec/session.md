@@ -681,7 +681,7 @@ Client (events for slots other than 0 are ignored):
 - left: if `online::host_change_expected()`: log
   `online: the old host closed the link; following the leader to its new room`, `gamenet::detach(0)`.
   Else if `online::on_host_lost()` (called only now; it may call back into this file before
-  returning): log `party: lost the host; the room's new owner takes over`, detach 0. Else log
+  returning): log `party: lost the host of the matchmaking room; matchmaking searches again`, detach 0. Else log
   `party: lost the host`, detach 0, netInfo+0x1c = 1, host lost = true.
 
 ### 5.12 Net clock
@@ -777,7 +777,7 @@ Nothing unless hosting (active is not checked). mode = s32 netInfo+0x2c4. PS3 0x
      `a party member lacks the map's map pack`, box 0x58d7fbb3 / 0x13cabc15.
   2. Too many: party > 10 for types 0, 1, 2, 3, 5, 6, 7, 10, 11, > 3 for co-op types 4, 8, 9, 12, > 0 for any
      other type -> reason `too many players for the game type`, box 0x4a936499 / 0x13cabc15.
-  3. Too few: party < 2 for type 10, < 1 otherwise -> reason `too few players for the game type`, box
+  3. Too few: party < 1 for a co-op type (4, 8, 9, 12), < 2 for every other type (owner rule 2026-11-25; PS3: 2 only for type 10 and co-op) -> reason `too few players for the game type`, box
      0xb90de2b1 / 0xcca3ca1f. **Deliberate difference**: PS3 needs 2 players for the co-op types 4, 8, 9,
      12; ours starts them with 1 (solo co-op, solocoop.cpp).
   4. Type 10: when every used member is on team 1, or every one on team 2 (team 0 breaks both; no member
@@ -1027,3 +1027,35 @@ Teardown and public calls
 - Missing level package (5.9): the 20 s line is logged once per id in a row: only the last logged id is remembered,
   so a different id in between allows the same id again.
 - Match choice diagnostics (5.14): a `*levels*` table whose records pointer is NULL has no records; the name stays "?".
+
+## Parity group F changes (2026-11-25, spec parity-f-party-mm.md 7)
+
+New interface (session_api.h, frontend3.h, online.h's `u2mp::session` part):
+
+- `bool party_stranger(uint32_t net_id)`: active, online, not our own id, the NpId of that net id is known (`npids`)
+  and `online::in_own_party(npid)` is false.
+- `void leave_party()`: member only (active, not hosting). Online: `online::drop_out_of_party("left matchmaking")`
+  does it (rooms left, `online_reopen` hosts). LAN: log `party: leaving the party (Leave Matchmaking): a party of
+  our own`, detach every slot, close the transport (Bye), clear members, then host on the configured port
+  (`UNCHARTED_U2MP_PORT`, else 27210) or, when that port is taken, on any port; hosting, net id 1, member 0 = us,
+  party session published, sent mode -1, log `party: hosting a party of our own on UDP port %u`. Neither port:
+  log, active = false.
+- `int mm_balance_slot()`: host only, else -1: the slot list (`mm_list`, open slots skipped) sorted stably by the
+  number of listed players sharing the entry's party id (party id 0 counts 1), then party id, then position; the
+  last entry's transport slot when its count is 1 and it is not slot 0 / this PC, else -1.
+- `void online_party_in(bool ok)`: NET_SM 12 -> mailbox 0x10e {ok} (log `party: JOINING gets 0x10e {%u}`), also
+  while hosting (a join from the list). Then, not hosting and !ok: NET_SM 17 -> menu reset, PAGE_MULTIPLAYER,
+  NET_SM 18 (log); the match session is cleared.
+- `void online_match_abort()`: host only: log, match+0x99 = 0, match session cleared, netInfo+0x08 = 0, menu reset,
+  PAGE_MULTIPLAYER, NET_SM 18.
+- `std::vector<std::string> member_npids()`: host only: the NpIds of the used slots 1.. (transport address ->
+  `online::npid_at`), unknown ones left out.
+
+Changed behaviour:
+
+- `on_follow`: `wait` = the follow has 9+ bytes and `online::follow_match_room(room)` returned true. JOINING is
+  shown only when it is not already the top page (a join from the list shows it at the selection). NET_SM 12; with
+  `wait` log `party: waiting in JOINING until the leader says the whole party is in` and no 0x10e (the leader's
+  kOpPartyIn posts it through `online_party_in`); else 0x10e {1} as before.
+- `online_reopen` also clears the net id -> NpId map (`npids`); the next roster / kIds fills it.
+- Start Match "too few" (5.x): co-op types 1, every other type 2 (owner rule).

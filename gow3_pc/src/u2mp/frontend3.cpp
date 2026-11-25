@@ -78,16 +78,22 @@ constexpr int32_t kSmServerVote = 20;
 constexpr int32_t kSmClientVote = 21;
 
 // Clock ticks (300 per second).
-constexpr uint32_t kGatherMin = 900;
-constexpr uint32_t kGatherMax = 3000;
+constexpr uint32_t kGatherMin = 900;          // LAN (no strangers can come): 3 s with everyone ready
+constexpr uint32_t kGatherMax = 3000;         // LAN: 10 s
 constexpr uint32_t kVoteTime = 4500;
 constexpr uint32_t kStartCountdown = 3000;
 constexpr int32_t kCreateAt = 600;
 constexpr uint32_t kTipPeriod = 2400;
-constexpr uint32_t kOnlineGather = 6000;
-constexpr uint32_t kOnlineGatherMax = 12000;
-constexpr uint32_t kResearchMin = 13500;
 constexpr uint32_t kRetryAfterFailure = 900;
+// Online gather (PS3 0x4b0a58 state 16, timing data 0xb40710): the reference is room creation + 8 s and is never
+// restarted; then the wait in whole seconds by the number N of other connected players (index N).
+constexpr uint32_t kGatherReference = 2400;
+constexpr uint8_t kGatherWait[11] = {0, 4, 8, 15, 20, 25, 30, 35, 40, 50, 0};
+constexpr uint32_t kBalanceQuiet = 1500;      // after a balance kick: 5 s for the kicked player to go
+constexpr uint32_t kPartyBackWait = 3000;     // a leader waits up to 10 s for its party to come back before searching
+constexpr uint32_t kLeaveDelay = 90;          // a leader in a stranger's room leaves 0.3 s after telling its party
+constexpr int kCriteriaPasses = 3;            // PS3 criteria rows b25ab071 (status text, ping limit)
+constexpr uint64_t kCriteriaStride = 0x14, kCriteriaPing = 0x08;
 
 // Session message types.
 enum : uint8_t {
@@ -98,6 +104,9 @@ enum : uint8_t {
     kMsgResult = 0x14,
     kMsgLeave = 0x15,
     kMsgLeaderBack = 0x16,
+    // 0x17 is frontend6's "starting"
+    kMsgBalanceKick = 0x18,   // host -> a stranger: removed to balance the teams (PS3 KickoutRoomMember)
+    kMsgPartyLeave = 0x19,    // {u64 party room id}: that party's leader left matchmaking (PS3 0x108); the host relays it
 };
 
 // ---- game memory, little-endian and unaligned-safe ----
@@ -158,15 +167,22 @@ struct Machine {
     bool leave_requested = false;
     bool ready_sent = false;
     bool created = false;
-    uint32_t gather_start = 0;
+    uint32_t gather_start = 0;   // LAN gather
     int gather_players = 0;
     uint32_t ready_bits = 0;     // bit n: transport slot n said it is ready
     uint32_t next_tip = 0;
     int32_t logged_sm = -1;      // NET_SM the last log line showed
     int32_t seen_phase = 0;
     bool online_room = false;    // online: we host a room and gather strangers in it
-    uint32_t research_at = 0;
+    uint32_t gather_ref = 0;     // online: room creation + 8 s (0: not set yet)
+    int gather_seen = -1;        // online: the player count the last "Game starting in" line showed
     uint32_t retry_at = 0;
+    int criteria = 0;            // the search pass (PS3 criteria index 0xf22630)
+    uint32_t party_wait = 0;     // leader: since when it waits for its party to come back (0 none)
+    uint32_t quiet_until = 0;    // no gather decision before (a balance kick runs)
+    bool strangers_muted = false;
+    uint32_t leave_at = 0;       // leader in a stranger's room: leave then (0 none)
+    bool follow_leader_out = false;   // our party's leader left matchmaking: go back to it
 };
 Machine m;
 bool page_installed = false;
@@ -223,12 +239,24 @@ void begin(bool host) {
     m.next_tip = now + kTipPeriod;
     clear_vote();
     set_phase(1);
-    put<uint8_t>(kNetInfo + kInfoCreatedByMe, host ? 1 : 0);
+    // Online the host searches first: the status line shows the criteria row's text until it has a room of its own
+    // (then "created by me" picks the host text).
+    const bool online = online::mm_online();
+    put<uint8_t>(kNetInfo + kInfoCreatedByMe, host && !online ? 1 : 0);
     m.seen_phase = 1;
+    m.strangers_muted = online;
     log("matchmaking: started (%s)", host ? "host" : "member");
 }
 
+// PS3 0x4b0700 (client) / 0x4b0868 (host): the vote opening unmutes every player outside our party.
+void unmute_strangers() {
+    if (!m.strangers_muted) return;
+    m.strangers_muted = false;
+    log("matchmaking: the vote opens: players outside the party are heard now");
+}
+
 void open_vote(int16_t a, int16_t b, uint32_t ticks) {
+    unmute_strangers();
     put<uint8_t>(kVote + 0x00, 1);
     put<uint8_t>(kVote + 0x01, 0);
     put<uint8_t>(kVote + 0x02, 0);
@@ -301,10 +329,33 @@ void start_vote() {
     log("matchmaking: vote between net games %d and %d (%u players)", a, b, unsigned(session::member_count()));
 }
 
-void end_vote() {
+// PS3 0x4afe48 (majority) with n = the players of the room and h = n / 2: a game wins once its count is above h;
+// with both counts h and every vote in (sum n) the winner is random; else none yet (-1).
+int majority_winner() {
+    const int32_t n = session::member_count(), h = n / 2;
     const int32_t c0 = vote_count(0), c1 = vote_count(1);
-    int winner;
-    if (c0 > c1) winner = 0;
+    if (c0 > h) return 0;
+    if (c1 > h) return 1;
+    if (c0 + c1 == n && c0 == h && c1 == h) return std::rand() % 2;
+    return -1;
+}
+
+// The host takes the early end only while the current net game has a record (PS3 0x499908, the current
+// *net-games* record; the record field the PS3 check reads is not named in the spec, see spec F7).
+bool early_vote_allowed() {
+    const uint8_t *table = dc_lookup(kNetGamesTable);
+    if (!table) return false;
+    const int32_t count = get_at<int32_t>(uintptr_t(table));
+    const uint64_t records = get_at<uint64_t>(uintptr_t(table) + 8);
+    const int16_t game = current_net_game();
+    return records && game >= 0 && game < count;
+}
+
+// winner: 0 / 1 decided by the majority, -1 at the deadline (the higher count, a tie at random).
+void end_vote(int winner = -1) {
+    const int32_t c0 = vote_count(0), c1 = vote_count(1);
+    if (winner >= 0) log("matchmaking: the vote is decided by a majority (%d / %d of %d players)", c0, c1, session::member_count());
+    else if (c0 > c1) winner = 0;
     else if (c1 > c0) winner = 1;
     else winner = std::rand() % 2;
     const int16_t game = int16_t(vote_game(winner));
@@ -318,11 +369,18 @@ void end_vote() {
 
 // ---- leaving ----
 
-void leave(bool tell) {
+// How this PC leaves: back to the party lobby (the rooms of matchmaking are left), back to our party's leader
+// (it left matchmaking, PS3 0x108), or out of the party (a member's own Leave Matchmaking).
+enum class Exit { Lobby, ToLeader, DropOut };
+
+void leave(bool tell, Exit how = Exit::Lobby) {
     if (tell) session::send_message(reply_target(), {kMsgLeave});
-    log("matchmaking: leaving%s", tell ? "" : " (the party left)");
+    log("matchmaking: leaving%s", how == Exit::DropOut ? " and leaving the party" : how == Exit::ToLeader ? " (our leader left)"
+                                  : tell ? "" : " (the party left)");
     put<uint8_t>(kNetInfo + kInfoError, 0);
-    online::mm_leave();
+    if (how == Exit::DropOut) session::leave_party();
+    else if (how == Exit::ToLeader) online::mm_leave_to_leader();
+    else online::mm_leave();
     clear_vote();
     set_phase(0);
     put<uint32_t>(kNetInfo + kInfoDeadline, 0);
@@ -377,8 +435,9 @@ void ask_leave() {
 
 // ---- per-frame update (page event 6) ----
 
-// The players a matchmaking room needs before the vote starts: 2 (issue 104: every competitive mode); a playlist of
-// co-op games only (types 4, 8, 9, 12) starts with 1, as solo co-op does outside matchmaking (solocoop.cpp).
+// The players a matchmaking room needs before the vote starts (owner rule, issue 104 and 2026-11-25: PS3 timing,
+// our minimum): 2 in every game mode; a playlist of co-op games only (types 4, 8, 9, 12) starts with 1, as solo
+// co-op does outside matchmaking (solocoop.cpp).
 // UNCHARTED_U2MP_MM_MIN (1..10) overrides it for tests of small online rooms.
 // TODO: (Tha14): attention to this as matchmaking was not fully tested at this point in time
 int matchmaking_min_players() {
@@ -395,41 +454,151 @@ int matchmaking_min_players() {
     return coop_only ? 1 : 2;
 }
 
+// The criteria rows (PS3 data table b25ab071, one row per search pass: status text, ping limit at +8). The pass
+// count is the table's rows, at most 3 (PS3); 1 when the table is missing.
+const uint8_t *criteria_rows(int32_t &count) {
+    count = 0;
+    const uint8_t *rows = dc_lookup(kTipsTable);
+    if (!rows) return nullptr;
+    count = get_at<int32_t>(uintptr_t(rows));
+    const uint64_t records = get_at<uint64_t>(uintptr_t(rows) + 8);
+    if (count <= 0 || !records) {
+        count = 0;
+        return nullptr;
+    }
+    return reinterpret_cast<const uint8_t *>(uintptr_t(records));
+}
+
+int criteria_passes() {
+    int32_t count = 0;
+    criteria_rows(count);
+    return count <= 0 ? 1 : count < kCriteriaPasses ? int(count) : kCriteriaPasses;
+}
+
+// PS3 state 19: "Searching Game with Criteria %i"; the status line shows that row's text (tip index = the pass).
+void start_search_pass() {
+    const uint32_t playlist = get<uint32_t>(kNetPlayerData + kPlaylistId);
+    const int32_t index = playlist_index(playlist);
+    int32_t count = 0;
+    const uint8_t *rows = criteria_rows(count);
+    online::MmCriteria c;
+    c.pass = m.criteria;
+    c.rank_only = m.criteria == 0;
+    if (rows && m.criteria < count) {
+        const int32_t limit = get_at<int32_t>(uintptr_t(rows) + kCriteriaStride * uint64_t(m.criteria) + kCriteriaPing);
+        c.ping_limit_ms = limit > 0 ? uint32_t(limit) : 0;
+        put<int32_t>(kTipIndex, m.criteria);
+    }
+    put<uint8_t>(kNetInfo + kInfoCreatedByMe, 0);
+    log("matchmaking: Searching Game with Criteria %d of %d (playlist 0x%x, index %d, %d criteria row(s))", m.criteria,
+        criteria_passes(), playlist, index, int(count));
+    online::mm_begin(playlist, uint32_t(index >= 0 ? index : 0), c);
+}
+
 void host_start_matchmaking_step() {
     if (!online::mm_online()) {
+        put<uint8_t>(kNetInfo + kInfoCreatedByMe, 1);
         set_net_sm(kSmServerLobby);
         return;
     }
+    const uint32_t now = clock_now();
     switch (online::mm_step()) {
     case online::kMmIdle:
-        if (int32_t(clock_now() - m.retry_at) >= 0) {
-            const uint32_t playlist = get<uint32_t>(kNetPlayerData + kPlaylistId);
-            const int32_t index = playlist_index(playlist);
-            log("matchmaking: looking for players online (playlist 0x%x, index %d)", playlist, index);
-            online::mm_begin(playlist, uint32_t(index >= 0 ? index : 0));
+        if (int32_t(now - m.retry_at) < 0) break;
+        if (const int missing = online::party_missing()) {   // after a lost host: the party comes back to us first
+            if (!m.party_wait) {
+                m.party_wait = now | 1;
+                log("matchmaking: waiting for %d party member(s) to come back before searching", missing);
+            }
+            if (now - m.party_wait < kPartyBackWait) break;
+        }
+        m.party_wait = 0;
+        start_search_pass();
+        break;
+    case online::kMmNoRoom:
+        // PS3 state 6 found nothing: a random 1..3 s, then the next criteria; after the last one GATHER
+        online::mm_reset();
+        if (m.criteria + 1 < criteria_passes()) {
+            ++m.criteria;
+            const uint32_t pause = 300 + uint32_t(std::rand() % 601);
+            m.retry_at = now + pause;
+            log("matchmaking: next criteria %d in %u ms", m.criteria, pause * 10 / 3);
+        } else {
+            online::mm_create();
         }
         break;
-    case online::kMmHosting: {
+    case online::kMmHosting:
         m.online_room = true;
-        const uint32_t now = clock_now();
-        m.gather_start = now;
-        m.gather_players = session::member_count();
-        m.research_at = now + kResearchMin + uint32_t(std::rand() % 15) * 300;
+        if (!m.gather_ref) m.gather_ref = now + kGatherReference;   // room creation + 8 s, never restarted
+        m.gather_seen = -1;
+        m.criteria = 0;
+        put<uint8_t>(kNetInfo + kInfoCreatedByMe, 1);
         set_net_sm(kSmServerLobby);
         break;
-    }
     case online::kMmJoined:
         break;
     case online::kMmFailed:
         online::mm_reset();
-        m.retry_at = clock_now() + kRetryAfterFailure;
+        m.criteria = 0;
+        m.retry_at = now + kRetryAfterFailure;
         break;
     default:
         break;
     }
 }
 
+// Team playlists: the PS3 room size is the playlist's maximum player count, even for every competitive playlist
+// (10) and odd for co-op (3).
+bool playlist_max_even() {
+    std::vector<int32_t> types;
+    if (!playlist_game_types(types) || types.empty()) return true;
+    for (const int32_t t : types)
+        if (t != 4 && t != 8 && t != 9 && t != 12) return true;
+    return false;
+}
+
+// Online gather (PS3 0x4b0a58 state 16): wait by the number N of other connected players from the fixed reference,
+// then enough players -> team balance and the vote; too few -> "time out", leave the room, search from criteria 1.
+void host_gather_online() {
+    const uint32_t now = clock_now();
+    const int others = session::member_count() - 1;
+    const int n = others < 0 ? 0 : others > 10 ? 10 : others;
+    const uint32_t at = m.gather_ref + 300u * kGatherWait[n];
+    if (n != m.gather_seen) {
+        m.gather_seen = n;
+        const int32_t left = int32_t(at - now);
+        log("matchmaking: %d other player(s) connected: Game starting in %d seconds", n, left > 0 ? left / 300 : 0);
+    }
+    if (int32_t(now - at) < 0 || int32_t(now - m.quiet_until) < 0) return;
+    if (online::mm_pending_members() > 0) return;   // an open reservation: wait for it
+    if (n + 1 >= matchmaking_min_players()) {   // KEPT: our minimum (issue 104), PS3 timing
+        if (n % 2 == 1 && playlist_max_even()) {   // tunable +0x7f "balance teams" is on
+            const int slot = session::mm_balance_slot();
+            if (slot > 0) {
+                log("matchmaking: %d players for a team playlist: slot %d came alone, removed to balance the teams", n + 1, slot);
+                session::send_message(slot, {kMsgBalanceKick});
+                m.quiet_until = now + kBalanceQuiet;
+                return;
+            }
+        }
+        start_vote();
+        return;
+    }
+    log("matchmaking: time out %d players: leaving the room, searching again", n);
+    online::mm_research();
+    m.online_room = false;
+    m.gather_ref = 0;
+    m.criteria = 0;
+    m.retry_at = now;
+    set_net_sm(kSmStartMatchmaking);
+}
+
 void host_gather_step() {
+    if (m.online_room) {
+        host_gather_online();
+        return;
+    }
+    // LAN (no rooms, no strangers can come): a short wait for the party.
     const uint32_t now = clock_now();
     const int ready = std::popcount(m.ready_bits);
     const uint32_t waited = now - m.gather_start;
@@ -443,20 +612,11 @@ void host_gather_step() {
         m.gather_players = players;
     }
     if (players < minimum) {
-        if (!m.online_room && online::mm_online()) {
+        if (online::mm_online()) {
             log("matchmaking: %d player(s) after %u s: searching again", players, waited / 300);
             m.retry_at = now;
             set_net_sm(kSmStartMatchmaking);
-        } else if (m.online_room && int32_t(now - m.research_at) >= 0) {
-            log("matchmaking: %d player(s) after %u s: looking for another room", players, waited / 300);
-            online::mm_research();
-            m.online_room = false;
-            set_net_sm(kSmStartMatchmaking);
         }
-        return;
-    }
-    if (m.online_room) {
-        if (players >= 10 || (waited >= kOnlineGather && ready >= players) || waited >= kOnlineGatherMax) start_vote();
         return;
     }
     if (waited >= kGatherMax || (waited >= kGatherMin && ready >= players)) start_vote();
@@ -464,7 +624,10 @@ void host_gather_step() {
 
 void host_vote_step() {
     const int32_t p = phase();
-    if (p == 2 && ticks_left() == 0) {
+    const int early = p == 2 && early_vote_allowed() ? majority_winner() : -1;
+    if (early >= 0) {
+        end_vote(early);
+    } else if (p == 2 && ticks_left() == 0) {
         end_vote();
     } else if (p == 3 && int32_t(ticks_left()) <= kCreateAt) {
         m.created = true;
@@ -503,8 +666,32 @@ void update() {
         leave(false);
         return;
     }
+    if (m.follow_leader_out) {   // PS3 0x108 from our leader: back to its party lobby with it
+        leave(false, Exit::ToLeader);
+        return;
+    }
+    if (m.leave_at) {
+        if (int32_t(clock_now() - m.leave_at) >= 0) leave(true);
+        return;
+    }
     if (m.leave_requested) {
-        leave(true);
+        // PS3 events 2/3 + state 19: the leader takes its party back to the lobby (0x108); a member that pressed
+        // back itself also leaves the party; a player alone just leaves.
+        if (session::is_host()) {
+            leave(true);
+        } else if (!online::active() || online::host_in_party() || online::party_member()) {
+            leave(true, Exit::DropOut);   // a member: only this member goes, out of its party (LAN too)
+        } else if (const uint64_t party = online::own_party_id()) {
+            // we lead a party inside a stranger's room: tell the party through the host, then go
+            std::vector<uint8_t> body{kMsgPartyLeave};
+            for (int i = 0; i < 8; ++i) body.push_back(uint8_t(party >> (8 * i)));
+            session::send_message(0, body);
+            log("matchmaking: the party leader leaves matchmaking: the party is told (0x108)");
+            m.leave_requested = false;
+            m.leave_at = clock_now() + kLeaveDelay;
+        } else {
+            leave(true);
+        }
         return;
     }
     const bool host = session::is_host();
@@ -544,7 +731,7 @@ U2MP_GUEST void page_handler(uint8_t *ev) {
     case 2:
     case 3: {   // back: hold it while we ask, let it through once leaving is under way
         const int32_t st = net_sm();
-        if (!m.leave_requested) {
+        if (!m.leave_requested && !m.leave_at) {
             ask_leave();
             ev[0x10] = 1;
         } else {
@@ -665,6 +852,18 @@ void on_migrated(bool host) {
     set_net_sm(host ? kSmStartMatchmaking : kSmClientLobby);
 }
 
+void on_host_left(bool host) {
+    log("matchmaking: left the room (35 -> 19): %s", host ? "searching again from the first criteria" : "waiting for our leader");
+    reset_machine();
+    clear_vote();
+    set_phase(1);
+    put<uint32_t>(kNetInfo + kInfoDeadline, 0);
+    set_net_sm(kSmStartMatchmaking);
+    ensure_page();
+}
+
+bool strangers_muted() { return m.running && m.strangers_muted && phase() == 1; }
+
 void on_message(uint8_t from, const uint8_t *data, size_t size) {
     if (size == 0) return;
     const bool host = session::is_host();
@@ -705,12 +904,32 @@ void on_message(uint8_t from, const uint8_t *data, size_t size) {
     case kMsgLeave:
         if (!m.running && top_page() != kMatchmakingPage) return;
         if (host) {
-            if (m.online_room) log("matchmaking: a player left matchmaking");   // strangers come and go
-            else leave(true);
+            // a member that leaves goes out of the party by itself (F9); strangers come and go
+            log("matchmaking: a player left matchmaking (slot %u)", unsigned(from));
+        } else if (from == 0 && !online::host_in_party()) {
+            // PS3 "Host Asked to leave the room": a stranger's room is over for us, search again
+            log("matchmaking: Host Asked to leave the room %llx", (unsigned long long)online::match_room());
+            online::mm_host_gone("the host left matchmaking", false);
         } else if (from == 0) {
-            leave(false);
+            leave(false);   // our leader left matchmaking (PS3 0x108): back to the lobby with it
         }
         break;
+    case kMsgBalanceKick:
+        if (host || from != 0) return;
+        log("matchmaking: removed to balance the teams");
+        online::mm_host_gone("removed to balance the teams", true);
+        break;
+    case kMsgPartyLeave: {
+        if (size < 9) return;
+        uint64_t party = 0;
+        for (int i = 0; i < 8; ++i) party |= uint64_t(data[1 + i]) << (8 * i);
+        if (host) session::send_message(-1, std::vector<uint8_t>(data, data + size), from);   // relay to the room
+        if (!host && from == 0 && party && party == online::own_party_id() && online::party_member()) {
+            log("matchmaking: our party leader left matchmaking: following it back");
+            m.follow_leader_out = true;
+        }
+        break;
+    }
     case kMsgLeaderBack:
         if (!host && from == 0 && (frontend6::popup_up() || top_page() == kMessageBoxPage)) pop_page();
         break;
