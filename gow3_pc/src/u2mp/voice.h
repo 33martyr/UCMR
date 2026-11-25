@@ -99,10 +99,33 @@ void to_pcm16(const int32_t *mix, int16_t *pcm, int samples);
 class Gate {
 public:
     bool update(const int16_t *pcm, int samples);
+    float rms() const { return rms_; }   // RMS of the last frame update() saw, in 16-bit sample units
 private:
     float floor_ = 200.0f;
+    float rms_ = 0.0f;
     int hold_ = 0;
 };
+
+// ---- own character's mouth follows the microphone (PS3 parity N5, u2mp/docs/spec/parity-n-remaining.md 6.3) ------
+// The facial talking layer's setter (PS4 0x473010) gets max(voice-line amplitude x 100, M), M our microphone
+// loudness: L = kMouthLoudnessScale x rms / 32768 of the last 20 ms capture frame while we transmit it, else 0.
+// PROPOSAL (spec open question N-1): PS3 fed the voice library's port energy level, a unit neither binary defines;
+// this factor puts the gate threshold (rms 300) near weight 0.18 and ordinary speech (rms 3000) at full weight
+// (the setter's weight is min(v / 5, 1)). Change it only after an in-game look.
+constexpr float kMouthLoudnessScale = 100.0f;
+float mouth_loudness(float rms, bool transmitting);
+
+// ---- talking indicators of every remote member (PS3 parity N6, parity-n-remaining.md 7.3) --------------------------
+// The four PS4 talking-level readers read a PC table of kTalkSlots records (key at +0, level at +0x1c8) instead of
+// the connection records: one slot per present remote member (net id k >= 1, not the local player) with its talking
+// level, every other slot key 0 / level 0. `present` and `levels` are indexed by net id, `count` entries.
+struct TalkSlot {
+    uint32_t key;
+    float level;
+};
+constexpr int kTalkSlots = 32;
+// Fills `out` (`max` slots, unused ones zeroed) and returns how many hold a member.
+int talk_table_slots(const bool *present, const float *levels, int count, uint32_t local_id, TalkSlot *out, int max);
 
 // ---- talking level and mute rules (PS3 parity J1..J3, u2mp/docs/spec/parity-j-voice-medals.md) -------
 // Each remote player has a talking level: set to kTalkOnVoice when their voice arrives, 1.0 lower each game frame
@@ -126,6 +149,9 @@ enum class MuteEvent { Arrived, JoinedParty, VoteOpened };
 bool next_mute(bool muted, MuteEvent event, bool party_member);
 
 // ---- runtime (game thread) -------------------------------------------------------------------------
+// At image install: the talking indicator readers' table (N6) and the mouth patch (N5), each only when the bytes of
+// every site it changes are as expected.
+void install(int &installed);
 // The session's transport (null when it goes away).
 void set_transport(net::Transport *transport);
 // Per frame from the session tick: opens the audio streams once there is someone to talk to,

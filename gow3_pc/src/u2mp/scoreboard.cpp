@@ -10,12 +10,12 @@
 // scoreboard is drawn. The call may already be wrapped by another module (loading.cpp), so we chain to whatever
 // it reached before.
 //
-// The team lists' voice column and their rows' mute action (parity-j-voice-medals.md J4, J5): the cell image query
-// shows the muted icon for a muted player before its own talking test, and pressing a player's row toggles that
-// player's voice mute (never the local player's).
+// The team lists' voice column (parity-j-voice-medals.md J4): the cell image query shows the muted icon for a muted
+// player before its own talking test, in the scoreboard's lists and in the Mute Players page's (the mute toggle of
+// that page is remaining.cpp, parity-n-remaining.md N2).
 //
 // Reimplemented from the behaviour descriptions u2mp/docs/spec/gameplay.md (1), parity-m-features.md (M1, M2),
-// parity-j-voice-medals.md (J4, J5) and parity-ticker-respawn.md (2).
+// parity-j-voice-medals.md (J4) and parity-ticker-respawn.md (2).
 #include <bit>
 #include <chrono>
 #include <cstdint>
@@ -478,31 +478,18 @@ U2MP_GUEST uint64_t frame_hook(uint64_t a, uint64_t b, uint64_t c) {
     return result;
 }
 
-// ---- voice column muted icon and the row mute action (parity-j-voice-medals.md J4, J5) ----------------------------
+// ---- voice column muted icon (parity-j-voice-medals.md J4) ---------------------------------------------------------
 // The team list's cell image query (vtable 0x100a280 slot 15, PS4 0x5b2ac0) kept only the talking test of the voice
-// column. The mode dispatcher (PS4 0x5ecb80, put into the menu callback table at 0x5ed964) still finds the
-// NetStatGame entry of a pressed team list row (0x5ed0d6..0x5ed166) and then does nothing.
+// column (its tracker at [rbp-0x40] at 0x5b2cb0, the tracker's key +0x23c loaded at 0x5b2cb4, then the talking
+// record search). Every list of that vtable asks it: the scoreboard's team lists and the Mute Players lists.
 constexpr uint64_t kTeamListVtable = 0x100a280;
 constexpr unsigned kCellImageSlot = 15;
 constexpr uint64_t kCellImage = 0x5b2ac0;
 constexpr uint32_t kColumnTables = 0x7805beb9;      // lookup id of the team list column tables
 constexpr uint64_t kNetImages = 0x1130008 + 0x70;   // the image table the cell query indexes its icons in
-constexpr uint64_t kDispatcher = 0x5ecb80;
-constexpr uint64_t kDispatcherLea = 0x5ed964;       // lea rcx, [rip + dispatcher], 7 bytes
-constexpr uint64_t kStatTable = 0x1147bd0;          // NetStatGame: current game's copy at +8, the previous one's
-                                                    // at +0x571c
-constexpr uint64_t kStatCurrent = 0x8;
-constexpr uint64_t kStatPrevious = 0x571c;
-constexpr uint64_t kStatRecords = 0x38e4;           // player entries in a copy: 0x80 bytes, +0 net id, +7 team
-constexpr uint64_t kStatRecordSize = 0x80;
-constexpr uint64_t kStatPositions = 0x3e4c;         // u16 in-team position of entry i at +0x34 i
-constexpr uint64_t kStatPositionSize = 0x34;
-constexpr uint32_t kStatEntries = 10;
 constexpr uint64_t kTrackerConnection = 0x23c;      // the tracker's connection key: its net id, -1 for the local player
-constexpr uint64_t kTrackerTeam = 0x134;
 
 using CellImageFn = void *(U2MP_GUEST *)(void *, const unsigned char *, int32_t, int32_t);
-using DispatchFn = uint64_t(U2MP_GUEST *)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
 
 bool muted_icon_logged = false;
 
@@ -577,44 +564,6 @@ U2MP_GUEST void *cell_image_hook(void *out, const unsigned char *list, int32_t r
     return out;
 }
 
-// J5: a pressed team list row -> the NetStatGame entry the PS4 search finds -> that player's mute toggled.
-void mute_action(const unsigned char *event) {
-    const uint32_t action = peek<uint32_t>(event);
-    if (action != overlay::kActionOwnTeamList && action != overlay::kActionOtherTeamList) return;
-    const unsigned char *local = reinterpret_cast<const unsigned char *>(peek_image<uint64_t>(kNgm));
-    if (!local) return;
-    bool known = false;
-    const int32_t team = overlay::mute_action_team(action, peek<int32_t>(local + kTrackerTeam), known);
-    const bool previous = overlay::mute_action_previous_game(peek_image<int32_t>(kNgmState));
-    const unsigned char *copy = image.base + kStatTable + (previous ? kStatPrevious : kStatCurrent);
-    uint32_t count = peek<uint32_t>(copy);
-    if (count > kStatEntries) count = kStatEntries;
-    overlay::TeamEntry entries[kStatEntries] = {};
-    for (uint32_t i = 0; i < count; ++i) {
-        entries[i].team = copy[kStatRecords + kStatRecordSize * i + 7];
-        entries[i].position = peek<uint16_t>(copy + kStatPositions + kStatPositionSize * i);
-    }
-    const int32_t row = peek<int32_t>(event + 4);
-    const int found = known ? overlay::team_row_entry(entries, count, team, row) : -1;
-    if (found < 0) return;
-    const char *list = action == overlay::kActionOwnTeamList ? "own" : "other";
-    const uint32_t net_id = peek<uint32_t>(copy + kStatRecords + kStatRecordSize * uint64_t(found));
-    std::string name;
-    if (net_id == session::local_id() || !session::member_name(net_id, name)) {
-        log("scoreboard: row %d of the %s team list (net id %u): %s, mute left alone", int(row), list, net_id,
-            net_id == session::local_id() ? "the local player" : "no connection");
-        return;
-    }
-    const bool now = voice::toggle_mute(net_id);
-    log("scoreboard: row %d of the %s team list: %s (net id %u) %s", int(row), list, name.c_str(), net_id,
-        now ? "muted" : "unmuted");
-}
-
-U2MP_GUEST uint64_t dispatcher_hook(uint64_t a, uint64_t b, uint64_t c, uint64_t d, uint64_t e, uint64_t f) {
-    if (a) mute_action(reinterpret_cast<const unsigned char *>(uintptr_t(a)));
-    return reinterpret_cast<DispatchFn>(image.base + kDispatcher)(a, b, c, d, e, f);
-}
-
 void install_voice_column(int &installed) {
     // J4: the cell query reads the row kind / tracker index / list key and the tracker's connection key as the hook
     // does, and the voice column id is the one it tests.
@@ -634,58 +583,12 @@ void install_voice_column(int &installed) {
     } else {
         log("scoreboard: team list cell image query not as expected: no muted icon in the voice column");
     }
-
-    // J5: the dispatcher's team list row search (actions, own team, NGM state, entry fields) as the hook repeats it.
-    static const unsigned char kOwnList[] = {0x81, 0xfe, 0x8b, 0x82, 0x4c, 0xb0};         // cmp esi, 0xb04c828b
-    static const unsigned char kOtherList[] = {0x81, 0xfe, 0x3c, 0x9f, 0x8d, 0xb4};       // cmp esi, 0xb48d9f3c
-    static const unsigned char kOwnTeam[] = {0x8b, 0x90, 0x34, 0x01, 0x00, 0x00};         // mov edx, [rax+0x134]
-    static const unsigned char kState[] = {0x8b, 0x91, 0x80, 0x1e, 0x00, 0x00, 0xff, 0xca};   // [rcx+0x1e80] - 1
-    static const unsigned char kCopies[] = {0x48, 0x8d, 0xb1, 0x1c, 0x57, 0x00, 0x00, 0x48, 0x83, 0xc1, 0x08};
-    static const unsigned char kFields[] = {0x44, 0x8b, 0x47, 0x04, 0x41, 0xff, 0xc0,               // row + 1
-                                            0x48, 0x8d, 0xb9, 0x4c, 0x3e, 0x00, 0x00,               // positions
-                                            0x48, 0x81, 0xc1, 0xeb, 0x38, 0x00, 0x00};              // team bytes
-    int32_t stat_rel = 0, lea_rel = 0;
-    std::memcpy(&stat_rel, image.base + 0x5ed10a + 3, 4);
-    std::memcpy(&lea_rel, image.base + kDispatcherLea + 3, 4);
-    const bool search_ok = image.matches(0x5ed0ca, kOwnList, sizeof kOwnList) &&
-                           image.matches(0x5ed076, kOtherList, sizeof kOtherList) &&
-                           image.matches(0x5ed0e9, kOwnTeam, sizeof kOwnTeam) &&
-                           image.matches(0x5ed102, kState, sizeof kState) &&
-                           image.matches(0x5ed111, kCopies, sizeof kCopies) &&
-                           image.matches(0x5ed12d, kFields, sizeof kFields) &&
-                           0x5ed10a + 7 + int64_t(stat_rel) == int64_t(kStatTable);
-    static const unsigned char kLea[] = {0x48, 0x8d, 0x0d};   // lea rcx, [rip + disp32]
-    const bool lea_ok = image.executable(kDispatcherLea, 7) && image.matches(kDispatcherLea, kLea, sizeof kLea) &&
-                        kDispatcherLea + 7 + int64_t(lea_rel) == int64_t(kDispatcher);
-    if (!search_ok || !lea_ok) {
-        log("scoreboard: mode dispatcher / its team list row search not as expected: no mute from the scoreboard");
-        return;
-    }
-    // The callback table gets a stub near the image (the lea reaches only +-2 GiB) that jumps to the hook.
-    unsigned char *stub = near_stub(12);
-    if (!stub) {
-        log("scoreboard: no stub memory near the image: no mute from the scoreboard");
-        return;
-    }
-    const uint64_t host = uint64_t(uintptr_t(&dispatcher_hook));
-    stub[0] = 0x48;   // mov rax, host
-    stub[1] = 0xb8;
-    std::memcpy(stub + 2, &host, 8);
-    stub[10] = 0xff;  // jmp rax
-    stub[11] = 0xe0;
-    const int64_t delta = int64_t(uintptr_t(stub)) - int64_t(uintptr_t(image.base + kDispatcherLea + 7));
-    if (delta < INT32_MIN || delta > INT32_MAX) return;
-    const int32_t rel = int32_t(delta);
-    std::memcpy(image.base + kDispatcherLea + 3, &rel, 4);
-    installed += 1;
-    log("scoreboard: mode dispatcher 0x%llx wrapped: a pressed team list row toggles that player's mute "
-        "(PS3 parity J5)", (unsigned long long)kDispatcher);
 }
 
 }  // namespace
 
 void install_scoreboard(int &installed) {
-    install_voice_column(installed);   // the team lists' voice column / row mute, also without the overlay
+    install_voice_column(installed);   // the team lists' voice column muted icon, also without the overlay
     if (const char *env = std::getenv("UNCHARTED_U2MP_SCOREBOARD_BUTTON")) {
         // The runtime is Windows x64, where unsigned long is 32 bits: overflow saturates to 0xffffffff.
         button_mask = uint32_t(std::strtoul(env, nullptr, 16));

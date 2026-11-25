@@ -1763,6 +1763,7 @@ void frame_work() {
     }
     if (last_state == kPlayingState && frames % 60 == 0) tier2_patch_weapon_damage();
     hud_weapon_tick();
+    mute_players_frame();
     voice::frame();
     clock_sync_frame();
     slots_frame();
@@ -3338,6 +3339,7 @@ bool install_actor_requests() {
 
 void install(int &installed) {
     if (!gamenet::install()) return;
+    voice::install(installed);   // talking indicator table (N6), mouth patch (N5)
     if (install_links_kept()) ++installed;
     if (install_actor_requests()) ++installed;
     if (retarget_call(0x664d6a, 0x60ded0, reinterpret_cast<void *>(&state_send_trace), "tracker state send"))

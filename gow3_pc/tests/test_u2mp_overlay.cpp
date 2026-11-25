@@ -1,8 +1,8 @@
 // u2mp overlay rules test (no game needed): ninja -C out/gpu u2mp-overlay-test
 // The scoreboard / result entry fade, priority and slide rules, the match-state entries, the automatic flag edges
 // and the hint fade (spec parity-m-features.md M1 / M2), and the ticker placement / finished / visible rules on a
-// stand-in ticker object (spec parity-ticker-respawn.md 1.2 - 1.6), and the scoreboard voice column / row mute rules
-// (spec parity-j-voice-medals.md J4 / J5).
+// stand-in ticker object (spec parity-ticker-respawn.md 1.2 - 1.6), the team lists' voice column rule (spec
+// parity-j-voice-medals.md J4) and the Mute Players list rules (spec parity-n-remaining.md N2).
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -170,11 +170,11 @@ static void test_voice_column() {
 }
 
 static void test_mute_action() {
-    // J5: the own list shows the own team, the other list the other team; other actions are not ours.
+    // N2: the own list shows the own team, the other list the other team; other lists are not ours.
     bool known = false;
-    CHECK(mute_action_team(kActionOwnTeamList, 1, known) == 1 && known);
-    CHECK(mute_action_team(kActionOtherTeamList, 1, known) == 0 && known);
-    CHECK(mute_action_team(kActionOtherTeamList, 0, known) == 1 && known);
+    CHECK(mute_action_team(kMutePlayersOwnList, 1, known) == 1 && known);
+    CHECK(mute_action_team(kMutePlayersOtherList, 1, known) == 0 && known);
+    CHECK(mute_action_team(kMutePlayersOtherList, 0, known) == 1 && known);
     mute_action_team(0x649e809a, 0, known);
     CHECK(!known);
     // The current game's copy in NGM states 1 and 2, the previous game's otherwise.
@@ -192,6 +192,12 @@ static void test_mute_action() {
     CHECK(team_row_entry(e, 5, 2, 0) == -1);  // no team 2
     CHECK(team_row_entry(e, 5, 0, -1) == -1); // position 0 is no row
     CHECK(team_row_entry(e, 0, 0, 0) == -1);
+    // The entry's player: a tracker holds that net id, and it is not the local player.
+    const uint32_t trackers[] = {1, 3, 0, 5};
+    CHECK(mute_list_target(3, 1, trackers, 4));
+    CHECK(!mute_list_target(1, 1, trackers, 4));   // the local player
+    CHECK(!mute_list_target(4, 1, trackers, 4));   // gone: no tracker
+    CHECK(!mute_list_target(5, 1, trackers, 3));   // only `count` trackers are searched
 }
 
 int main() {

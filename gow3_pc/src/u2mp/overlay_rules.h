@@ -1,10 +1,11 @@
-// u2mp: the pure rules of the in-match overlay (scoreboard / result entries, the scoreboard's voice column and mute
-// action, dead-player hint line) and of the PAGE_MULTIPLAYER stats ticker. No game memory is touched here except the
-// ticker object bytes passed in, so the rules can be tested without the game (tests/test_u2mp_overlay.cpp). Used by
-// scoreboard.cpp and ticker.cpp.
+// u2mp: the pure rules of the in-match overlay (scoreboard / result entries, the team lists' voice column, the Mute
+// Players lists, dead-player hint line) and of the PAGE_MULTIPLAYER stats ticker. No game memory is touched here
+// except the ticker object bytes passed in, so the rules can be tested without the game
+// (tests/test_u2mp_overlay.cpp). Used by scoreboard.cpp, remaining.cpp and ticker.cpp.
 //
 // Reimplemented from the behaviour descriptions u2mp/docs/spec/parity-m-features.md (M1, M2),
-// u2mp/docs/spec/parity-j-voice-medals.md (J4, J5) and u2mp/docs/spec/parity-ticker-respawn.md (1.2 - 1.6).
+// u2mp/docs/spec/parity-j-voice-medals.md (J4), u2mp/docs/spec/parity-n-remaining.md (N2) and
+// u2mp/docs/spec/parity-ticker-respawn.md (1.2 - 1.6).
 #pragma once
 
 #include <cstdint>
@@ -33,33 +34,38 @@ int state_entry(int32_t ngm_state, int32_t round_substate, bool cinema);
 enum class Edge { None, Opened, Closed };
 Edge auto_edge(bool &last, bool now);
 
-// ---- scoreboard voice column and mute action (parity-j-voice-medals.md J4, J5) ----
+// ---- team lists' voice column (parity-j-voice-medals.md J4) and the Mute Players lists (parity-n-remaining.md N2) --
 
 constexpr uint32_t kVoiceColumn = 0x4c217b;         // team list column id of the voice column
 constexpr uint32_t kMutedIcon = 0x7a5f5bf1;         // general/net/mic/mute
 constexpr uint32_t kPreviousGameList = 0x2eb65ce8;  // a team list of this page names no tracker
 constexpr int32_t kPlayerRow = 2;                   // team list row kind of a player row
 constexpr uint32_t kTrackers = 10;
-constexpr uint32_t kActionOwnTeamList = 0xb04c828b;    // a row of the own team's list was pressed
-constexpr uint32_t kActionOtherTeamList = 0xb48d9f3c;  // a row of the other team's list was pressed
+// PAGE_MULTIPLAYER_MUTE_PLAYERS (pause menu, Mute Players): the ids of its two team lists, sent with the selected row.
+constexpr uint32_t kMutePlayersOwnList = 0xb04c828b;    // LIST_MUTEPLAYERS0: the own team
+constexpr uint32_t kMutePlayersOtherList = 0xb48d9f3c;  // LIST_MUTEPLAYERS1: the other team
 
 // J4: the cell shows the muted icon (in place of the PS4 talking test): a player row of a list that names a tracker
-// (index 0..9, not the previous-game page), the voice column, and that tracker's player is muted.
+// (index 0..9, not the previous-game page), the voice column, and that tracker's player is muted. Every team list of
+// the vtable 0x100a280 uses it: the scoreboard's and the Mute Players page's.
 bool voice_cell_muted(int32_t row_kind, uint32_t list_page, uint32_t tracker_index, uint32_t column_id, bool muted);
 
-// J5: the team a pressed row's list shows: the own team for kActionOwnTeamList, the other one (1 - own) for
-// kActionOtherTeamList; `known` false for any other action.
-int32_t mute_action_team(uint32_t action, int32_t own_team, bool &known);
-// J5: the NetStatGame copy the row is looked up in: the current game's while the NGM state is 1 or 2, else the
+// N2: the team a selected row's list shows: the own team for kMutePlayersOwnList, the other one (1 - own) for
+// kMutePlayersOtherList; `known` false for any other list.
+int32_t mute_action_team(uint32_t list, int32_t own_team, bool &known);
+// N2: the NetStatGame copy the row is looked up in: the current game's while the NGM state is 1 or 2, else the
 // previous game's.
 bool mute_action_previous_game(int32_t ngm_state);
-// J5: one NetStatGame player entry as the search reads it: its team byte and its 1-based position in its team list.
+// N2: one NetStatGame player entry as the search reads it: its team byte and its 1-based position in its team list.
 struct TeamEntry {
     uint8_t team;
     uint16_t position;
 };
-// J5: the first of `count` entries on `team` whose position is `row` + 1, -1 when there is none.
+// N2: the first of `count` entries on `team` whose position is `row` + 1, -1 when there is none.
 int team_row_entry(const TeamEntry *entries, uint32_t count, int32_t team, int32_t row);
+// N2: the entry's player gets the mute toggle: some tracker of the `count` (net id at tracker +0x120) is that
+// player, and it is not the local player.
+bool mute_list_target(uint32_t net_id, uint32_t local_id, const uint32_t *tracker_ids, uint32_t count);
 
 // ---- dead-player hint line (M1) ----
 

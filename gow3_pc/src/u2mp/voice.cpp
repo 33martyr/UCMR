@@ -177,6 +177,7 @@ bool Gate::update(const int16_t *pcm, int samples) {
     double energy = 0;
     for (int i = 0; i < samples; ++i) energy += double(pcm[i]) * pcm[i];
     const float rms = samples ? float(std::sqrt(energy / samples)) : 0.0f;
+    rms_ = rms;
     const bool speech = rms > std::max(floor_ * 3.0f, 300.0f);
     if (!speech) floor_ += (rms - floor_) * (rms < floor_ ? 0.2f : 0.02f);   // fall fast, rise slowly
     floor_ = std::clamp(floor_, 30.0f, 3000.0f);
@@ -202,6 +203,19 @@ bool next_mute(bool muted, MuteEvent event, bool party_member) {
     case MuteEvent::VoteOpened: return party_member && muted;
     }
     return muted;
+}
+
+// ---- mouth loudness and the talking-level table (parity-n-remaining.md N5, N6) -------------------------------------
+float mouth_loudness(float rms, bool transmitting) {
+    return transmitting && rms > 0.0f ? kMouthLoudnessScale * rms / 32768.0f : 0.0f;
+}
+
+int talk_table_slots(const bool *present, const float *levels, int count, uint32_t local_id, TalkSlot *out, int max) {
+    int used = 0;
+    for (int k = 1; k < count && used < max; ++k)
+        if (present[k] && uint32_t(k) != local_id) out[used++] = TalkSlot{uint32_t(k), levels[k]};
+    for (int i = used; i < max; ++i) out[i] = TalkSlot{0, 0.0f};
+    return used;
 }
 
 }  // namespace u2mp::voice
@@ -270,8 +284,32 @@ float record_level(uint32_t key) {   // gamenet::set_talk_levels: never the loca
 }
 float no_level(uint32_t) { return 0.0f; }
 
+// N6: the talking indicator readers' records (8-byte header, then kTalkSlots records of 0x220 bytes: key at +0,
+// level at +0x1c8, the rest stays 0); NULL while the readers are not redirected.
+constexpr uint64_t kTalkRecordStride = 0x220;
+constexpr uint64_t kTalkRecordLevel = 0x1c8;
+alignas(16) uint8_t talk_storage[8 + kTalkSlots * kTalkRecordStride];
+uint8_t *talk_table = nullptr;
+
+void fill_talk_table() {
+    if (!talk_table) return;
+    TalkSlot slots[kTalkSlots];
+    talk_table_slots(present, levels, kMaxSpeakers, session::local_id(), slots, kTalkSlots);
+    for (int i = 0; i < kTalkSlots; ++i) {
+        uint8_t *record = talk_table + 8 + kTalkRecordStride * uint64_t(i);
+        std::memcpy(record, &slots[i].key, sizeof slots[i].key);
+        std::memcpy(record + kTalkRecordLevel, &slots[i].level, sizeof slots[i].level);
+    }
+}
+
+// N5: M, the floor the patched 0x714d9e gives the facial talking layer (near the image, rip-relative); NULL when the
+// patch is not in.
+float *mouth_floor = nullptr;
+bool mouth_logged = false;
+
 // capture thread -> game thread
 std::atomic<bool> ptt_down{false};
+std::atomic<float> mic_loudness{0.0f};   // N5: L of the last capture frame while we transmit it, else 0
 std::mutex out_mutex;
 std::deque<std::vector<uint8_t>> outgoing;
 std::unique_ptr<Encoder> encoder;   // capture thread only (while the stream exists)
@@ -292,6 +330,7 @@ void SDLCALL on_capture(void *, SDL_AudioStream *stream, int, int) {
         if (SDL_GetAudioStreamData(stream, pcm, sizeof pcm) != int(sizeof pcm)) break;
         const bool voiced = gate.update(pcm, kFrameSamples);   // keeps the noise floor current
         const bool talk = config.mode == Mode::PushToTalk ? ptt_down.load(std::memory_order_relaxed) : voiced;
+        mic_loudness.store(mouth_loudness(gate.rms(), talk), std::memory_order_relaxed);
         if (!talk || !encoder || !encoder->encode(pcm, packet)) continue;
         std::lock_guard<std::mutex> lock(out_mutex);
         if (outgoing.size() < 25) outgoing.push_back(std::move(packet));   // 0.5 s: the game thread stalled
@@ -326,22 +365,95 @@ const char *device_name(SDL_AudioStream *stream) {
     return n ? n : "?";
 }
 
-// PS3 parity J7 (own character's mouth follows the microphone, PS3 0x51b3ec): off. PS4 keeps the facial channel
-// setter for sid 0x94bb3775 (0x473010: value, channel list), fed from a sound object's amplitude at three call sites
-// (0x21d3a6, 0x607763, 0x714db6). Which of them is the local player's character update, and whether the channel is
-// the mouth, is not confirmed from the image, so nothing is hooked; this check only says what this build has.
-void log_mouth_state() {
-    static const uint8_t kSetter[] = {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x53, 0x48, 0x81, 0xec, 0xa8, 0x00, 0x00, 0x00};
-    constexpr uint64_t kSetterAt = 0x473010;
-    const bool found = image.base && image.executable(kSetterAt, sizeof kSetter) &&
-                       std::memcmp(image.base + kSetterAt, kSetter, sizeof kSetter) == 0;
-    log("voice: own character's mouth follows voice lines only, not the microphone (PS3 parity J7 off: channel setter "
-        "0x473010 %s, its local-player caller and the mouth channel not confirmed)", found ? "present" : "differs");
+// rel32 from the instruction that ends at image offset `next` to host address `to`; false when out of reach.
+bool rel32_to(uint64_t next, const void *to, int32_t &rel) {
+    const int64_t delta = int64_t(uintptr_t(to)) - int64_t(uintptr_t(image.base + next));
+    if (delta < INT32_MIN || delta > INT32_MAX) return false;
+    rel = int32_t(delta);
+    return true;
+}
+
+// N6 (parity-n-remaining.md 7.3): each talking-level reader takes the record base with one `add reg, [rip + d32]` of
+// the pointer slot 0x104ae30 (the connection manager 0x1152a10, records from +8) and uses it for that search only.
+// Its d32 is pointed at a slot of ours holding talk_storage's address; all four or none.
+bool install_talk_table() {
+    constexpr uint64_t kRecordSlot = 0x104ae30;
+    struct Reader {
+        uint64_t at;
+        uint8_t bytes[7];
+    };
+    static const Reader kReaders[] = {
+        {0x55b4d8, {0x48, 0x03, 0x05, 0x51, 0xf9, 0xae, 0x00}},   // overhead name tags: add rax, [rip + slot]
+        {0x5b2cbf, {0x48, 0x03, 0x05, 0x6a, 0x81, 0xa9, 0x00}},   // team list voice cell (scoreboard, Mute Players)
+        {0x66644b, {0x48, 0x03, 0x05, 0xde, 0x49, 0x9e, 0x00}},   // "is talking" helper
+        {0x66c4d9, {0x4c, 0x03, 0x05, 0x50, 0xe9, 0x9d, 0x00}},   // talk-time counter: add r8, [rip + slot]
+    };
+    for (const Reader &r : kReaders) {
+        int32_t disp = 0;
+        std::memcpy(&disp, r.bytes + 3, 4);
+        if (!image.executable(r.at, 7) || !image.matches(r.at, r.bytes, 7) ||
+            int64_t(r.at) + 7 + disp != int64_t(kRecordSlot)) {
+            log("voice: talking indicator reader at 0x%llx differs: the game's readers stay on the connection records "
+                "(on a client only the host lights)", (unsigned long long)r.at);
+            return false;
+        }
+    }
+    unsigned char *slot = near_stub(8);
+    int32_t rel[4] = {};
+    for (int i = 0; i < 4; ++i)
+        if (!slot || !rel32_to(kReaders[i].at + 7, slot, rel[i])) {
+            log("voice: no pointer slot near the image: the talking indicator readers stay on the connection records");
+            return false;
+        }
+    const uint64_t table = uint64_t(uintptr_t(talk_storage));
+    std::memcpy(slot, &table, sizeof table);
+    for (int i = 0; i < 4; ++i) std::memcpy(image.base + kReaders[i].at + 3, &rel[i], 4);
+    talk_table = talk_storage;
+    log("voice: talking indicators read the PC level table (4 readers)");
+    return true;
+}
+
+// N5 (parity-n-remaining.md 6.3): PS4 0x714a70 (= PS3 0x51b3e8) feeds the facial talking layer's setter 0x473010
+// with max(0, voice-line amplitude x 100); PS3 had the microphone loudness where PS4 has the 0. The 8 bytes at
+// 0x714d9e (vxorps xmm1,xmm1,xmm1; vmaxss xmm0,xmm1,xmm0) become vmaxss xmm0,xmm0,[rip + M].
+bool install_mouth() {
+    struct Site {
+        uint64_t at;
+        const uint8_t *bytes;
+        size_t size;
+    };
+    static const uint8_t kLineScale[] = {0xc5, 0xfa, 0x59, 0x05, 0xf2, 0xec, 0x74, 0x00};   // vmulss xmm0,[0xe63a90]
+    static const uint8_t kZeroMax[] = {0xc5, 0xf0, 0x57, 0xc9, 0xc5, 0xf2, 0x5f, 0xc0};     // the 0, then the max
+    static const uint8_t kSetterCall[] = {0xe8, 0x55, 0xe2, 0xd5, 0xff};                    // call 0x473010
+    static const uint8_t kSetter[] = {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56,
+                                      0x53, 0x48, 0x81, 0xec, 0xa8, 0x00, 0x00, 0x00};       // its prologue
+    constexpr uint64_t kPatch = 0x714d9e;
+    const Site sites[] = {{0x714d96, kLineScale, sizeof kLineScale},
+                          {kPatch, kZeroMax, sizeof kZeroMax},
+                          {0x714db6, kSetterCall, sizeof kSetterCall},
+                          {0x473010, kSetter, sizeof kSetter}};
+    for (const Site &s : sites)
+        if (!image.executable(s.at, s.size) || !image.matches(s.at, s.bytes, s.size)) {
+            log("voice: mouth patch skipped (bytes at 0x%llx differ)", (unsigned long long)s.at);
+            return false;
+        }
+    float *m = reinterpret_cast<float *>(near_stub(sizeof(float)));
+    int32_t rel = 0;
+    if (!m || !rel32_to(kPatch + 8, m, rel)) {
+        log("voice: mouth patch skipped (no memory near the image)");
+        return false;
+    }
+    *m = 0.0f;
+    uint8_t patch[8] = {0xc5, 0xfa, 0x5f, 0x05};   // vmaxss xmm0, xmm0, [rip + rel]
+    std::memcpy(patch + 4, &rel, 4);
+    std::memcpy(image.base + kPatch, patch, sizeof patch);
+    mouth_floor = m;
+    log("voice: mouth follows the microphone (PS3 0x51b3e8; patch at 0x714d9e)");
+    return true;
 }
 
 void open_audio() {
     audio_open = true;
-    log_mouth_state();
     sdl_audio = SDL_InitSubSystem(SDL_INIT_AUDIO);   // reference counted: the game's audio may have it
     if (!sdl_audio) {
         log("voice: SDL audio unavailable (%s): no voice chat", SDL_GetError());
@@ -545,8 +657,16 @@ void stop() {
         silenced[id] = false;
     }
     gamenet::set_talk_levels(no_level);
+    fill_talk_table();   // nobody present: every slot key 0, level 0
+    mic_loudness.store(0.0f, std::memory_order_relaxed);
+    if (mouth_floor) *mouth_floor = 0.0f;
     gating_on = false;
     gate = Gate{};
+}
+
+void install(int &installed) {
+    if (install_talk_table()) ++installed;
+    if (install_mouth()) ++installed;
 }
 
 void frame() {
@@ -562,11 +682,22 @@ void frame() {
         present[id] = here;
         others = others || (here && id != me);
     }
-    // talking levels (J1): 1.0 lower each game frame, then into the connection records for the game's readers
+    // talking levels (J1): 1.0 lower each game frame, then into the connection records and the readers' PC table (N6:
+    // every present remote member, also the other clients of a star)
     for (float &level : levels) level = decay_talk_level(level);
     gamenet::set_talk_levels(record_level);
+    fill_talk_table();
     if (!enabled()) return;
     if (others && !audio_open) open_audio();
+    // N5: the mouth floor M, while the capture stream is open (0 when we do not transmit)
+    if (mouth_floor) {
+        const float m = capture ? mic_loudness.load(std::memory_order_relaxed) : 0.0f;
+        *mouth_floor = m;
+        if (m > 0.0f && !mouth_logged) {
+            mouth_logged = true;
+            log("voice: the microphone moves the own character's mouth (first loudness %.2f)", double(m));
+        }
+    }
     update_gating();
     if (config.mode == Mode::PushToTalk) {
         const bool *keys = SDL_GetKeyboardState(nullptr);

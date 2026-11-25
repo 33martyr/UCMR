@@ -19,12 +19,12 @@ Status words as in group M: **COVERED**, **PLATFORM**, **MISSING**, **CHECK**.
 
 | Item | Answer | Status | Work |
 |---|---|---|---|
-| N1 (M6) film spectating HUD | PS3 film HUD = the normal HUD (score panel, kill feed, names over heads, markers, centre message) plus the theater bar, plus the followed player's boosters **only while the follow camera is active (cinema mode 0)**. There is no separate "watched player's name" element. Ours draws the film boosters in the wrong camera modes (condition inverted). | MISSING (one condition), rest COVERED | hud.cpp: one condition |
-| N2 (M7 + J5) Mute Players page | Rows are the scoreboard team lists (same list kind, same layout `dcae45f4`), already filled. Selecting a row must toggle that player's voice mute; PS4 finds the row and does nothing. J5's "scoreboard mute action `0xb04c828b`" is this page's list id, not a scoreboard action. | rows COVERED (CHECK), toggle MISSING, muted icon MISSING (= J4) | one menu callback; J4 icon |
-| N3 (M9) Multiplayer Medals | PS3: the button is on the no-save main menu PAGE_NEWPROFILE (and PAGE_NEWPROFILE_BETA) only, after Options, with a visibility condition; not on PAGE_MULTIPLAYER, not on PAGE_PROFILE, not on Bonuses (Bonuses has the single-player Medals). Our menu overlay turns exactly that button into Multiplayer, so the page is unreachable on PC. | MISSING | import overlay change (u2import), page check |
+| N1 (M6) film spectating HUD | PS3 film HUD = the normal HUD (score panel, kill feed, names over heads, markers, centre message) plus the theater bar, plus the followed player's boosters **only while the follow camera is active (cinema mode 0)**. There is no separate "watched player's name" element. Ours draws the film boosters in the wrong camera modes (condition inverted). | COVERED (done 2026-11-25; was one inverted condition) | hud.cpp: one condition (done) |
+| N2 (M7 + J5) Mute Players page | Rows are the scoreboard team lists (same list kind, same layout `dcae45f4`), already filled. Selecting a row must toggle that player's voice mute; PS4 finds the row and does nothing. J5's "scoreboard mute action `0xb04c828b`" is this page's list id, not a scoreboard action. | COVERED (done 2026-11-25; CHECK in a match) | remaining.cpp list callbacks; J4 icon (scoreboard.cpp) |
+| N3 (M9) Multiplayer Medals | PS3: the button is on the no-save main menu PAGE_NEWPROFILE (and PAGE_NEWPROFILE_BETA) only, after Options, with a visibility condition; not on PAGE_MULTIPLAYER, not on PAGE_PROFILE, not on Bonuses (Bonuses has the single-player Medals). Our menu overlay turns exactly that button into Multiplayer, so the page is unreachable on PC. | COVERED in the import (overlay version 6); visibility and list content CHECK | overlay.cpp (done), page check (open) |
 | N4 (M10 b) `cdf70794` | Not a setting. Each frame the PS3 loading-screen draw publishes its "shown" byte under the name id `cdf70794` into the game's short-lived named-state table (the same mechanism the player update uses for `player-on-narrow-edge`). Nothing in PS3 code or DC data reads that name; PS4 neither writes nor reads it. The 30 is an argument of that publish call, not a default. No visible effect. | COVERED (nothing to do) | none |
-| N5 (J7) mouth follows the microphone | The local player's caller is **`0x714db6`** (inside `0x714a70`, the PS4 counterpart of PS3 `0x51b3e8`). Sid `0x94bb3775` is the facial talking animation layer (the setter plays `facial-talking-calm` on it). PS4 replaced the microphone term by 0: one 8-byte patch makes it PS3 again. | MISSING (now hookable) | voice.cpp + one patch |
-| N6 (J1 question 7) talking indicators of other clients | PS3 had a full mesh: every machine had a connection record per other player, so every reader found every talker. Proposed PC rule: point the four PS4 talking-level readers at a separate level table that lists every remote member; SendNetEvent and every other record user keep the real records. | MISSING | voice.cpp/gamenet.cpp + 4 displacement patches |
+| N5 (J7) mouth follows the microphone | The local player's caller is **`0x714db6`** (inside `0x714a70`, the PS4 counterpart of PS3 `0x51b3e8`). Sid `0x94bb3775` is the facial talking animation layer (the setter plays `facial-talking-calm` on it). PS4 replaced the microphone term by 0: one 8-byte patch makes it PS3 again. | COVERED (done 2026-11-25; loudness scale a proposal) | voice.cpp + one patch (done) |
+| N6 (J1 question 7) talking indicators of other clients | PS3 had a full mesh: every machine had a connection record per other player, so every reader found every talker. Proposed PC rule: point the four PS4 talking-level readers at a separate level table that lists every remote member; SendNetEvent and every other record user keep the real records. | COVERED (done 2026-11-25) | voice.cpp + 4 displacement patches (done) |
 
 ## 2. N1 (M6). Film spectating HUD
 
@@ -366,3 +366,41 @@ fresh-profile run).
 2. N3: what PS3 condition 8 tests (the visibility of Multiplayer Medals on the no-save menu). Only needed if the PS4
    condition 9 turns out to be stubbed.
 3. N2 / J4: the PS4 name of the muted icon in the HUD image table `[0x1130008 + 0x70]` (PS3 `0x7a5f5bf1`).
+
+## 10. Implementation state (2026-11-25, branch `u2mp-p4-mspec`)
+
+Nothing below was run in the game yet; the unit tests and the static byte checks pass.
+
+- **N1 done.** hud.cpp `boosters()`: film site when `[0x113b008] == 0`; `hud.md` 4.7 and `PORT-HUD.md` 5.4 corrected.
+- **N2 done, one mechanism.** The earlier J5 code (a93b2a8: the `lea` at `0x5ed964` pointed at a wrapper of
+  `0x5ecb80`) is removed; `0x5ecb80` runs unpatched. remaining.cpp `mute_players_row` is registered for
+  `0xb04c828b` and `0xb48d9f3c` (F-register, appended) by `mute_players_frame`, which session.cpp `frame_work` calls
+  every session frame (the game never registers the two ids and fills its table at run time; the call finds the
+  entries after the first time). Rule 3.4 exactly: no local tracker / unknown list / no entry / no tracker with that
+  net id (`+0x120`) / the local net id: nothing; else `voice::toggle_mute`, log once per process. Install checks the
+  PS4 row search bytes (`0x5ed076`, `0x5ed0ca`, own team, NGM state, the two copies, positions, team bytes, the
+  NetStatGame `lea` target); any difference: no callbacks, logged. Rules `overlay::mute_action_team`,
+  `mute_action_previous_game`, `team_row_entry`, `mute_list_target` (u2mp-overlay-test).
+- **N2 / J4 muted icon** (a93b2a8, checked): the vtable slot 15 of `0x100a280` (the cell query `0x5b2ac0`) is taken
+  whole, so the muted icon is answered before the talking branch (`0x5b2cb0`); the install check includes the key load
+  at `0x5b2cb4` (`8b 88 3c 02 00 00`). Every list of that vtable asks it: the scoreboard's team lists and the Mute
+  Players lists. The icon record carries id `0x7a5f5bf1` with its index in the net image table, or -1, which makes
+  the image lookup (menuimages.cpp) pair it by PS3 name or take the net-u2mp copy (question 3 still open: the PS4
+  name is not known).
+- **N6 done.** voice.cpp `install_talk_table`: the four 7-byte readers checked (bytes and that each d32 reaches
+  `0x104ae30`), then all four d32 point at an 8-byte slot from `near_stub` holding the address of a static table (8 +
+  32 x 0x220 bytes). `fill_talk_table` (game thread, every `voice::frame`, and zeroed in `voice::stop`) writes one
+  slot per present remote member (rule `voice::talk_table_slots`, u2mp-voice-test). `gamenet::set_talk_levels` keeps
+  writing the real records (rule 4; no reader left). Any difference: no patch, today's behaviour, logged.
+- **N5 done.** voice.cpp `install_mouth`: the four sites checked, M from `near_stub`, the 8 bytes at `0x714d9e`
+  become `c5 fa 5f 05 <rel32>`. The capture callback stores `voice::mouth_loudness(Gate::rms(), transmitting)` (L =
+  `kMouthLoudnessScale` 100 x rms / 32768, a named constant marked as the proposal of question 1) in an atomic;
+  `voice::frame` copies it to M while the capture stream is open, else M stays 0 (also set to 0 in `stop`). The old
+  "J7 off" log line is gone.
+- **N3 done in the import.** overlay.cpp (VERSION 6): PAGE_NEWPROFILE and PAGE_NEWPROFILE_BETA get new control lists
+  in the PS3 order with a new Multiplayer control (a copy of the page's BUTTON_MULTIMEDALS record made the code button
+  the overlay made before, with appended name strings `BUTTON_MULTIPLAYER` / `MENU_MULTIPLAYER`); BUTTON_MULTIMEDALS
+  is left as shipped. PAGE_PROFILE's list is unchanged apart from the Multiplayer control's two name pointers.
+  Checked on a copy of the PS4 game's menu.bin (`u2import --overlay` into a scratch folder): the three pages read back as specified, the pointer bitmap covers the new
+  data, and against overlay version 5 the Multiplayer record differs only in its two name pointers. The CHECKs of
+  4.3 (condition 9 visibility, LIST_MEDALS content) stay open until a game look.
