@@ -35,7 +35,7 @@ pointer in the image's pointer table) and against the addresses our runtime touc
 | COVERED-OURS | 7 |
 | PLATFORM | 3 |
 | DROPPED | 7 |
-| MISSING | 1 (N1) |
+| MISSING | 0 (N1 implemented 2026-11-25) |
 | total | 115 |
 
 Our runtime replaces or wraps these PS4 hosts: the match state updates (`0x5f1000` Resetting and the other nine,
@@ -159,7 +159,7 @@ ours. Ids are the DC string ids the PS3 function uses.
 | 49d000 | 647a50 | StartNetGame: create the game's pickups and objects | COVERED-INLINED | five ids inside; spawn.cpp wraps the spawner calls at `0x647c62`, `0x647dc6`, `0x6484e8` and still spawns |
 | 49dbf8 | 647a50 | StartNetGame: objects of game types 5 / 7 (`58609830`) | COVERED-INLINED | id inside |
 | 49dfc0 | 5f1000 | "is the map's content present" | COVERED-INLINED | PS3 callers `0x4350ac` (`parity-l`, PS4 `0x5e9420`) and `0x440478` (LoadLevels, original runs) |
-| 49e0e8 | 65b830 | time limit in clock units, 0 for co-op types | **MISSING** (N1) | the PS4 callers keep it; our presence (PS3 caller `0x490338`) lacks the co-op rule; the HUD caller `0x8aef68` is ours and shows no score panel in co-op |
+| 49e0e8 | 65b830 | time limit in clock units, 0 for co-op types | COVERED-OURS (N1, implemented 2026-11-25: `online.cpp match_end_now`) | the PS4 callers keep it; our presence (PS3 caller `0x490338`) lacks the co-op rule; the HUD caller `0x8aef68` is ours and shows no score panel in co-op |
 | 49e1c0 | 7d6170 | a float of the current task, else of the net game record (most likely the respawn delay) | COVERED-INLINED | PS3 caller `0x4bf4a8` = PS4 `0x65b830` (original runs, scoreboard.cpp only checks bytes) |
 | 49e2b0 | 5f1000 | current co-op task's script id, default task fallback | COVERED-OURS | natives.cpp `net-coop-script-id` (`parity-c` row 4cd8ac) |
 | 49e368 | 5f1000 | current co-op task's host script id, fallback | COVERED-OURS | natives.cpp `net-coop-host-script-id` (`parity-c` row 4ccab8) |
@@ -200,7 +200,7 @@ ours. Ids are the DC string ids the PS3 function uses.
 
 ## 4. Behaviour items
 
-### N1. Presence: no match end time in co-op (PS3 `0x490338` -> `0x49e0e8`) - MISSING
+### N1. Presence: no match end time in co-op (PS3 `0x490338` -> `0x49e0e8`) - MISSING, implemented 2026-11-25 (`online.cpp match_end_now`)
 
 What PS3 does: when it writes the presence block (`parity-g` 1.2), the match end time comes from a helper that
 answers "time limit in net-clock units" for the current net game. The helper answers 0 when there is no current net
