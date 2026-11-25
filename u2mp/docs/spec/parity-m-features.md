@@ -272,6 +272,9 @@ the menu manager word PS3 `+0x5b4` that also gates M1; on PS4 it is s32 `[0x1136
 
 Columns, pages, filter and footer are the game's own list (`0x113d960` object, `progression.md` 1.5.11-1.5.15 and
 `parity-a` 2.2-2.4). The rank badge column is image type 0x27 (`menus.md` 2.9). Nothing more is visible on PS3.
+Correction 2026-11-25 (owner: the page showed nothing): the table was never drawn, because nothing on PS4 asked the
+list update to start over when the page opens (column set 0). Fixed by the page shown handler, `progression.md`
+1.5.19; the English mode button reads "Leaderboards" and the footer "Prev" / "Top of List" as on PS3 (`TEXTS.md`).
 
 ## 5. Assets
 

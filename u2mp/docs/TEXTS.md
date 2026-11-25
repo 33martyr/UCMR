@@ -34,7 +34,11 @@ The hook (`text_find`, texts.cpp; installed by remaining.cpp) answers, in this o
 3. the imported bank of the language (`/app0/u2data/build/main/text1/ps4/<n>.common` and `.networking`,
    written by the import's texts step, u2text.complete): the PS4 bank, completed with the GOTY PS3 bank of
    that language (every GOTY archive, newest first) for ids it lacks or has as `_`, and for sam-spanish and
-   brazilian with the spanish and portuguese PS4 banks. A real PS4 string is never changed. GOTY data only;
+   brazilian with the spanish and portuguese PS4 banks. A real PS4 string is never changed. GOTY data only.
+   Exception, English only: the ids of `kOwnFirstInEnglish` take step 4 first. Today one id, 47a936dc (the
+   Multiplayer page's Leaderboards mode button): the GOTY base bank says "Rankings", PS3 shows "Leaderboards"
+   (its title update text; reference video 2026-11-25). The other GOTY languages keep their bank text
+   (Classements, Ranglisten, Clasificaciones, ...: already the leaderboard word);
 4. our own text (`kOwn`: every language, `nullptr` = es-419 -> es, pt-BR -> pt, else English; `kMenu`:
    greek / czech / turkish for every text their PS4 banks have as `_`: 96 common (menu) and 396
    networking texts, our own wording from the PS4 English, terms as in their PS4 common banks: booster =
@@ -55,7 +59,7 @@ the overlay's `net-patch9.bin`) that are text ids, plus every id of the PS4 Engl
 banks. Text ids were found against the PS4, GOTY and (for finding ids only) BCUS banks; no BCUS text is used.
 
 104 ids referenced by the code / net-patch9 are in no PS4 bank: 2 are in the GOTY base bank (47a936dc
-"Rankings" for Leaderboards, ec7dd02d a treasure name), 4 are another PS4 id's text (aliases), 98 had no
+"Rankings" for Leaderboards, English served from `kOwn` since 2026-11-25; ec7dd02d a treasure name), 4 are another PS4 id's text (aliases), 98 had no
 text anywhere. All 98, the 5 playlist texts and the 11 PC texts are in `kOwn` (114 rows) in all 22 languages.
 
 | language | PS4 own | imported (GOTY / related) | ours | still English |
