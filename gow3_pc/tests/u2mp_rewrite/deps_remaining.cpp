@@ -81,6 +81,10 @@ bool kick(uint32_t net_id) {
     hx::rec("session::kick %u", net_id);
     return st.kick_result;
 }
+bool kick_griefer(uint32_t net_id) {   // only the new build calls it (B7 kicks with block since the parity work)
+    hx::rec("session::kick_griefer %u", net_id);
+    return st.kick_result;
+}
 std::string local_name() {
     hx::rec("session::local_name");
     return st.local_name;
@@ -165,6 +169,7 @@ int cinema_received() {
     hx::rec("online::cinema_received");
     return st.cinema_received;
 }
+void member_data_changed() { hx::rec("online::member_data_changed"); }   // new build only (clan tag check, parity A 2.1)
 }  // namespace online
 
 // voice.cpp
@@ -181,6 +186,7 @@ bool toggle_mute(uint32_t net_id) {
 
 // progression.cpp
 void progression_publish() { hx::rec("progression_publish"); }
+void progression_publish_career() { hx::rec("progression_publish_career"); }   // new build only (parity A 2.1)
 std::vector<std::string> progression_recent_players(size_t max) {
     hx::rec("progression_recent_players %zu", max);
     std::vector<std::string> v = st.recent;

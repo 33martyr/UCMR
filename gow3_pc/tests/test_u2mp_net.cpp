@@ -151,10 +151,40 @@ static void rejoin_same_address() {
     std::printf("rejoin: joined %d, left %d, client got %d after the rejoin\n", joined, left, client_got);
 }
 
+// 4. The host's admit hook turns a Hello away (a griefer-kick block): no slot, no Welcome, no peer event,
+//    exactly as when the party is full. Once the hook lets it in, the same client joins.
+static void refused_join() {
+    Transport host, client;
+    CHECK(host.host(0));
+    Address to;
+    CHECK(Address::parse("127.0.0.1:" + std::to_string(host.bound_port()), 0, to));
+    CHECK(client.join(to));
+    int joined = 0, asked = 0;
+    bool allow = false;
+    host.on_peer = [&](uint8_t, bool in) { joined += in; };
+    host.admit = [&](const Address &) { ++asked; return allow; };
+    double now = 0;
+    for (int i = 0; i < 100; ++i) {
+        client.pump(now);
+        host.pump(now);
+        now += 0.016;
+    }
+    CHECK(!client.connected() && joined == 0 && asked >= 2);
+    allow = true;
+    for (int i = 0; i < 100 && !client.connected(); ++i) {
+        client.pump(now);
+        host.pump(now);
+        now += 0.016;
+    }
+    CHECK(client.connected() && joined == 1);
+    std::printf("refused join: %d Hellos refused, then joined %d\n", asked - 1, joined);
+}
+
 int main() {
     lossy_link();
     loopback();
     rejoin_same_address();
+    refused_join();
     std::printf(failures ? "u2mp net: %d FAILED\n" : "u2mp net: all passed\n", failures);
     return failures ? 1 : 0;
 }

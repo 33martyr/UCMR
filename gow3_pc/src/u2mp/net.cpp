@@ -343,6 +343,7 @@ void Transport::handle(const Address &from, const uint8_t *packet, size_t size, 
             c = nullptr;
         }
         if (!c) {
+            if (admit && !admit(from)) return;   // refused: no Welcome, as when full
             const uint8_t want = size > kHeader ? packet[kHeader] : 0;   // the slot asked for (0 = any)
             if (want >= 1 && want <= kMaxPeers && !peers_[want].connected) c = &peers_[want];
             for (uint8_t slot = 1; slot <= kMaxPeers && !c; ++slot)

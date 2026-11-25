@@ -24,7 +24,7 @@ Shared helpers from other files (use them, do not reimplement them):
   `text_find_original`, constants `kTextPlayer`, `kTextSlot[8]`, `kTextSlots` (8) and the
   `kText*` ids listed below.
 - Session (`session_api.h`): `session::member_at`, `member_name`, `local_id`, `is_host`, `kick`,
-  `local_name`.
+  `kick_griefer`, `local_name`.
 - Online (`online.h`): `online::active`, `linked`, `promote`, `open_join_list`, `friend_count`,
   `friend_row`, `friend_name`, `friend_kind`, `friend_online`, `friend_joinable`, `join_friend`,
   `invite_friend`, `invite_count`, `friend_add`, `accept_request`, `remove_friend`,
@@ -387,8 +387,11 @@ is entirely `texts.cpp`'s.
 
 #### B7. NetEventKickGriefer::Apply 0x61b900 (rdi = event)
 
-If the match session is not host: return. Otherwise call `session::kick` with the event's +0x0c
-word. If it returns false, log `"NetEventKickGriefer: can't kick net id %u"` (the net id).
+If the match session is not host: return. Otherwise call `session::kick_griefer` with the event's
++0x0c word. If it returns false, log `"NetEventKickGriefer: can't kick net id %u"` (the net id).
+`kick_griefer` is the PS3 room kickout with the block flag set (`session.md` "Griefer kick"): the
+player is kicked and its online id refused on later joins while this PC hosts; the host's own net id
+makes the host leave the session.
 
 #### B8. Party / match player rows (0x5ec490, 0x5ec460) and F-player-options(row)
 
@@ -454,6 +457,8 @@ F-friend-options(r):
 
 If the selected member net id is 0, or `session::kick(id)` returns false: log
 `"Kick From Party: net id %u not kicked"` (the selected id). (`kick` is not called when the id is 0.)
+Kick From Party does not block: the player may join again at once (only the griefer kick, B7,
+blocks; whether PS3's party kick sets the block flag is not checked, `parity-c-match.md` 4).
 
 #### B14. Mute 0x5ec4b0 and 0x5ec480 (same behaviour)
 
@@ -637,7 +642,7 @@ not host (match +0x10 non-zero and +0xb00 != +0xb04); lethal and host via +0x10 
 ids; attack index 0, 44, 45, 0xffffffff; time 1.5 (450), -0.0, 1e10, NaN; check the 7 call
 arguments, the time value, and the +0x262a byte (other bits kept).
 
-B7: not host; host and kick true; host and kick false (log).
+B7: not host; host and kick_griefer true; host and kick_griefer false (log).
 
 B8/B9/B10: row not found (log); own row (name + " " + You text); other member as client, as host
 offline, as host online (3 options); `% 10` on 13 for 0x5ec490; LIST_FRIENDS offline (row from +4),

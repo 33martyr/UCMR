@@ -347,7 +347,8 @@ U2MP_GUEST void npc_deal_damage_apply(void *event, void *) {
 U2MP_GUEST void kick_griefer_apply(void *event, void *) {
     if (!session_is_host(kMatchSession)) return;
     const uint32_t net_id = load_at<uint32_t>(event, 0x0c);
-    if (!session::kick(net_id)) log("NetEventKickGriefer: can't kick net id %u", net_id);
+    // Kick with block (PS3: room kickout, block flag 1); naming the host makes the host leave.
+    if (!session::kick_griefer(net_id)) log("NetEventKickGriefer: can't kick net id %u", net_id);
 }
 
 // ---- B8: party and match player rows -----------------------------------------------------------------

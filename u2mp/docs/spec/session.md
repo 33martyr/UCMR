@@ -80,6 +80,7 @@ bool member_name(uint32_t net_id, std::string &name);
 uint32_t local_id();
 bool is_host();
 bool kick(uint32_t net_id);
+bool kick_griefer(uint32_t net_id);
 std::string local_name();
 int rank();
 int member_count();
@@ -116,7 +117,8 @@ Declared in frontend.cpp (namespace `u2mp::session`): `void install(int &install
 
 Known callers: frontend.cpp (install), frontend3.cpp (send_message, net_ticks, create_match,
 member_count, is_host), frontend6.cpp (create_match, is_host, send_message), menus.cpp (local_name,
-member_count, is_host, member_at), remaining.cpp (kick, member_at, local_id, is_host, member_name),
+member_count, is_host, member_at), remaining.cpp (kick, kick_griefer, member_at, local_id, is_host,
+member_name),
 voice.cpp (local_id, member_name), online.cpp (member_rank, local_id, local_name, member_count, rank,
 online_reopen, send_message, is_host, net_id_of, online_host_gone, online_rehost, online_migrated,
 online_match_ready, set_local_name, match_migration_ok, member_address), menuimages / others
@@ -408,8 +410,8 @@ Sent:
 members all empty; active = false; hosting = false; my net id = 0; my name = `Drake`; host id = 1;
 sent mode = -1; last seen NET_SM = 0; frame counter = 0; kicked = false; host lost = false; sent rank
 = 0xff; sent team = 0xff; next rate log = 0 (clock seconds); last frame clock = -1; rehost pending =
-false; NpId map empty; closed-page frame counter = 0; net clock object = none; last online state index
-= -1; next online log = 0 ms. Per-member roster text buffers: 11 buffers of 64 chars (one per slot).
+false; NpId map empty; block list empty; closed-page frame counter = 0; net clock object = none; last
+online state index = -1; next online log = 0 ms. Per-member roster text buffers: 11 buffers of 64 chars (one per slot).
 
 What is NOT reset by teardown (5.7): hosting, my net id, host id, rehost pending, NpId map, sent
 rank/team, last seen NET_SM, the frame and rate-log counters, the net clock object.
@@ -460,6 +462,18 @@ rank/team, last seen NET_SM, the frame and rate-log counters, the net clock obje
   |= 0x40. Returns pkg.
 - Keep net package: if `extra_net_package()` returns a name, request it; then request `net` and return
   that result.
+- Close transport: `transport.close()`, then empty the block list. Every place below that closes the
+  transport (teardown, frame work step 6, `online_reopen`, `online_rehost`) does it this way, so the
+  block list lives exactly as long as one hosted transport.
+- Block list (griefer kick, PS3 room kickout with block flag 1): a map online id (NpId text) -> number
+  of refused Hellos. Admit (installed as `transport.admit`, asked by the host transport before it gives
+  a new peer a slot): true when the list is empty, when `online::npid_at(from)` is empty or not in the
+  list. Else add 1 to that id's count; when the count before adding was a multiple of 20 (the first
+  refusal, then one line per 10 s of 0.5 s Hello retries) log
+  `party: refused a join from %s (kicked as a griefer; %u tries)` (NpId, new count); false. A refused
+  Hello gets no slot, no Welcome and no peer event, exactly as when the party is full: online the
+  joiner gives up through its "room owner not reached" path, on LAN it keeps waiting as for a full
+  host.
 
 ### 5.2 Page handler registration
 
@@ -495,8 +509,9 @@ into party; sent mode = -1; NET_SM = 18; register the page handler; keep net pac
 
 1. If `UNCHARTED_U2MP_NAME` is non-empty, my name = its first 31 bytes.
 2. Port = 27210, or `UNCHARTED_U2MP_PORT` as in 4.3.
-3. Install the transport's peer callback (5.11) and message dispatcher (4.1); hand the transport to
-   `gamenet::set_transport` and then `voice::set_transport`.
+3. Install the transport's peer callback (5.11), message dispatcher (4.1) and admit check (5.1 block
+   list); empty the block list; hand the transport to `gamenet::set_transport` and then
+   `voice::set_transport`.
 4. Clear all members.
 5. link = `online::start()`. If non-NULL: `transport.host_link(link)`; false -> fail. Else hosting =
    true, my net id = 1, host id = 1, member[0] = {used, 1, my name, local rank, team 0}; log
@@ -519,7 +534,7 @@ returns non-NULL, "not created" when NULL. Then log
 ### 5.7 LEAVE_MULTIPLAYER and teardown
 
 LEAVE_MULTIPLAYER = teardown with pop. Teardown, in order: log `leaving multiplayer`; unregister the
-page handler; `gamenet::detach(s)` for s = 0..10; `voice::stop()`; `transport.close()`;
+page handler; `gamenet::detach(s)` for s = 0..10; `voice::stop()`; close transport (5.1);
 `online::on_transport_closed("Multiplayer left")`; active = false; clear party session; clear match
 session; netInfo+0x2c4 = 0; ngm+0x1ca0 = -1; guest `0x63db90(ngm)`; `progression_publish()`; NET_SM = 0;
 clear all members; with pop: guest `0x5cc6f0(menu)`.
@@ -534,7 +549,7 @@ Runs from the page handler and after every wrapped state Update.
 5. `transport.pump(now)`; `gamenet::frame(now)`; `voice::frame()`; `transport.pump(now)`.
 6. If kicked or host lost: log `party: closing the transport (%s); Multiplayer starts a new one` with
    `kicked` (kicked wins) or `host lost`; clear both flags; detach slots 0..10; `voice::stop()`;
-   `transport.close()`; `online::on_transport_closed` with the same word; active = false; clear all
+   close transport (5.1); `online::on_transport_closed` with the same word; active = false; clear all
    members; stop. (Sessions, NET_SM and the page handler are left as they are.)
 7. frame counter += 1. Skip net fade: for `net` then `net-u2mp`: find the package; if found with state
    7 and (F - s32 package+0x924) < 300 (signed 32-bit), where F = the s32 game frame counter at
@@ -723,7 +738,17 @@ page 0x471007a1: the first entry with that page id, else (count < 32) a new entr
 - `rank()`: local rank (one guest lookup).
 - `send_message(slot, body, except)`: when active and body non-empty, send as in 4.1.
 - `kick(id)`: false unless active, hosting, 2 <= id <= 11 and member id-1 used. Else log
-  `party: kicking %s (net id %u)`, send `[5]` to slot id-1, true.
+  `party: kicking %s (net id %u)`, send `[5]` to slot id-1, true. Kick From Party uses this; it does
+  not block.
+- `kick_griefer(id)` (NetEventKickGriefer on the host; PS3 kicks out of the match room with the block
+  flag set): false unless active and hosting. If id equals my net id (the host was named): log
+  `party: this PC (the host) was named as the griefer: leaving the session`, netInfo+0x1c = 1, kicked =
+  true (frame work step 6 closes the transport on the next frame, as for a kicked client), true.
+  Otherwise npid = `online::npid_at` of `transport.peer_address(id - 1)` when 2 <= id <= 11 and that
+  slot has an address, else empty (read before the kick). `kick(id)`; false -> false. Then empty
+  npid: log `party: net id %u has no online id: kicked, not blocked`; else add npid to the block list
+  (count 0; an id already there keeps its count) and log
+  `party: %s blocked from joining again until this session ends` (npid). True.
 - `member_address(id, out)`: false unless active, hosting and 2 <= id <= 11; else
   `transport.peer_address(id - 1, out)`.
 - `net_id_of(npid)`: the smallest net id whose stored NpId equals npid; 0 when none.
@@ -731,7 +756,7 @@ page 0x471007a1: the first entry with that page id, else (count < 32) a new entr
   `local_name()` equals n. Else my name = n; `_putenv_s("UNCHARTED_U2MP_NAME", n)`; log
   `player name: %s (RPCN)`. Then, only when active: hosting with member 0 used -> its name = n, refresh
   sessions, broadcast Roster (+ Ids); not hosting with my net id != 0 -> send Info.
-- `online_reopen(link, owner)`: detach 0..10; `transport.close()`; clear members; kicked = host lost =
+- `online_reopen(link, owner)`: detach 0..10; close transport (5.1); clear members; kicked = host lost =
   false; host id = 1; rehost pending = false. Owner NULL: hosting = result of
   `transport.host_link(link)`; my id = 1; member 0 = {used, 1, my name, local rank, 0}; party = (ctx, 1,
   1); publish into party; log `online: transport switch: hosting a new party on the online link`.
@@ -753,7 +778,7 @@ page 0x471007a1: the first entry with that page id, else (count < 32) a new entr
   game's type is a co-op type, false. Else true.
 - `online_rehost(link, owner, new_host)`: old = host id. Log
   `match migration: host net id %u left; net id %u hosts now%s` (old, new, empty with an owner, else
-  ` (this PC)`). Detach 0..10; `transport.close()`; clear members; kicked = host lost = false; host id
+  ` (this PC)`). Detach 0..10; close transport (5.1); clear members; kicked = host lost = false; host id
   = new. Owner NULL: hosting = `transport.host_link(link)`; `transport.reserve_slot(my id - 1)` (as
   u8); member 0 = {used, my id, my name, local rank, local team} (rank lookup before team read).
   Owner given: hosting = false; `transport.join_link(link, *owner, my id - 1)`. Then: party = (ctx, my
@@ -894,6 +919,10 @@ Teardown and public calls
 55. match_migration_ok for each false branch and true.
 56. online_rehost as new host (reserve slot, member 0 with my id, player left(old), 0x5e9f30) and as
     member (join_link with slot my id - 1, rehost pending, then the joined event finishes it).
+57. kick_griefer: not hosting -> false; own id -> log, netInfo+0x1c = 1, next frame closes (`kicked`);
+    member with an NpId -> `[1,5]` to it, blocked; its next Hello is refused (no slot, one log line,
+    the next line at the 21st try); a member without NpId (LAN) -> kicked, not blocked; after any
+    close transport the same NpId joins again. Kick From Party never blocks.
 
 ## Clarifications found by the differential test
 

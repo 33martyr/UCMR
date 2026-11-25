@@ -24,6 +24,10 @@ bool is_host();
 // host drops it (NetEventPlayerLeft, roster) when its goodbye arrives. False when not hosting,
 // for the host itself, or for an unknown member.
 bool kick(uint32_t net_id);
+// Host only, for NetEventKickGriefer: kicks the member as kick() does and refuses its online id on
+// later joins until this PC stops hosting (the transport closes). Naming this PC itself makes it leave
+// the session, as PS3 does. False when not hosting or for an unknown member.
+bool kick_griefer(uint32_t net_id);
 // This PC's player name (UNCHARTED_U2MP_NAME, else "Drake").
 std::string local_name();
 int rank();   // this PC's rank badge index (profile panel)

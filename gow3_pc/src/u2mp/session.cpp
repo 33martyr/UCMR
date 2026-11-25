@@ -181,6 +181,9 @@ bool lobby_returning = false;
 void *online_state = nullptr;
 double lobby_grace = 0.0;
 std::map<uint32_t, std::string> npids;   // net id -> NpId (ordered, so the smallest id is found first)
+// Host: online ids kicked as griefers in this hosted session -> refused Hellos since. Lives as long as
+// the transport (close_transport clears it), like PS3's block on the match room.
+std::map<std::string, unsigned> blocked;
 int closed_frames = 0;
 uint8_t *clock_object = nullptr;
 int last_state = -1;
@@ -876,6 +879,22 @@ void on_peer(uint8_t slot, bool joined) {
 }
 
 // ---- transport start ----------------------------------------------------------------------------------
+// Host: a Hello from a blocked online id gets no slot, the same way a full party turns it away.
+bool admit_peer(const net::Address &from) {
+    if (blocked.empty()) return true;
+    const std::string npid = online::npid_at(from);
+    const auto it = npid.empty() ? blocked.end() : blocked.find(npid);
+    if (it == blocked.end()) return true;
+    if (it->second++ % 20 == 0)   // Hellos repeat every 0.5 s: one line per 10 s
+        log("party: refused a join from %s (kicked as a griefer; %u tries)", npid.c_str(), it->second);
+    return false;
+}
+
+void close_transport() {
+    transport.close();
+    blocked.clear();
+}
+
 bool start_transport() {
     const char *env_name = std::getenv("UNCHARTED_U2MP_NAME");
     if (env_name && *env_name) my_name = cut(env_name, 31);
@@ -886,6 +905,8 @@ bool start_transport() {
     }
     transport.on_peer = on_peer;
     transport.on_message = on_transport_message;
+    transport.admit = admit_peer;
+    blocked.clear();
     gamenet::set_transport(&transport);
     voice::set_transport(&transport);
     clear_members();
@@ -961,7 +982,7 @@ void teardown(bool pop) {
     unregister_handler();
     for (int s = 0; s < kSlots; ++s) gamenet::detach(uint8_t(s));
     voice::stop();
-    transport.close();
+    close_transport();
     online::on_transport_closed("Multiplayer left");
     active = false;
     clear_session(kPartySession);
@@ -1082,7 +1103,7 @@ void frame_work() {
         kicked = host_lost = false;
         for (int s = 0; s < kSlots; ++s) gamenet::detach(uint8_t(s));
         voice::stop();
-        transport.close();
+        close_transport();
         online::on_transport_closed(why);
         active = false;
         clear_members();
@@ -2033,6 +2054,28 @@ bool kick(uint32_t net_id) {
     return true;
 }
 
+bool kick_griefer(uint32_t net_id) {
+    if (!active || !hosting) return false;
+    if (net_id == my_id) {
+        // PS3 treats kicking its own member as leaving the room: the host leaves, as a kicked player does.
+        log("party: this PC (the host) was named as the griefer: leaving the session");
+        g(kNetInfo)[0x1c] = 1;
+        kicked = true;   // the transport closes on the next frame, outside the event Apply
+        return true;
+    }
+    std::string npid;
+    net::Address a;
+    if (net_id >= 2 && net_id <= 11 && transport.peer_address(uint8_t(net_id - 1), a)) npid = online::npid_at(a);
+    if (!kick(net_id)) return false;
+    if (npid.empty()) {
+        log("party: net id %u has no online id: kicked, not blocked", net_id);
+    } else {
+        blocked.emplace(npid, 0u);
+        log("party: %s blocked from joining again until this session ends", npid.c_str());
+    }
+    return true;
+}
+
 bool member_address(uint32_t net_id, net::Address &out) {
     if (!active || !hosting || net_id < 2 || net_id > 11) return false;
     return transport.peer_address(uint8_t(net_id - 1), out);
@@ -2063,7 +2106,7 @@ void set_local_name(const std::string &name) {
 
 void online_reopen(net::Link *link, const net::Address *owner) {
     for (int s = 0; s < kSlots; ++s) gamenet::detach(uint8_t(s));
-    transport.close();
+    close_transport();
     clear_members();
     kicked = host_lost = false;
     host_id = 1;
@@ -2148,7 +2191,7 @@ void online_rehost(net::Link *link, const net::Address *owner, uint32_t new_host
     log("match migration: host net id %u left; net id %u hosts now%s", old, new_host_net_id,
         owner ? "" : " (this PC)");
     for (int s = 0; s < kSlots; ++s) gamenet::detach(uint8_t(s));
-    transport.close();
+    close_transport();
     clear_members();
     kicked = host_lost = false;
     host_id = new_host_net_id;
