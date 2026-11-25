@@ -37,4 +37,5 @@ implementer (`parity-a` .. `parity-m`, `parity-ticker-respawn`: the missing / st
 
 | Survey | Audit rows | Result |
 |---|---|---|
-| parity-n-inlined.md | the 115 "inlined" rows | 97 inlined in live PS4 code, 7 ours, 3 platform, 7 dropped (trophies, Twitter), 1 missing (N1: no presence match end in co-op); PS4 sites corrected for 11 rows |
+| parity-n-inlined.md | the 115 "inlined" rows | 97 inlined in live PS4 code, 7 ours, 3 platform, 7 dropped (trophies, Twitter), 1 missing (NI1: no presence match end in co-op, implemented); PS4 sites corrected for 11 rows |
+| parity-n-remaining.md | the last open items after groups A-M | N1 film boosters, N2 Mute Players lists, N3 Multiplayer Medals reachable, N4 loading id (no effect), N5 mouth follows mic, N6 talking indicators for every client: all implemented
