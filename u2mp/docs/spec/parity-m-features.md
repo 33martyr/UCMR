@@ -25,8 +25,8 @@ only as hints; every fact below was checked against the PS3 or PS4 binary or dat
 | MP menu pages (every page of menu.bin) | 40 MP pages; same controls, conditions and labels on PS3 and PS4 (`MENUS.md` 1) | every page reachable on PS3 is reachable, except the four below | COVERED, with M7-M9 | `MENUS.md` 2-9, `parity-b/d/e/f/g` |
 | Loading screen | black fill, card table in perspective, fort picture, coins, edges, rosters sliding in, band, map name, description, letter-by-letter tip | all of it, PS3 timings | COVERED (three PS3 details left out on purpose, M10) | `loading.md`, `PORT-FRONTEND5.md` |
 | Death camera / watching others | native camera kinds (net death, follow teammate, map spot), D-pad cycles | the PS4 code still has them and runs them | COVERED (CHECK) | M5 |
-| Dead-player hint line | "\|SELECT\| Scoreboard    \|D-PAD\| Camera" at the bottom while the death camera runs | drawn while the local player is dead (2026-11-25, `scoreboard.cpp`) | CHECK; PS4 facts settled (section 10), code still on the old stand-ins; glyph open | M1, sections 9, 10 |
-| Scoreboard / result overlay rules | four overlay entries, priority, PS3 fade and slide, open / close sounds, auto-open rules | four entries, PS3 fade / priority / slide, sounds, auto open on death; result pages still from our timers; no dim | CHECK / **MISSING** (dim, states, 4x fade rate): spec ready (section 10) | M2, M3, sections 9, 10 |
+| Dead-player hint line | "\|SELECT\| Scoreboard    \|D-PAD\| Camera" at the bottom while the death camera runs | drawn while the local death camera runs, PS4 facts of section 10 (2026-11-25, `scoreboard.cpp`) | CHECK; glyph open | M1, sections 9, 10 |
+| Scoreboard / result overlay rules | four overlay entries, priority, PS3 fade and slide, open / close sounds, auto-open rules | four entries, PS3 fade rate / priority / slide, sounds, auto open (`0x9766f0`), result pages from the NGM states, dim, menu gate | CHECK (film-only parts and two toggle blocks open) | M2, M3, sections 9, 10 |
 | Respawn countdown / co-op tries | in the scoreboard header (query cond 44) | the query is intact; the board now opens by itself on death | CHECK | M4 |
 | Film spectating HUD | score panel and the watched player's name at the top, boosters on the left, compact camera bar | theater bar only | CHECK / possibly MISSING | M6 |
 | Leaderboard tables | 4 boards, global / friends filter, "my page", 11 rows, Rank / badge / name / score columns, footer Filter / Previous / Next / Go to Top | local + RPCN boards, same list object | COVERED | `progression.md` 1.5.11-1.5.15, `parity-a` |
@@ -59,7 +59,7 @@ Ranked list of the work (section 6 repeats it with files).
   (`FUNCTIONS-FRONTEND-NET.md`). Both tracker functions are absent on PS4. (The two tsv rows were corrected on
   2026-11-25; a regeneration by `u2_match_report.py` must keep them.)
 
-### M1. Dead-player hint line (PS3 `0x4cbc10` second half, fade in `0x4cbf00` end) - DONE except open parts (section 9; PS4 facts section 10)
+### M1. Dead-player hint line (PS3 `0x4cbc10` second half, fade in `0x4cbf00` end) - DONE with the section 10 facts (CHECK; glyph open, section 9)
 
 What PS3 shows: while the local player is watching through a death camera, the line
 "|SELECT| Scoreboard    |D-PAD| Camera" (text `e2186a0c`, the button glyphs drawn by the game's text printer) fades in
@@ -98,7 +98,7 @@ Behaviour to implement:
    the button that really opens the scoreboard (open question 3).
 5. Log once per process when the hint first becomes visible: `scoreboard: death camera hint shown`.
 
-### M2. Scoreboard and result overlay rules (PS3 `0x4cbf00` / `0x4cbc10` first half) - rules 1-3, 5-7 DONE (rate and edge corrections, section 9); 4, 8 spec ready (section 10)
+### M2. Scoreboard and result overlay rules (PS3 `0x4cbf00` / `0x4cbc10` first half) - rules 1-8 DONE with the section 10 facts (CHECK; film-only parts and the rule 7 blocks open, section 9)
 
 The overlay has four entries (PS4 data at `0x104f544 + 8 + 0x14 x k`: u8 shown, f32 fade, f32 speed, u8 dim flag,
 u32 page id). PS4 data: entry 0 = PAGE_MULTIPLAYER_SCOREBOARD (`f650325d`, speed 1.0, no dim), entry 1 =
@@ -253,7 +253,8 @@ single-player bonus pages, nothing to do. Open question 8.
 fewer than 719 lines: never on PC, nothing to do; (b) the tunable read at the start of the PS3 draw (`0x158ff8`, id
 `cdf70794`, default 30): identify its use before deciding; (c) "rosters only while a menu field is 0": the field is
 the menu manager word PS3 `+0x5b4` that also gates M1; on PS4 it is s32 `[0x1136640 + 0x1014]` (section 10.2): draw
-  the rosters only while it is 0 (PS3 skips the in-place page draw `0x423410` entirely while it is not 0).
+  the rosters only while it is 0 (PS3 skips the in-place page draw `0x423410` entirely while it is not 0). DONE
+  2026-11-25 (`loading.cpp` `draw_rosters` through `menu_up()`, `loading.md` 4.7).
 
 ### Leaderboard tables - COVERED
 
@@ -273,6 +274,8 @@ hud.bnk sounds, MP banks, music cues, MP vox and DLC voices, per-mode actors, dc
   PS4 sound banks by id (open question 9).
 
 ## 6. Ranked missing features
+
+Items 1-6 are built (2026-11-25, section 9; run checks in section 7); 7-10 remain.
 
 1. M2 rule 6 + M4: scoreboard opens by itself while dead (with the respawn countdown / co-op tries header).
 2. M1: dead-player hint line "|SELECT| Scoreboard |D-PAD| Camera".
@@ -333,29 +336,35 @@ hides the board on the falling edge even when it was opened by button), 11 (10.4
     (section 10.8). Films only.
 14. M6 / films: the HUD notification element (10.8) and the film controller events are mapped; their visible
     effect in a film still needs one capture.
+15. Films only (new 2026-11-25): the call form of PS4 `0x4c4310` that sends the film controller its queries
+    (`8a87d1da`, `f498c2b5`, `e68ae001`): the layout and size of the "four empty argument records" and of the
+    reply are not given in 10.8. Until they are: in a film the automatic flag is false (the board does not open by
+    itself) and the `e68ae001` clear is not applied. Outside films no controller exists, so nothing changes there.
 
-## 9. Implementation status (2026-11-25, branch `u2mp-scoreboard`; PS4 facts of section 10 added the same day)
+## 9. Implementation status (2026-11-25, branches `u2mp-scoreboard` and `u2mp-p4-mfacts`)
 
 Code: `gow3_pc/src/u2mp/scoreboard.cpp` (the overlay), `overlay_rules.cpp` / `.h` (pure rules, test
 `gow3_pc/tests/test_u2mp_overlay.cpp`), `loading.cpp` `menu_text_in_rect` (the text-in-rect call shared with the
-loading screen). Behaviour as built: `gameplay.md` 1.4. "Spec ready" = every PS4 fact the rule needs is in section
-10; the code has not been changed yet.
+loading screen) and `menu_up()` (the menu state word, shared with the loading-screen rosters). Behaviour as built:
+`gameplay.md` 1.4. Every PS4 fact of section 10 the code uses is checked against its verification bytes at install
+(all matched in the 1.02 image on 2026-11-25); a part whose bytes differ is logged and left off (`gameplay.md` 1.5).
 
-| Item | Status | What is built / what the spec now says |
+| Item | Status | What is built |
 |---|---|---|
-| 1. M2 rule 6 + M4: board opens by itself while dead | DONE (CHECK), **spec ready for the exact rule** | Built: automatic flag = local character gone or died time >= spawn time; closes on respawn unless opened by button. Spec now: auto = PS4 `0x9766f0()` (10.4), film path (10.8), HUD notification override `0x555550` (10.8), "every player out" with threshold 0 (10.6), falling edge also closes a board opened by button (M2 rule 6), the state-5 rule. Co-op "down" then behaves as PS3 by construction (open question 5 is a run check). |
-| 2. M1: hint line | DONE (CHECK), **spec ready** | Built: 1/s in, 2/s out, dead = death camera, no menu test, A = 1.0. Spec now: 4/s in, 8/s out from the game's tick step (10.1); menu state word `+0x1014` (10.2); death camera `0x664b90` (10.5); A from the HUD alpha `0x104ed0c` (10.3) with the corrected 1.0 cases; nothing drawn while paused (10.3). `\|SELECT\|` glyph: open question 3. |
-| 3. M2 rules 1-3 | DONE, **rate correction** | Built at 1.0 / 2.0 per second; PS3 is 4.0 / 8.0 per second (speed x T / 75, 10.1). Page drawn only while the menu state word is 0 (rule 2a). |
-| 4. M2 rule 5: sounds | DONE (CHECK) | Ids confirmed: "scoreboard-open" / "scoreboard-close" in `dc1/ps4/audio.bin`, samples in `menu.bnk` (10.9). |
-| 5. M2 rule 4: dim | **spec ready** | Menu fields `+0x1030` target, `+0x1034` drawn value, `+0x1038` set-this-frame (10.2). |
-| 6. M2 rule 8: pages from match states | PARTLY, opt-in; **spec ready** | Spec now: sub-state `ngm+0x1e88`, end reason `ngm+0x1e84`, the request bytes are debug switches (not implemented), `e68ae001` is a film-controller query (10.8), state 5 detail, stale state 3 harmless (10.7). Timers and the opt-in can be removed. |
-| 7. M2 rule 7: button blocks | OPEN (minor) | Only in state 2 and not while every player is out (spec ready); the two PS3 blocks are not mapped (open question 12). |
-| 8-11 (M6, M7, M9, M10 b) | not started | Checks first, as written in their sections (open questions 7, 8, 14; M10 b unidentified tunable). |
+| 1. M2 rule 6 + M4: board opens by itself while dead | DONE (CHECK) | auto = PS4 `0x9766f0()` (10.4); HUD notification override `0x555550(0x1130008)` (10.8); "every player out" with threshold 0 and flags A / B from the state record (10.6); the falling edge also closes a board opened by button; the state-5 rule. The old died / spawn stand-in is gone. Films: auto = false (open question 15). Co-op "down": run check (open question 5). |
+| 2. M1: hint line | DONE (CHECK) | 4/s in, 8/s out from the game's frame step (10.1); menu state word `+0x1014` (10.2); death camera `0x664b90` (10.5); A from the HUD alpha `0x104ed0c` with the 1.0 cases (states 3-5, co-op 4 / 8 / 9 / 12, end reason 3 / 8) (10.3); nothing drawn while paused (10.3). `\|SELECT\|` glyph: open question 3. |
+| 3. M2 rules 1-3 | DONE | speed x T / 75 (4.0 / 8.0 per second); priority; slide; page drawn only while the menu state word is 0 (rule 2a). |
+| 4. M2 rule 5: sounds | DONE (CHECK) | "scoreboard-open" / "scoreboard-close" by id (10.9; the PS4 entry setter's bytes checked). |
+| 5. M2 rule 4: dim | DONE (CHECK) | menu `+0x1030` = ease, `+0x1038` = 1 when the byte is 0 (first request wins), also while a menu is up (10.2). |
+| 6. M2 rule 8: pages from match states | DONE (CHECK) | from NGM state, sub-state `ngm+0x1e88` and end reason `ngm+0x1e84` incl. the state 5 / sub-state 3 quirk and the per-frame relayout in states 3 / 4. The 12 s / 60 s timers, `show_round_results()` and the `UNCHARTED_U2MP_SCOREBOARD_STATES` opt-in are removed; the debug request bytes are not implemented (entry 1 never shows). Film entry-0 test (13) and `e68ae001` (15): false. Safety net kept: outside multiplayer (NET_SM <= 1) the rules run as state 0. |
+| 7. M2 rule 7: button blocks | DONE except two blocks | only in state 2, never while every player is out; the PS3 held-bit and pause-word blocks are not mapped (open question 12). |
+| 8. Loading-screen roster gate (M10 c) | DONE (CHECK) | rosters drawn only while `menu_up()` is false (`loading.md` 4.7). |
+| 9-12 (M6, M7, M9, M10 b) | not started | Checks first, as written in their sections (open questions 7, 8, 14; M10 b unidentified tunable). |
 
-Remaining visible differences from PS3 once section 10 is built: the two unmapped toggle blocks (12), the film-only
-controller-state test (13), the `|SELECT|` glyph (3). Owner rules that touch this overlay: minimum 2 players in
-every mode, 1 in co-op (the "every player out" test then covers the lone co-op player: when that player is out,
-entry 0 stays up and the hint fades); trophies are out of scope.
+Remaining visible differences from PS3: the two unmapped toggle blocks (12), the film-only parts (13, 15), the
+`|SELECT|` glyph (3). Owner rules that touch this overlay: minimum 2 players in every mode, 1 in co-op (the "every
+player out" test then covers the lone co-op player: when that player is out, entry 0 stays up and the hint fades);
+trophies are out of scope.
 
 ## 10. PS4 facts for the overlay (settled 2026-11-25)
 

@@ -1,13 +1,16 @@
 // u2mp: the pure overlay and ticker rules (overlay_rules.h).
 //
-// Reimplemented from the behaviour descriptions u2mp/docs/spec/parity-m-features.md (M1, M2),
+// Reimplemented from the behaviour descriptions u2mp/docs/spec/parity-m-features.md (M1, M2, section 10),
 // u2mp/docs/spec/parity-j-voice-medals.md (J4, J5) and u2mp/docs/spec/parity-ticker-respawn.md (1.2 - 1.6).
 #include "overlay_rules.h"
 
+#include <bit>
 #include <cmath>
 #include <cstring>
 
 namespace u2mp::overlay {
+static_assert(std::bit_cast<uint32_t>(kPerTick) == 0x3c5a740eu, "1/75 as a float (the PS3 overlay's multiplier)");
+
 namespace {
 
 float clamp01(float v) { return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v); }
@@ -24,8 +27,9 @@ float width_of(const unsigned char *ticker, int k) { return f32_at(ticker, entry
 
 }  // namespace
 
-float fade_step(float fade, bool shown, float speed, float dt) {
-    return clamp01(shown ? fade + speed * dt : fade - speed * dt);
+float fade_step(float fade, bool shown, float speed, float ticks) {
+    const float step = speed * (ticks * kPerTick);
+    return clamp01(shown ? fade + step : fade - step);
 }
 
 int top_entry(const float (&fade)[kEntries]) {
@@ -44,17 +48,95 @@ float slide_y(float fade, bool shown) {
     return shown ? -rest : rest;
 }
 
-int state_entry(int32_t ngm_state, int32_t round_substate, bool cinema) {
-    if (ngm_state == 3) return 2;
-    if (ngm_state == 4) return 3;
-    if (ngm_state == 5 && !cinema) return round_substate == 3 ? 3 : 0;
-    return -1;
+FrameResult update_entries(Entries &e, const Frame &f) {
+    FrameResult r;
+    const auto set = [&](int k, bool on) {
+        if (on && !e.shown[k]) r.relayout[k] = true;
+        e.shown[k] = on;
+    };
+    const auto clear_all = [&] {
+        for (int k = 0; k < kEntries; ++k) set(k, false);
+    };
+    const auto hide_results = [&] {
+        set(2, false);
+        set(3, false);
+    };
+
+    if (f.cinema) {
+        clear_all();
+        if (f.state == 3) set(2, true);
+        else if (f.state == 4) set(3, true);
+        else hide_results();
+    } else if (f.state == 2) {
+        // Rule 6: the automatic flag, the notification override, every player out, the falling edge.
+        const bool now = f.auto_flag && !(f.notice && !e.by_button);
+        const bool falling = e.auto_last && !now;
+        if (f.out || (!e.auto_last && now)) {
+            set(0, true);
+            e.speed[0] = 1.0f;
+        }
+        if (falling) {
+            set(0, false);
+            e.speed[0] = 1.0f;
+            e.by_button = false;
+        }
+        e.auto_last = now;
+        if (e.prev_state == 5) {
+            set(3, false);
+            set(0, false);
+            e.by_button = false;
+        }
+        hide_results();
+        // Rule 7: the button toggles entry 0 with its sound; never while every player is out.
+        if (!f.out && f.pressed) {
+            const bool on = !e.shown[0];
+            e.speed[0] = 2.0f;
+            set(0, on);
+            e.by_button = on;
+            r.sound = on ? Sound::Open : Sound::Close;
+            r.toggled = true;
+        }
+    } else if (f.state == 5) {
+        // Sub-state 3 sets entry 3 and the next step clears it again: entry 0 keeps its flag.
+        if (f.substate == 3) set(3, true);
+        else set(0, true);
+        hide_results();
+    } else {
+        set(0, f.film_entry0 && (f.end_reason == 3 || f.end_reason == 8));
+        if (f.state == 3) {
+            clear_all();
+            set(2, true);
+        } else if (f.state == 4) {
+            clear_all();
+            set(3, true);
+        } else {
+            hide_results();
+        }
+    }
+    if (f.film_clear) clear_all();
+    e.prev_state = f.state;
+    return r;
 }
 
-Edge auto_edge(bool &last, bool now) {
-    if (now == last) return Edge::None;
-    last = now;
-    return now ? Edge::Opened : Edge::Closed;
+bool coop_type(int32_t game_type) { return game_type == 4 || game_type == 8 || game_type == 9 || game_type == 12; }
+
+float overlay_alpha(int32_t state, int32_t game_type, int32_t end_reason, float hud_alpha) {
+    if (state == 3 || state == 4 || state == 5 || coop_type(game_type) || end_reason == 3 || end_reason == 8)
+        return 1.0f;
+    return hud_alpha;
+}
+
+bool tracker_out(const TrackerTimes &t, int32_t clock) {
+    if (!t.in_use) return true;
+    // Clock differences wrap as the game's 32-bit subtraction does.
+    const auto since = [clock](int32_t at) { return int32_t(uint32_t(clock) - uint32_t(at)) >= 0; };
+    return (t.spawn < t.died && since(t.died)) || (t.flag_a && since(t.a_time)) || (t.flag_b && since(t.b_time));
+}
+
+bool every_player_out(const TrackerTimes *trackers, int count, int32_t clock) {
+    for (int i = 0; i < count; ++i)
+        if (!tracker_out(trackers[i], clock)) return false;
+    return true;
 }
 
 bool voice_cell_muted(int32_t row_kind, uint32_t list_page, uint32_t tracker_index, uint32_t column_id, bool muted) {
@@ -75,7 +157,14 @@ int team_row_entry(const TeamEntry *entries, uint32_t count, int32_t team, int32
     return -1;
 }
 
-float hint_step(float h, bool on, float dt) { return clamp01(on ? h + kHintIn * dt : h - kHintOut * dt); }
+float hint_step(float h, bool on, float ticks) {
+    const float step = ticks * kPerTick;
+    return clamp01(on ? h + kHintIn * step : h - kHintOut * step);
+}
+
+bool hint_wanted(bool menu_up, bool death_camera, int32_t state, bool out) {
+    return !menu_up && death_camera && state == 2 && !out;
+}
 
 float ticker_next_start(const unsigned char *ticker) {
     float start = f32_at(ticker, kTickerWidth) + kTickerEdgeGap;

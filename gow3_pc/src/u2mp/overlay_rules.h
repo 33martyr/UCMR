@@ -3,7 +3,7 @@
 // ticker object bytes passed in, so the rules can be tested without the game (tests/test_u2mp_overlay.cpp). Used by
 // scoreboard.cpp and ticker.cpp.
 //
-// Reimplemented from the behaviour descriptions u2mp/docs/spec/parity-m-features.md (M1, M2),
+// Reimplemented from the behaviour descriptions u2mp/docs/spec/parity-m-features.md (M1, M2, section 10),
 // u2mp/docs/spec/parity-j-voice-medals.md (J4, J5) and u2mp/docs/spec/parity-ticker-respawn.md (1.2 - 1.6).
 #pragma once
 
@@ -15,23 +15,64 @@ namespace u2mp::overlay {
 
 constexpr int kEntries = 4;   // 0 scoreboard, 1 round results, 2 results, 3 round results
 constexpr float kSlide = 20.0f;
+// Every overlay rate r is applied as r x T / 75, T = the game's frame step in 1/300 s ticks (section 10.1):
+// r x 4 per second.
+constexpr float kPerTick = 1.0f / 75.0f;
 
-// Rule 1: the entry's fade moves toward its shown flag at `speed` per second, clamped to 0..1.
-float fade_step(float fade, bool shown, float speed, float dt);
+// Rule 1: the entry's fade moves toward its shown flag by speed x ticks / 75, clamped to 0..1.
+float fade_step(float fade, bool shown, float speed, float ticks);
 // Rule 2: the highest entry whose fade is above 0 is the one drawn; -1 when none is.
 int top_entry(const float (&fade)[kEntries]);
 // Rule 3: fading in, ease = 1 - (1 - fade)^2 and the page sits 20 x (1 - ease) above its place (y < 0);
 // fading out, ease = fade^2 and it sits 20 x (1 - ease) below (y > 0). The dim value of rule 4 is this ease.
 float slide_ease(float fade, bool shown);
 float slide_y(float fade, bool shown);
-// Rule 8: the entry the NGM match state shows on its own (every other entry cleared), -1 for none (state 2 and
-// every other state). `round_substate` is the NGM round sub-state, -1 while its PS4 field is not known (state 5
-// then shows the scoreboard, as PS3 does for every sub-state but 3).
-int state_entry(int32_t ngm_state, int32_t round_substate, bool cinema);
 
-// Rule 6: the automatic flag's change since the last frame; `last` is updated.
-enum class Edge { None, Opened, Closed };
-Edge auto_edge(bool &last, bool now);
+// Rules 6 - 8: the four entries' shown flags and entry 0's speed, kept from frame to frame.
+struct Entries {
+    bool shown[kEntries] = {};
+    float speed[kEntries] = {1.0f, 1.0f, 1.0f, 1.0f};
+    bool by_button = false;    // entry 0 was opened by the button (the "mark")
+    bool auto_last = false;    // the automatic flag of the last state-2 frame
+    int32_t prev_state = 0;    // the NGM state of the last frame (the state-5 rule)
+};
+// One frame's inputs.
+struct Frame {
+    int32_t state = 0;         // NGM match state (ngm +0x1e80)
+    int32_t substate = 0;      // round sub-state (ngm +0x1e88)
+    int32_t end_reason = 0;    // end reason (ngm +0x1e84)
+    bool cinema = false;       // game type 11
+    bool auto_flag = false;    // 0x9766f0() (or the film controller's answer in a film)
+    bool notice = false;       // the HUD notification queue shows a message (0x555550)
+    bool out = false;          // every player is out (section 10.6)
+    bool pressed = false;      // the scoreboard button went down this frame
+    bool film_entry0 = false;  // film controller in state 9f514949 (open question 13: false)
+    bool film_clear = false;   // the film controller answered e68ae001 with true
+};
+enum class Sound { None, Open, Close };
+struct FrameResult {
+    bool relayout[kEntries] = {};   // the entry's shown flag went from 0 to 1 this frame: page +0xf8 = 2
+    Sound sound = Sound::None;      // rule 5 (button toggle only)
+    bool toggled = false;           // rule 7 ran
+};
+// Rule 8 (with 6 and 7 for state 2), in PS3 order; e.prev_state becomes f.state.
+FrameResult update_entries(Entries &e, const Frame &f);
+
+// M1 3 / rule 2: the overlay alpha A before the entry's own fade.
+bool coop_type(int32_t game_type);   // 4, 8, 9, 12
+float overlay_alpha(int32_t state, int32_t game_type, int32_t end_reason, float hud_alpha);
+
+// Section 10.6, one tracker: in use (+0x20), died / spawn times (+0x17c / +0x180), state-record flags A / B (false
+// when the character does not resolve) and their times (+0x178 / +0x184).
+struct TrackerTimes {
+    bool in_use = false;
+    int32_t died = 0, spawn = 0, a_time = 0, b_time = 0;
+    bool flag_a = false, flag_b = false;
+};
+// The tracker is out of play at `clock` (threshold 0); a tracker not in use counts as out.
+bool tracker_out(const TrackerTimes &t, int32_t clock);
+// Every tracker is out (true for no tracker in use).
+bool every_player_out(const TrackerTimes *trackers, int count, int32_t clock);
 
 // ---- scoreboard voice column and mute action (parity-j-voice-medals.md J4, J5) ----
 
@@ -63,9 +104,11 @@ int team_row_entry(const TeamEntry *entries, uint32_t count, int32_t team, int32
 
 // ---- dead-player hint line (M1) ----
 
-constexpr float kHintIn = 1.0f;    // per second, while every condition of M1 2 holds
-constexpr float kHintOut = 2.0f;   // per second, otherwise
-float hint_step(float h, bool on, float dt);
+constexpr float kHintIn = 1.0f;    // x ticks / 75 (4 per second), while every condition of M1 2 holds
+constexpr float kHintOut = 2.0f;   // x ticks / 75 (8 per second), otherwise
+float hint_step(float h, bool on, float ticks);
+// M1 2: no menu up, the local death camera runs, NGM state 2, not every player out.
+bool hint_wanted(bool menu_up, bool death_camera, int32_t state, bool out);
 
 // ---- PAGE_MULTIPLAYER stats ticker object (parity-ticker-respawn.md 1.2), offsets from the object ----
 

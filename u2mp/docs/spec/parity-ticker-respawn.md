@@ -202,11 +202,12 @@ there; what is missing is PS3's automatic show while the local player is dead (2
 automatic flag turns on, hide it when it turns off. No HUD drawing of our own is needed (the third-party overlay
 drawing is not PS3 behaviour).
 
-Status: automatic show on death **DONE (CHECK)** 2026-11-25 (`scoreboard.cpp`, `gameplay.md` 1.4 step 6): the
-automatic flag is "no local character, or died time >= spawn time" (the rule 2 fields above, used only when the
-`0x65b830` verification bytes match); the state-record bit 15 is not used yet. Spec ready (2026-11-25): replace the
-stand-in with `0x9766f0()` plus the override, film path and "every player out" rule of 2.2
-(`parity-m-features.md` M2 rule 6 and section 10).
+Status: automatic show on death **DONE (CHECK)** 2026-11-25 (`scoreboard.cpp`, `gameplay.md` 1.4 steps 5-6): the
+automatic flag is PS4 `0x9766f0()` (verified bytes), forced off while a HUD notification shows and the board was not
+opened by button; "every player out" (threshold 0, flags A / B from the state record) shows the board every frame;
+the falling edge hides it and clears the mark. The stand-in (died / spawn test through the cond 44 fields) is gone.
+Film playback: the film controller's query call is not mapped, so the board does not open by itself in a film
+(`parity-m-features.md` open question 15). Still to see in a run: co-op "down" (open question 5).
 The row's text: **COVERED** (intact PS4 code, our texts). No HUD drawing of our own.
 
 ## 3. Test scenarios
@@ -247,4 +248,4 @@ The row's text: **COVERED** (intact PS4 code, our texts). No HUD drawing of our 
 | ticker visible | `0x42da40` | none: field +0x10 vs `[0x1116180+0x104]`/300 | DONE (`overlay_rules.cpp`) |
 | ticker refresh (10 s, finished, visible) | `0x447248` | none | DONE (`ticker.cpp`, from session.cpp page_handler), CHECK |
 | respawn / tries row (cond 44) | `0x4bf4a8` | `0x65b830` intact | COVERED |
-| scoreboard shown by itself while dead | `0x4cbf00` with `0x6b6b3c` | `scoreboard.cpp` (died / spawn test, not bit 15); exact PS4 twin `0x9766f0` found | DONE (stand-in), CHECK; exact rule spec ready (`parity-m-features.md` 10.4, 10.6, 10.8) |
+| scoreboard shown by itself while dead | `0x4cbf00` with `0x6b6b3c` | `scoreboard.cpp` calls the exact PS4 twin `0x9766f0`, notification override `0x555550`, "every player out" | DONE, CHECK (film path open, `parity-m-features.md` open question 15) |

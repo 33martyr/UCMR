@@ -47,11 +47,12 @@ Hook points:
 3. **Tip glyph callback.** A host function is placed in the tip's text struct as its per-glyph callback;
    the game's text printer calls it for every character (see 4.9).
 
-Not in scope (nothing is drawn for them): the PS3 letterbox bars (only below 719 lines), a PS3 tunable
-read at the start of the PS3 draw, and the PS3 condition "draw rosters only while a certain menu field
-is 0". (2026-11-25: that field is now mapped: PS4 s32 `[0x1136640 + 0x1014]`, the menu manager's state
-word, 0 = no menu up; PS3 skips the in-place page draw that shows the rosters while it is not 0. Facts and
-verification bytes: `parity-m-features.md` 10.2. Adding the gate is a separate change.)
+Not in scope (nothing is drawn for them): the PS3 letterbox bars (only below 719 lines) and a PS3 tunable
+read at the start of the PS3 draw. The PS3 condition "draw rosters only while a certain menu field is 0"
+is built (2026-11-25): the field is PS4 s32 `[0x1136640 + 0x1014]`, the menu manager's state word, 0 = no
+menu up; PS3 skips the in-place page draw that shows the rosters while it is not 0 (4.7 step 1; facts and
+verification bytes `parity-m-features.md` 10.2, checked by `menu_up()`, which treats an unexpected image as
+"no menu up").
 
 ## 2. Interface
 
@@ -507,7 +508,8 @@ and `` (empty) or ` (rosters off)` (when the roster switch is off). Then set bot
 flags (first frame, visible) to true, also when the page was not found.
 
 Draw (alpha, x, y, dt), every frame the screen is drawn:
-1. If the roster switch is off: nothing. Find the page; if not found: nothing.
+1. If the roster switch is off, or a menu is up (`menu_up()`: s32 `[0x1136640 + 0x1014]` != 0, the PS3 roster
+   gate, `parity-m-features.md` 10.2): nothing. Find the page; if not found: nothing.
 2. Guest call page vtable +0x10 (vtable = u64 at page +0) with (page, update args 3.7).
 3. Build the page desc (3.7) with alpha, x, y. Read the page flags (u32 +0xb0) after the update
    call; if flags & 0x80000, desc transform [0] x= 0.75.

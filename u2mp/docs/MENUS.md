@@ -230,8 +230,9 @@ per language ("texts: no text for ...", "texts: ... shown in English").
   counterpart). The matchmaking machine `64e910` is restored on the party (frontend3.cpp); the PS3
   5 s "Starting in [A]..." popup before it is ported too (frontend6.cpp, PORT-FRONTEND6.md 1).
 - `dd2d35e7` (a net event's text, `62f250`) is absent from both tables; not a menu text, left.
-- In-match overlay: no menu background dim behind the result pages (PS4 dim fields unknown); result pages from NGM
-  states only with `UNCHARTED_U2MP_SCOREBOARD_STATES=1` (`spec/parity-m-features.md` 9).
+- In-match overlay (2026-11-25): result pages come from the NGM match states, the menu background is dimmed behind
+  them and no page is drawn while a menu is up (`spec/parity-m-features.md` 9, 10). Left open: the film-only parts
+  and the two PS3 toggle blocks (open questions 12, 13, 15).
 - Not verified in the running game (static analysis only): the k23 panel and k19 rank widget
   drawing (`59ddb0`, `59bf50`) and the action-23 list classes are intact by size and callees, and
   get their data from NetPlayerData / NetStatGame / the trackers.

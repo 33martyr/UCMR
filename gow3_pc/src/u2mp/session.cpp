@@ -2278,7 +2278,6 @@ void mark_others_done() {
 bool results_hold(int index, int64_t ms) {
     static int held_index = -1;
     static int64_t since = 0, last = 0;
-    if (index != held_index) show_round_results();
     if (index != held_index || ms - last > 1000) {
         held_index = index;
         since = last = ms;
