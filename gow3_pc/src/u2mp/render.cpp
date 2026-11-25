@@ -37,6 +37,8 @@
 
 #include "u2mp_internal.h"
 
+extern "C" int runtime_memory_is_mapped(uintptr_t address, uint64_t size);
+
 namespace u2mp {
 namespace {
 
@@ -1248,6 +1250,107 @@ void actor_bounds_fix(uint64_t inst, uint64_t proto) {
             reinterpret_cast<const void *>(uintptr_t(inst)), name, before, *flags);
 }
 
+// ---- 8. A texture slot with nothing to bind (Gold Rush host crash at 0xc0450d) -----------------------
+// The resource table builder 0xc04340 copies one descriptor per entry of a draw's texture list. The
+// kind of a resource is bits 0-1 of its first word: kind 1 holds a pointer at +8 to a 16-byte buffer
+// descriptor, kinds 2 and 3 a pointer at +8 to a 32-byte texture descriptor. Any other kind, or a NULL
+// descriptor pointer, sends the builder down a path that reads through NULL at 0xc0450d. The Gold Rush
+// co-op host log of 2026-11-25 (Tha_14) shows exactly that: a kind 0 resource (rsi 0x1037c71be0, edi 0)
+// in a 2D primitive, frames 0xbdad78 (2D command list, end-of-quad command) -> 0xbdc670 -> 0xc31440
+// -> 0xc30ec0 -> 0xc04340. Such an entry now gets a zeroed 32-byte texture descriptor (the GPU side
+// binds a null image for it, which samples as 0) instead of the crash, and the log names the resource,
+// the caller and, on the 2D path, the image material, so the missing texture itself can be traced.
+//
+// The site 0xc044f0..0xc0450c becomes (kind 1 path unchanged, the two NULL paths go to the stub):
+//     cmp edi,1 ; jne bad ; mov rbx,[rsi+8] ; test rbx,rbx ; jnz 0xc0450d ; nop2 ; bad: jmp stub ; nop8
+// Entered at 0xc044f0 (kind not 2/3) and 0xc04500 (kind 2/3 without a descriptor), as before.
+constexpr uint64_t cSlotSite = 0xc044f0, cSlotBad = 0xc04500, cSlotNext = 0xc04537;
+constexpr uint64_t c2dEndDraw = 0xbdc969;   // return address of 0xbdc670's call of 0xc31440
+const unsigned char kSlotSite[] = {0xbb, 0x00, 0x00, 0x00, 0x00, 0x83, 0xff, 0x01, 0x75, 0x13,
+                                   0x48, 0x8b, 0x76, 0x08, 0xeb, 0x0a, 0xbb, 0x00, 0x00, 0x00,
+                                   0x00, 0x83, 0xff, 0x01, 0x75, 0x03, 0x48, 0x89, 0xf3};
+const unsigned char kSlotHead[] = {0x83, 0xff, 0x01, 0x75, 0x0b, 0x48, 0x8b, 0x5e,
+                                   0x08, 0x48, 0x85, 0xdb, 0x75, 0x0f, 0x66, 0x90};
+static_assert(sizeof kSlotSite == 0xc0450d - cSlotSite && sizeof kSlotHead == cSlotBad - cSlotSite, "slot site");
+// push rbp ; mov rbp,rsp ; push rax,rcx,r8,r9,r10,r11 ; and rsp,-16 ; mov rdi,[r13] ; mov rsi,rcx ;
+// mov rdx,[rbp] ; mov rax,unbindable_slot ; call rax ; lea rsp,[rbp-48] ; pop r11..rax ; pop rbp ;
+// add rcx,0x20 ; jmp [rip] -> 0xc04537 (the loop's next entry). rbx, rdx, rsi and rdi are reloaded there.
+const unsigned char kSlotStub[] = {
+    0x55, 0x48, 0x89, 0xe5, 0x50, 0x51, 0x41, 0x50, 0x41, 0x51, 0x41, 0x52, 0x41, 0x53, 0x48, 0x83,
+    0xe4, 0xf0, 0x49, 0x8b, 0x7d, 0x00, 0x48, 0x89, 0xce, 0x48, 0x8b, 0x55, 0x00, 0x48, 0xb8, 0x11,
+    0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0xff, 0xd0, 0x48, 0x8d, 0x65, 0xd0, 0x41, 0x5b, 0x41,
+    0x5a, 0x41, 0x59, 0x41, 0x58, 0x59, 0x58, 0x5d, 0x48, 0x83, 0xc1, 0x20, 0xff, 0x25, 0x00, 0x00,
+    0x00, 0x00, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22,
+};
+constexpr size_t kSlotHost = 0x1f, kSlotBack = 0x42;
+static_assert(sizeof kSlotStub == 0x4a, "slot stub layout");
+
+uint64_t unbindable_count = 0;
+
+// A guest word, or 0 when it cannot be read.
+uint64_t word_at(uint64_t address) {
+    if (bad_pointer(address) || !runtime_memory_is_mapped(uintptr_t(address), 8)) return 0;
+    return *reinterpret_cast<const uint64_t *>(uintptr_t(address));
+}
+
+// The printable start of a guest string, "?" when there is none (every byte is checked: it may be stale).
+void guest_text(uint64_t s, char *out, size_t n) {
+    size_t i = 0;
+    for (; !bad_pointer(s) && i + 1 < n && runtime_memory_is_mapped(uintptr_t(s + i), 1); ++i) {
+        const unsigned char c = *reinterpret_cast<const unsigned char *>(uintptr_t(s + i));
+        if (c < 0x20 || c > 0x7e) break;
+        out[i] = char(c);
+    }
+    if (i == 0) out[i++] = '?';
+    out[i] = 0;
+}
+
+U2MP_GUEST void unbindable_slot(uint64_t res, void *out, uint64_t frame) {
+    std::memset(out, 0, 32);   // descriptor type 0: not a valid image, bound as a null image
+    const uint64_t n = __atomic_add_fetch(&unbindable_count, 1, __ATOMIC_RELAXED);
+    if (n > 8 && (n & 1023) != 0) return;
+    const uint64_t base = uint64_t(uintptr_t(image.base));
+    const uint64_t ret = word_at(frame + 8);
+    // 0xc04340 <- 0xc30ec0 <- 0xc31440: two saved frame pointers up is 0xc31440's frame. On the 2D path
+    // its caller is 0xbdc670, whose r13 (the primitive's {material entry, texture slot 1, 2, 3}) is the
+    // third register 0xc31440 pushes.
+    const uint64_t draw_frame = word_at(word_at(frame));
+    char where[200] = "";
+    if (draw_frame && word_at(draw_frame + 8) == base + c2dEndDraw) {
+        const uint64_t info = word_at(draw_frame - 0x18);
+        const uint64_t entry = word_at(info);
+        const uint64_t slot = word_at(info + 8);
+        // The entry's name "set:name,guid,shader": material -> +0x10 -> -> -> text (menuimages.cpp entry_name).
+        char name[96];
+        guest_text(word_at(word_at(word_at(word_at(entry) + 0x10))), name, sizeof name);
+        std::snprintf(where, sizeof where, "; 2D image material id %08x '%s', texture slot 1 %016llx (loaded %u)",
+                      unsigned(word_at(entry + 8)), name, (unsigned long long)slot,
+                      unsigned(word_at(slot + 0x10) & 0xff));
+    }
+    log("render: texture slot with nothing to bind #%llu: resource %016llx = %016llx %016llx, +18 %04x, "
+        "table builder called from 0x%llx%s; a null image is bound", (unsigned long long)n, (unsigned long long)res,
+        (unsigned long long)word_at(res), (unsigned long long)word_at(res + 8),
+        unsigned(word_at(res + 0x18) & 0xffff), (unsigned long long)(ret >= base ? ret - base : ret), where);
+}
+
+bool install_slot_guard() {
+    if (!image.matches(cSlotSite, kSlotSite, sizeof kSlotSite) || !image.executable(cSlotSite, sizeof kSlotSite)) {
+        log("render slot guard (c044f0): bytes differ, left alone");
+        return false;
+    }
+    unsigned char code[sizeof kSlotStub];
+    std::memcpy(code, kSlotStub, sizeof code);
+    const uint64_t host = uint64_t(uintptr_t(&unbindable_slot));
+    const uint64_t back = uint64_t(uintptr_t(image.base + cSlotNext));
+    std::memcpy(code + kSlotHost, &host, 8);
+    std::memcpy(code + kSlotBack, &back, 8);
+    if (!install_stub(cSlotBad, sizeof kSlotSite - sizeof kSlotHead, code, sizeof code, "render slot guard (c04500)"))
+        return false;
+    std::memcpy(image.base + cSlotSite, kSlotHead, sizeof kSlotHead);
+    log("render slot guard (c044f0): a texture slot whose resource has no descriptor binds a null image");
+    return true;
+}
+
 }  // namespace
 
 // Called from install_nullsites (nullsites.cpp), so install.cpp needs no line of its own.
@@ -1282,6 +1385,7 @@ void install_render(int &installed) {
                                "render diag: anim update 0xb53250 counted");
         installed += n;
     }
+    if (install_slot_guard()) ++installed;   // section 8, independent of the cbuffer list functions
     static const unsigned char add_prologue[] = {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55};
     static const unsigned char init_prologue[] = {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x53};
     static const unsigned char make_prologue[] = {0x55, 0x48, 0x89, 0xe5, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55};
