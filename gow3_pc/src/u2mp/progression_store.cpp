@@ -2,7 +2,7 @@
 //
 // File layout, little-endian:
 //   0x00 char[8]  "U2MPPRG1"
-//   0x08 u32      format (1)
+//   0x08 u32      format (2; format 1 files are read too: they end before the headshots)
 //   0x0c u32      blob size (0x228)
 //   0x10 u32      publish count (NetPlayerData::Data +0x160, raised by every publish as on PS3)
 //   0x14 u32      flags: bit 0 = blob present
@@ -12,6 +12,7 @@
 //   ...  u32      recent player count, then that many 80-byte records:
 //                 char name[32]; u32 kills, deaths, wins, losses, seconds, coop_points, money,
 //                 matches, rank; u32 flags (bit 0 = unlisted; files before it hold 0 = listed); u64 last_seen
+//   ...  u32      the local player's career headshots (format 2)
 //   end  u32      CRC-32 (IEEE) of everything before it
 #include <string>
 #include <utility>
@@ -28,7 +29,7 @@ namespace u2mp::progression {
 namespace {
 
 constexpr char kMagic[8] = {'U', '2', 'M', 'P', 'P', 'R', 'G', '1'};
-constexpr uint32_t kFormat = 1;
+constexpr uint32_t kFormat = 2, kFormatNoHeadshots = 1;
 constexpr size_t kHeader = 0x40, kRecord = 80;
 
 void put32(std::vector<uint8_t> &out, uint32_t v) {
@@ -104,6 +105,7 @@ std::vector<uint8_t> encode(const Store &store, uint64_t now) {
             put32(out, v);
         put64(out, p.last_seen);
     }
+    put32(out, store.headshots);
     put32(out, crc32(out.data(), out.size()));
     return out;
 }
@@ -111,11 +113,13 @@ std::vector<uint8_t> encode(const Store &store, uint64_t now) {
 bool decode(const uint8_t *data, size_t size, Store &store) {
     if (size < kHeader + kBlobSize + 8 || std::memcmp(data, kMagic, 8) != 0) return false;
     if (get32(data + size - 4) != crc32(data, size - 4)) return false;
-    if (get32(data + 8) != kFormat || get32(data + 0xc) != kBlobSize) return false;
+    const uint32_t format = get32(data + 8);
+    if ((format != kFormat && format != kFormatNoHeadshots) || get32(data + 0xc) != kBlobSize) return false;
+    const size_t tail = format == kFormat ? 4 : 0;   // the headshots word
     const uint8_t *p = data + kHeader + kBlobSize;
     const uint32_t count = get32(p);
     p += 4;
-    if (count > kMaxRecent || size != kHeader + kBlobSize + 4 + size_t(count) * kRecord + 4) return false;
+    if (count > kMaxRecent || size != kHeader + kBlobSize + 4 + size_t(count) * kRecord + tail + 4) return false;
     Store s;
     s.publish_count = get32(data + 0x10);
     s.has_blob = (get32(data + 0x14) & 1) != 0;
@@ -131,6 +135,7 @@ bool decode(const uint8_t *data, size_t size, Store &store) {
         r.last_seen = get64(p + 72);
         if (!r.name.empty()) s.recent.push_back(std::move(r));
     }
+    if (tail) s.headshots = get32(p);
     store = std::move(s);
     return true;
 }
@@ -187,6 +192,7 @@ void note_match(Store &store, const std::vector<MatchPlayer> &players, uint64_t 
         const std::string name = m.name.substr(0, kNameMax);
         if (m.local) {
             store.local_name = name;
+            store.headshots += m.headshots;
             continue;
         }
         auto it = std::find_if(store.recent.begin(), store.recent.end(),

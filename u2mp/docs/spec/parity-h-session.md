@@ -137,10 +137,14 @@ Ours: every room has 10 slots (`create_room`), so a 4th and later player can joi
 refuses "too many players"), list rows and presence show "/10", and a co-op matchmaking room keeps gathering.
 
 To do: custom match room: slots = `session.cpp type_max_players(type)` of the custom game's current game type at
-Start Match (0 = refuse to create, log it; the host then goes on as for a create failure, H2); matchmaking room:
-the playlist's maximum player count (open question 1); party room: 10. `mm_slots()` and the presence "max" must report
-the room's real slot count. The type is read when the room is created; later game-type changes in the lobby do not
-resize the room (PS3 neither).
+Start Match (0 = refuse to create, log it; the host then goes on as for a create failure, H2); party room: 10. The
+type is read when the room is created; later game-type changes in the lobby do not resize the room (PS3 neither).
+
+Done (2026-11-25): matchmaking room: the playlist's maximum player count (record `+0x18`, open question 1: 10, co-op
+3; 10 for a playlist not known), online.cpp `create_room` / `mm_room_slots`. `mm_slots()` reports the joined or
+made room's real slot count (custom and party rooms: their own, 10), else the size our room for the chosen playlist
+would get; the presence "max" already reads the room's slot count. The matchmaking minimum stays the owner rule (2
+players, 1 for a co-op-only playlist, frontend3.cpp `matchmaking_min_players`).
 
 ### H2. Every room request ends: PS3 time limits and failure results (`0x4d421c`, `0x4d4578`, `0x4d3c50`, `0x4d8220`) - MISSING
 
@@ -282,9 +286,10 @@ running ahead of the latest snapshot nor behind a floor the owning object report
 
 ## 5. Open questions
 
-1. H1: the playlist maximum player count (PS3 `0x49a958`, read from the playlist data). Our playlist data does not
-   carry it (`menus.cpp playlist_max_party` returns 0); until read, the largest `type_max_players` over the
-   playlist's games is the best stand-in.
+1. H1: the playlist maximum player count: answered. PS3 `0x49a958` looks the playlist up by id (NetPlayerData
+   `+0xc0`, or `0x0b70ed28` with the AutoMatchmaking boot byte) and returns its record's word `+0x18`, 0 when not
+   found. The PS3 *playlists* records hold 10 for the competitive playlists and 3 for the co-op ones (maximum party
+   size `+0x1c`: 5 and 3). menus.cpp writes both into our records; online.cpp makes a matchmaking room that size.
 2. H5: meaning of NPD+367 bit 0 (it gates the mask) and of `0x49b858` ("the playlist uses map-pack content" is the
    reading); `parity-f` F5 calls NPD+367 bit 0 "may not search" - the two readings must be reconciled from the
    matchmaking page's own code.

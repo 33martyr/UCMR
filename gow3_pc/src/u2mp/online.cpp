@@ -127,7 +127,7 @@ struct PresenceData {
     int16_t net_game;   // *net-games* index of the game being played or set up, -1 none
     uint16_t pad3;
     uint64_t match_end; // the running match's end, Unix UTC seconds; 0 none
-    // version 3: NetPlayerData career values (headshots: not known to this port, 0)
+    // version 3: NetPlayerData career values (headshots: the local progression store's career count)
     uint32_t cash, kills, wins, losses, deaths, headshots, seconds;
     uint32_t pad4;
 };
@@ -385,6 +385,7 @@ enum class Mm { Idle, Searching, Joining, Checking, Creating, Hosting, Joined, F
 Mm mm_state = Mm::Idle;
 uint64_t mm_search_req = 0;
 uint32_t mm_playlist_index = 0;
+uint32_t mm_playlist_id = 0;          // the playlist of the last search (its record gives the room size)
 std::vector<uint64_t> mm_bad_rooms;   // rooms that did not work out this session (PS3: dead-peer ring 0x4e8978)
 MmCriteria mm_criteria;               // the pass running
 std::vector<U2oRoomExt> mm_found;     // its search result: the next room is picked from it (PS3 state 6)
@@ -608,6 +609,13 @@ void publish_blob(Room &r, bool force) {
     }
 }
 
+// A matchmaking room's size: the playlist's maximum player count (record +0x18, PS3 0x49a958); 10 when the playlist
+// is not known.
+uint32_t mm_room_slots(uint32_t playlist) {
+    const int32_t n = playlist_max_players(playlist);
+    return n > 0 && n <= int32_t(kMaxSlot) ? uint32_t(n) : kMaxSlot;
+}
+
 uint64_t create_room(uint32_t kind) {
     // PS3 CreateJoinRoom 0x4d421c: searchable ints 0x4C key, 0x4D party size, 0x4E/0x4F lat/lon, 0x50
     // region/languages, 0x51 tier (matchmaking only), 0x52 kind (PC only), 0x53 state; bin 0x55 lat/lon
@@ -633,7 +641,7 @@ uint64_t create_room(uint32_t kind) {
     }
     const auto blob = member_blob();
     U2oCreate c{};
-    c.max_slot = kMaxSlot;
+    c.max_slot = uint16_t(kind == kKindMatchmaking ? mm_room_slots(mm_playlist_id) : kMaxSlot);
     // PS3 gave match rooms no auto grant and switched it on for host migration (HostMigrate 0x4d4b28);
     // RPCN hands a room to the next member whenever its owner leaves, so every room has it.
     c.flag_attr = kFlagOwnerAutoGrant;
@@ -645,7 +653,7 @@ uint64_t create_room(uint32_t kind) {
     c.signaling = 1;   // mesh: the room service hands out every member's peer address
     const uint64_t id = api.create_room(world, &c);
     log("online: creating the %s room in world %u: key 0x%x, party size %u, %u slots, name %s (request %llu)",
-        kind_name(kind), world, key, party_size, kMaxSlot, name, (unsigned long long)id);
+        kind_name(kind), world, key, party_size, unsigned(c.max_slot), name, (unsigned long long)id);
     request(id, Pending{kind == kKindParty ? Req::CreateParty : kind == kKindMatchmaking ? Req::CreateMatchmaking : Req::CreateMatch,
                         0, kind, false, "create"});
     return id;
@@ -1084,6 +1092,7 @@ void presence_now(PresenceData &d, std::string &status) {
         d.deaths = G<uint32_t>(kNpd + 0x188);
         d.wins = G<uint32_t>(kNpd + 0x18c);
         d.losses = G<uint32_t>(kNpd + 0x190);
+        d.headshots = progression_headshots();   // the career count of the local store (progression.cpp)
         d.seconds = G<uint32_t>(kNpd + 0x198);
     }
 }
@@ -2570,6 +2579,7 @@ bool mm_online() { return started && link_state == U2O_READY && world != 0; }
 void mm_begin(uint32_t playlist, uint32_t playlist_index, const MmCriteria &criteria) {
     if (!mm_online()) return;
     mm_playlist_index = playlist_index;
+    mm_playlist_id = playlist;
     mm_criteria = criteria;
     if (match_room_.owned() && match_room_.kind == kKindMatchmaking) {   // our gather room is still open
         mm_state = Mm::Hosting;
@@ -2746,8 +2756,9 @@ bool peer_rtt(const std::string &npid, uint32_t &rtt_ms, bool &up) {
 
 int mm_slots() {
     if (!mm_online()) return 0;
-    if (match_room_.id && match_room_.kind == kKindMatchmaking && match_room_.max_slot) return match_room_.max_slot;
-    return int(kMaxSlot);   // the size this port makes its matchmaking rooms with
+    if (match_room_.id && match_room_.max_slot) return match_room_.max_slot;
+    if (match_room_.id && match_room_.kind != kKindMatchmaking) return int(kMaxSlot);
+    return int(mm_room_slots(G<uint32_t>(kNpd + 0x104)));   // the size our room for the chosen playlist would have
 }
 std::string my_npid_text() { return my_npid; }
 
@@ -2905,9 +2916,11 @@ std::string stats_ticker_text() {
     const int category = std::rand() % 7;
     std::string out = std::string("|@CFFFFFFFF|") + ticker_game_text(kTickerCategory[category]) + ":|@CFF999999|      ";
     // PS3 0x446c60: the local player's own entry comes first (also on LAN, where it is the only one). Headshots:
-    // no NetPlayerData field is known for them (0, as in our presence).
+    // no NetPlayerData field is known for them; the local store's career count (as in our presence).
     static constexpr uint64_t kOwnValue[7] = {0xd8, 0x184, 0x18c, 0x190, 0x188, 0, 0x198};
-    const uint64_t own = kOwnValue[category] ? G<uint32_t>(kNpd + kOwnValue[category]) : 0;
+    const uint64_t own = kOwnValue[category] ? G<uint32_t>(kNpd + kOwnValue[category])
+                         : category == 5     ? progression_headshots()
+                                             : 0;
     ticker_append_entry(out, linked() && !my_npid.empty() ? my_npid : session::local_name(), category, own);
     if (!linked()) return out;
     std::vector<std::pair<std::string, uint64_t>> pool;

@@ -14,6 +14,9 @@
 // sample keeps its own codec (no ffmpeg since converter version 2).
 #include "u2import.hpp"
 #include "u3fix.hpp"   // u3::sound_bank_convert, u3::find_ffmpeg
+#include "u2conv.hpp"
+
+#include <map>
 
 namespace u2imp {
 namespace {
@@ -106,6 +109,85 @@ std::string find_ffmpeg(const std::string &arg) {
     std::error_code ec;
     if (fs::is_regular_file(bin, ec)) return S(fs::absolute(bin));
     return u3::find_ffmpeg("");
+}
+
+// dc1/ps4/audio.bin: the sound records of the game's own PS4 module, with the falloff of the multiplayer characters'
+// foley as PS3 1.10 has it. Every sound is one symbol whose record (type word 0xee0bff2f before it) starts with the
+// symbol's id:
+//   PS3 (big endian, 0x5c bytes):    +0 u32 id, +4 u32 name, +8 flags, +0xc group, half floats from +0x20
+//   PS4 (little endian, 0x68 bytes): +0 u32 id, +8 u64 name, +0x10 flags, +0x14 group, the same half floats from +0x28
+// (+0 gain in dB, +4 falloff start, +8 falloff end, ...). The PS4 records of the "mlb-" and "moc-" sounds (the foley of
+// the multiplayer characters) end their falloff at 8 m (15 m for 32 of them); PS3 ends it at 15 m (30 m). Every other
+// half float of every record the two modules share is the same. The rule: a PS4 record named mlb-* or moc-* whose sound
+// PS3 has under the same id and name takes PS3's falloff end. Nothing else changes (the module's size, its other
+// records and fields, and the names: PS3 spells its records the same way as PS4).
+const char *AUDIO_VERSION = "u2audio1";
+
+namespace {
+
+constexpr uint32_t kSoundType = 0xee0bff2f;
+constexpr size_t kPs3SoundSize = 0x5c, kPs4SoundSize = 0x68;
+constexpr size_t kPs3FalloffEnd = 0x28, kPs4FalloffEnd = 0x30;
+
+uint32_t audio_u32(const Bytes &d, size_t o, bool big) {
+    if (o + 4 > d.size()) throw std::invalid_argument("audio.bin: truncated");
+    return big ? uint32_t(d[o]) << 24 | uint32_t(d[o + 1]) << 16 | uint32_t(d[o + 2]) << 8 | d[o + 3]
+               : uint32_t(d[o]) | uint32_t(d[o + 1]) << 8 | uint32_t(d[o + 2]) << 16 | uint32_t(d[o + 3]) << 24;
+}
+uint64_t audio_u64(const Bytes &d, size_t o) { return uint64_t(audio_u32(d, o, false)) | uint64_t(audio_u32(d, o + 4, false)) << 32; }
+std::string audio_name(const Bytes &d, uint64_t o) {
+    std::string s;
+    while (o < d.size() && d[size_t(o)] && s.size() < 256) s += char(d[size_t(o++)]);
+    return s;
+}
+
+struct SoundRecord {
+    size_t at;
+    std::string name;
+};
+
+// id -> record of every sound of a U2 DC module (PS3 'DC00' big endian or PS4 '00CD')
+std::map<uint32_t, SoundRecord> sound_records(const Bytes &d, bool ps3) {
+    if (d.size() < 0x20 || std::string(d.begin(), d.begin() + 4) != (ps3 ? "DC00" : "00CD"))
+        throw std::invalid_argument(ps3 ? "audio.bin: not a PS3 DC module" : "audio.bin: not a PS4 DC module");
+    const uint64_t root = ps3 ? audio_u32(d, 0x10, true) : audio_u64(d, 0x10);
+    const uint32_t n = audio_u32(d, size_t(root + 4), ps3);
+    const size_t es = ps3 ? 8 : 16, size = ps3 ? kPs3SoundSize : kPs4SoundSize;
+    std::map<uint32_t, SoundRecord> out;
+    for (uint32_t i = 0; i < n; i++) {
+        const size_t o = size_t(root + 8 + es * i);
+        const uint32_t id = audio_u32(d, o, ps3);
+        const uint64_t at = ps3 ? audio_u32(d, o + 4, true) : audio_u64(d, o + 8);
+        if (at < 4 || at + size > d.size() || audio_u32(d, size_t(at - 4), ps3) != kSoundType || audio_u32(d, size_t(at), ps3) != id)
+            continue;
+        const uint64_t name = ps3 ? audio_u32(d, size_t(at + 4), true) : audio_u64(d, size_t(at + 8));
+        out[id] = {size_t(at), audio_name(d, name)};
+    }
+    return out;
+}
+
+}  // namespace
+
+Bytes audio_records_convert(const Bytes &ps4, const Bytes &ps3, std::string &note) {
+    const auto r4 = sound_records(ps4, false), r3 = sound_records(ps3, true);
+    Bytes out = ps4;
+    size_t foley = 0, changed = 0;
+    for (const auto &[id, a] : r4) {
+        if (a.name.rfind("mlb-", 0) != 0 && a.name.rfind("moc-", 0) != 0) continue;
+        const auto it = r3.find(id);
+        if (it == r3.end() || it->second.name != a.name) continue;
+        ++foley;
+        const size_t b = it->second.at + kPs3FalloffEnd;
+        const uint8_t lo = ps3[b + 1], hi = ps3[b];   // the PS3 half float, big endian
+        uint8_t *p = out.data() + a.at + kPs4FalloffEnd;
+        if (p[0] == lo && p[1] == hi) continue;
+        p[0] = lo;
+        p[1] = hi;
+        ++changed;
+    }
+    note = fmt("%zu sounds (PS3 %zu); %zu multiplayer foley records, %zu take the PS3 falloff end", r4.size(), r3.size(), foley,
+               changed);
+    return out;
 }
 
 Bytes bank_convert(const Bytes &ps3, const std::string &ffmpeg, std::string &note) {

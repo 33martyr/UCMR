@@ -60,6 +60,7 @@ void install_progression(int &installed);
 void progression_publish();
 std::vector<std::string> progression_players_met();   // was progression_recent_players(max), see parity group G
 std::string progression_player_summary(const std::string &name);
+uint32_t progression_headshots();   // the local career headshots of the store (1.5.7)
 bool edit_clan_tag();      // defined in clantag.cpp, not here
 void clan_tag_frame();     // defined in clantag.cpp, not here
 }
@@ -86,9 +87,10 @@ the clan tag changed. `menus.cpp` (LIST_PLAYERSMET) and `remaining.cpp` call `pr
 #### 1.2.3 Store interface (`progression_store.h`, namespace `u2mp::progression`, unchanged)
 
 Constants: `kBlobSize` 0x228, `kBlobVersion` 10, `kNameMax` 31, `kBoards` 4, `kRowsPerPage` 11.
-Types: `Store {publish_count u32; has_blob bool; blob u8[0x228]; local_name string; recent vector<PlayerStats>}`,
+Types: `Store {publish_count u32; has_blob bool; blob u8[0x228]; local_name string; recent vector<PlayerStats>;
+headshots u32}`,
 `PlayerStats {name; kills, deaths, wins, losses, seconds, coop_points, money, matches, rank u32; last_seen u64}`,
-`MatchPlayer {name; local bool; result int; kills, deaths, seconds, coop_points, money, rank u32}`,
+`MatchPlayer {name; local bool; result int; kills, deaths, seconds, coop_points, money, rank, headshots u32}`,
 `LocalStats {name; money, kills, deaths, wins, losses, seconds, coop_points, coop_seconds, rank u32}`,
 `Entry {name; score s64; rank, badge, seconds, deaths, losses u32; local bool}`,
 `Page {page int; total u32; rows vector<Entry>}` (at most 11 rows).
@@ -280,8 +282,17 @@ table (1.3). Then the rank is computed from the money (one guest call):
 5. Signature: CRC-32 (store `crc32`) of the 4 bytes of count (LE), then continued for each player in order with
    the bytes of the name (its length, no terminator), then with 16 bytes: kills, deaths, seconds, money as LE u32.
 6. If the signature equals "last match signature", stop (the same match seen twice; this also skips a match whose
-   signature is 0 while nothing was recorded before). Otherwise store the new signature, load the store, and call
-   `note_match(store, players, now)` (now = current Unix seconds).
+   signature is 0 while nothing was recorded before). Otherwise store the new signature, count the local player's
+   headshots (below) into the local match player, load the store, and call `note_match(store, players, now)` (now =
+   current Unix seconds). When the headshots are not 0, log `progression: %u headshot(s) this match, %u in all`.
+
+Headshots (`match_headshots`): 0 when the current net game's type is co-op (4, 8, 9, 12), when the local tracker
+pointer (u64 at NGM `0x113b760`) is NULL, or when the kill record count (u32 at `0x1147bd0 + 0xe8`) is above 512.
+Otherwise me = the low 16 bits of the local tracker's net id (`+0x120`; 0: none); over the count records of 0x1c bytes
+from `0x1147bd0 + 0xec`: count those with kind byte `+0` == 1 (a headshot kill), killer u16 `+2` == me and victim u16
+`+4` != me. PS3 kept a career headshot counter with its progression; its Data block offset is not known, so the
+store keeps the count itself (`Store::headshots`, file format 2): `note_match` adds the local line's headshots.
+`progression_headshots()` returns it (online.cpp presence version 3 and the local ticker entry).
 
 #### 1.5.8 Online scores (Leave)
 

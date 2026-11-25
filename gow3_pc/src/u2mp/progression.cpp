@@ -68,6 +68,14 @@ constexpr uint64_t kTeamTallies = 0x114b9bc;      // stride 0x34; u16 +0 won mar
 constexpr uint64_t kPlayerTallies = 0x114ba24;    // stride 0x34
 constexpr uint64_t kTallyStride = 0x34;
 constexpr uint32_t kMaxMatchPlayers = 10;
+// NetStatGame's kill records (the kill feed's source): u32 count at +0xe8, records of 0x1c bytes from +0xec (512 at
+// most): u8 +0 kind (1 = a headshot kill), u16 +2 the killer's net id, u16 +4 the victim's net id.
+constexpr uint64_t kKillCount = 0x1147bd0 + 0xe8;
+constexpr uint64_t kKillRecords = 0x1147bd0 + 0xec;
+constexpr uint64_t kKillStride = 0x1c;
+constexpr uint32_t kMaxKillRecords = 512;
+constexpr uint8_t kKindHeadshot = 1;
+constexpr uint64_t kLocalTracker = 0x113b760;     // NetGameManager +0: the local player's tracker (net id +0x120)
 
 constexpr uint64_t kBoardTable = 0xdef0a0;        // 4 entries of 12 bytes: board id, column set
 constexpr uint64_t kBoardStride = 12;
@@ -281,6 +289,26 @@ void put_crc_u32(uint32_t &crc, uint32_t v) {
     crc = store_api::crc32(bytes, sizeof bytes, crc);
 }
 
+int32_t current_game_type();
+
+// The local player's headshot kills of the match being left: its kill records of kind 1 (the kill line's headshot
+// mark), not counting a death by its own hand. Competitive matches only, as the career kills; 0 in co-op.
+uint32_t match_headshots() {
+    const int32_t type = current_game_type();
+    if (type == 4 || type == 8 || type == 9 || type == 12) return 0;
+    const uint8_t *local = reinterpret_cast<const uint8_t *>(game_get<uint64_t>(kLocalTracker));
+    const uint32_t count = game_get<uint32_t>(kKillCount);
+    if (!local || count > kMaxKillRecords) return 0;
+    const uint16_t me = uint16_t(load_at<uint32_t>(local + 0x120));
+    if (me == 0) return 0;
+    uint32_t headshots = 0;
+    for (uint32_t i = 0; i < count; ++i) {
+        const uint8_t *r = game(kKillRecords + uint64_t(i) * kKillStride);
+        if (r[0] == kKindHeadshot && load_at<uint16_t>(r + 2) == me && load_at<uint16_t>(r + 4) != me) ++headshots;
+    }
+    return headshots;
+}
+
 void record_match() {
     const uint32_t count = game_get<uint32_t>(kMatchPlayerCount);
     if (count == 0 || count > kMaxMatchPlayers) return;
@@ -329,8 +357,12 @@ void record_match() {
     }
     if (crc == g_last_match) return;
     g_last_match = crc;
+    const uint32_t headshots = match_headshots();
+    for (auto &p : players)
+        if (p.local) p.headshots = headshots;
     load_store();
     store_api::note_match(g_store, players, uint64_t(std::time(nullptr)));
+    if (headshots) log("progression: %u headshot(s) this match, %u in all", headshots, g_store.headshots);
 }
 
 int32_t current_game_type() {
@@ -727,6 +759,12 @@ std::string progression_player_summary(const std::string &name) {
         return text;
     }
     return name;
+}
+
+uint32_t progression_headshots() {
+    if (!image.base) return 0;
+    load_store();
+    return g_store.headshots;
 }
 
 }  // namespace u2mp

@@ -538,18 +538,64 @@ void preload_packages() {
 // Multiplayer teardown (PS3 0x4386d0): the "net" packages and the preload list lose the "keep for multiplayer"
 // flag our requests set (package +0x18 bit 0x40); absent ones are skipped. The game's own release of a package
 // request on PS4 is not known (spec parity-d-flow1.md question 6): the flag is cleared, nothing is called.
+// The level manager's packages in use: the bits set in its slot bitmap (+0x80..+0x97; free = 180 - this).
+int packages_in_use() {
+    const uint8_t *bits = g(kPackageTable) + 0x80;
+    int n = 0;
+    for (int i = 0; i < 24; ++i) n += __builtin_popcount(bits[i]);
+    return n;
+}
+
+// Diagnostics for spec parity-d-flow1.md 2.3: a few seconds after the teardown cleared the keep bits, one log line says
+// how many of those packages the level manager dropped. Runs from a page handler of its own (the session's handler
+// is gone after the teardown); it is taken out of the table when Multiplayer registers its handler again.
+struct ReleaseCheck {
+    std::vector<uint32_t> ids;
+    int used_before = 0;
+    std::chrono::steady_clock::time_point due{};
+    bool pending = false;
+};
+ReleaseCheck release_check;
+constexpr auto kReleaseCheckDelay = std::chrono::seconds(5);
+
+bool add_page_handler(void *handler);
+U2MP_GUEST void release_check_handler(uint32_t *event) {
+    if (!event || event[0] != 6 || !release_check.pending) return;
+    if (std::chrono::steady_clock::now() < release_check.due) return;
+    release_check.pending = false;
+    int gone = 0, loaded = 0, other = 0;
+    for (uint32_t id : release_check.ids) {
+        const uint8_t *pkg = find_package(id);
+        if (!pkg) ++gone;
+        else if (get<int32_t>(pkg + 0x30) == 7) ++loaded;
+        else ++other;
+    }
+    log("leaving multiplayer, %lld s later: of %zu released package(s) %d gone, %d still loaded, %d in another state; "
+        "level manager packages in use %d -> %d",
+        (long long)std::chrono::duration_cast<std::chrono::seconds>(kReleaseCheckDelay).count(), release_check.ids.size(),
+        gone, loaded, other, release_check.used_before, packages_in_use());
+}
+
 void release_packages() {
     int released = 0;
+    release_check.ids.clear();
     auto release = [&](uint32_t id) {
         uint8_t *pkg = find_package(id);
         if (!pkg || !(pkg[0x18] & 0x40)) return;
         pkg[0x18] &= uint8_t(~0x40);
+        release_check.ids.push_back(id);
         ++released;
     };
     release(kNetPackage);
     if (const char *extra = extra_net_package()) release(sid(extra));
     for (const char *name : kPreloadNames) release(sid(name));
     log("leaving multiplayer: %d package(s) no longer kept for Multiplayer", released);
+    if (released) {
+        release_check.used_before = packages_in_use();
+        release_check.due = std::chrono::steady_clock::now() + kReleaseCheckDelay;
+        release_check.pending = true;
+        add_page_handler(reinterpret_cast<void *>(&release_check_handler));
+    }
 }
 
 void request_actor_package(const char *actor) {
@@ -1039,6 +1085,39 @@ void slots_frame() {
     reserve_party(present_npids(), gamenet::clock());
 }
 
+std::string member_npid(const Member &m);
+
+// AssignTeams' per-slot values (teams.cpp; PS3 0x4a2490 read them from the slot table and the room members): each
+// tracker slot's party id from the host's reservations (0 for a player without one, and on LAN, where there is no
+// slot table) and its member's level (rank index + 1; 0 for an empty slot).
+void teams_frame() {
+    static uint64_t shown[10] = {};
+    std::string changed;
+    uint8_t *base = ngm() + 0x10;
+    for (int k = 0; k < 10; ++k) {
+        const uint8_t *t = base + uint64_t(k) * 0x2c0;
+        uint32_t party = 0, level = 0;
+        if (t[0x20]) {
+            const uint32_t id = get<uint32_t>(t + 0x120);
+            for (const Member &m : members) {
+                if (!m.used || m.net_id != id) continue;
+                level = uint32_t(m.rank) + 1;
+                if (const Reservation *r = reservation_of(member_npid(m))) party = r->party;
+                break;
+            }
+        }
+        teams_set_slot(k, party, level);
+        const uint64_t now = uint64_t(party) << 32 | level;
+        if (now != shown[k]) {
+            shown[k] = now;
+            char b[48];
+            std::snprintf(b, sizeof b, " slot %d: party %u level %u;", k, party, level);
+            changed += b;
+        }
+    }
+    if (!changed.empty()) log("team balance values:%s", changed.c_str());
+}
+
 bool slots_admit(const std::string &npid) {
     if (!slots_room || npid.empty()) return true;
     const double now = gamenet::clock();
@@ -1488,26 +1567,24 @@ U2MP_GUEST void page_handler(uint32_t *event);
 
 uint8_t *handler_entry(uint32_t i) { return menu() + 0x24f8 + uint64_t(i) * 0x18; }
 
-void register_handler() {
+// Adds `fn` (a U2MP_GUEST page handler) for every page; false when the table is full. Nothing when it is there already.
+bool add_page_handler(void *handler) {
     uint32_t count = get<uint32_t>(menu() + 0x24f0);
-    uint64_t fn = addr_of(reinterpret_cast<void *>(&page_handler));
+    uint64_t fn = addr_of(handler);
     for (uint32_t i = 0; i < count; ++i)
-        if (get<uint64_t>(handler_entry(i) + 8) == fn) return;
-    if (count >= 32) {
-        log("menu page handler table full: no per-frame updates in menus");
-        return;
-    }
+        if (get<uint64_t>(handler_entry(i) + 8) == fn) return true;
+    if (count >= 32) return false;
     uint8_t *e = handler_entry(count);
     put<uint32_t>(e, 0);   // page 0: called for every page
     put<uint64_t>(e + 8, fn);
     put<uint64_t>(e + 0x10, 0);
     put<uint32_t>(menu() + 0x24f0, count + 1);
-    log("per-frame page handler registered (%u handlers)", count + 1);
+    return true;
 }
 
-void unregister_handler() {
+void remove_page_handler(void *handler) {
     uint32_t count = get<uint32_t>(menu() + 0x24f0);
-    uint64_t fn = addr_of(reinterpret_cast<void *>(&page_handler));
+    uint64_t fn = addr_of(handler);
     for (uint32_t i = 0; i < count; ++i) {
         if (get<uint64_t>(handler_entry(i) + 8) != fn) continue;
         for (uint32_t j = i + 1; j < count; ++j) std::memcpy(handler_entry(j - 1), handler_entry(j), 0x18);
@@ -1515,6 +1592,20 @@ void unregister_handler() {
         return;
     }
 }
+
+void register_handler() {
+    remove_page_handler(reinterpret_cast<void *>(&release_check_handler));   // the last teardown's check
+    release_check.pending = false;
+    const uint32_t before = get<uint32_t>(menu() + 0x24f0);
+    if (!add_page_handler(reinterpret_cast<void *>(&page_handler))) {
+        log("menu page handler table full: no per-frame updates in menus");
+        return;
+    }
+    const uint32_t count = get<uint32_t>(menu() + 0x24f0);
+    if (count != before) log("per-frame page handler registered (%u handlers)", count);
+}
+
+void unregister_handler() { remove_page_handler(reinterpret_cast<void *>(&page_handler)); }
 
 // ---- teardown -----------------------------------------------------------------------------------------
 void teardown(bool pop, bool leaving = true) {
@@ -1674,6 +1765,7 @@ void frame_work() {
     voice::frame();
     clock_sync_frame();
     slots_frame();
+    teams_frame();
     party_up_frame();
     transport.pump(now);
 

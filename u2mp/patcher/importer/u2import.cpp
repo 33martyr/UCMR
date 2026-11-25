@@ -591,6 +591,7 @@ private:
     std::optional<fs::path> ps3_data_file(const std::string &name);
     void net_spawn_paks();
     void net_patch();
+    void audio_records();
     void net_images();
     void registries();
     void texts();
@@ -693,7 +694,10 @@ int Importer::run() {
         {"import-list", fmt("Files from the PS3 copy: sounds, skins, actors and levels (%zu rows)", rows.size()), [this] { step_items(); }, true},
         {"net-images", "Menu images of the multiplayer maps", [this] { net_images(); }, false},
         {"net-spawn-paks", "Spawn paks of the multiplayer maps (PS3 game data)", [this] { net_spawn_paks(); }, false},
-        {"net-patch", "net-patch9: the PS3 server live-data DC module", [this] { net_patch(); }, false},
+        {"net-patch", "DC modules: net-patch9 (PS3 server live data), audio.bin (PS3 foley falloff)", [this] {
+             net_patch();
+             audio_records();
+         }, false},
         {"registries", "pak22_ps4.txt and banks.txt: the imported levels and banks", [this] { registries(); }, false},
         {"texts", "Text banks with the multiplayer strings", [this] { texts(); }, false},
     };
@@ -1235,6 +1239,37 @@ void Importer::net_patch() {
     write_bytes(out_path(rel), conv);
     record(key, "A", rel, {{"src", str("ps3-data")}, {"src_sha1", str(src_sha)}, {"note", str(note)}, {"dc", str(NETPATCH_VERSION)}});
     lg(fmt("ok      %s <- %s (%.1fs) %s", key.c_str(), S(*src).c_str(), seconds_since(t), note.c_str()));
+    save();
+}
+
+// dc1/ps4/audio.bin: the game's own PS4 sound records, the multiplayer characters' foley with the falloff end PS3 1.10
+// gives it (sound.cpp audio_records_convert). PS3: the newest dc1/audio.bin of the given copy.
+void Importer::audio_records() {
+    sha1_memo_load(work);
+    const std::string key = "dc1/audio.bin", rel = "dc1/ps4/audio.bin";
+    const fs::path ps4_audio = ps4->main / "dc1" / "ps4" / "audio.bin";
+    const auto cands = ps3->candidates("dc1/audio.bin");
+    if (cands.empty() || !isfile(ps4_audio)) {
+        set_item(key, "missing", "A", {{"note", str("no PS3 dc1/audio.bin or no PS4 dc1/ps4/audio.bin")}});
+        lg("MISSING " + key + ": no PS3 dc1/audio.bin or no PS4 dc1/ps4/audio.bin: remote players' foley keeps the PS4 falloff");
+        return;
+    }
+    const auto t = std::chrono::steady_clock::now();
+    const Bytes d3 = cands[0]->read(), d4 = read_bytes(ps4_audio);
+    const std::string src_sha = sha1_hex(d3) + "+" + sha1_hex(d4);
+    if (done_before(key, src_sha) && text_of(item(key)->get("audio")) == AUDIO_VERSION) return;
+    Bytes conv;
+    std::string note;
+    try {
+        conv = audio_records_convert(d4, d3, note);
+    } catch (const std::exception &e) {
+        set_item(key, "failed", "A", {{"src", str(cands[0]->source)}, {"note", str(cut(e.what(), 400))}});
+        lg("FAILED " + key + ": " + cut(e.what(), 300));
+        return;
+    }
+    write_bytes(out_path(rel), conv);
+    record(key, "A", rel, {{"src", str(cands[0]->source)}, {"src_sha1", str(src_sha)}, {"note", str(note)}, {"audio", str(AUDIO_VERSION)}});
+    lg(fmt("ok      %s <- %s (%.1fs) %s", key.c_str(), cands[0]->where().c_str(), seconds_since(t), note.c_str()));
     save();
 }
 

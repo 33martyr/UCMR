@@ -78,7 +78,7 @@ the converters had when they were Python modules; the table says where each is n
 |---|---|---|
 | `u2import.cpp` | driver: arguments, the steps, the import list, PS4-first check, conversion per type, state | |
 | `sources.cpp` | PS3 archive / DLC index (precedence dlc-patch7 > 5 > 3 > 2 > patch > dlc-map2 > dlc-map1 > base), PS4 index | sources |
-| `sound.cpp` | XVAG (PS-ADPCM) PS3 -> PS4; sound banks via the U3 SBlk converter (`u3mp/patcher/tools/fixes/sound-banks`) | xvag, u2bank |
+| `sound.cpp` | XVAG (PS-ADPCM) PS3 -> PS4; sound banks via the U3 SBlk converter (`u3mp/patcher/tools/fixes/sound-banks`); `dc1/ps4/audio.bin`: the PS4 sound records with the PS3 falloff end of the multiplayer foley (below) | xvag, u2bank, u2audio |
 | `registry.cpp` | pak22_ps4.txt / banks.txt | registry |
 | `texts.cpp` | text banks: the PS4 bank plus the PS3 strings it lacks (DLC map titles) | u2text |
 | `levels.cpp` | level paks: stage (geometry) and data (-ingame10 / -npc) | u2level |
@@ -104,6 +104,19 @@ packfile of JOINT_HIERARCHY (`skel`), the Havok 6.1 -> 2011 changes (`hkconvert`
 The import was first written in Python and moved to C++ on 2026-11-14. Every output of a full GOTY import, the
 `--validate` report and the twin validation are byte-identical to the Python versions' (except the 3 sound banks the
 last Python run could no longer convert).
+
+## Sound records (`dc1/ps4/audio.bin`, step `net-patch`)
+
+The PS4 game keeps its own `audio.bin` (one DC symbol per sound; PS3 records 0x5c bytes, PS4 0x68: the name pointer
+widened, so PS3 `+0x20..` = PS4 `+0x28..`: half floats gain, falloff start, falloff end `+8`, ...). Compared with the
+newest PS3 `dc1/audio.bin` (GOTY `dc1.psarc` = BCUS `dlc-patch7`), the half floats of the 4175 records both have
+differ in one field only: the falloff end of the multiplayer characters' foley (`mlb-*`, `moc-*`), 8 m on PS4 where
+PS3 has 15 m (592 records) and 15 m where PS3 has 30 m (32 records). The conversion writes the PS4 module with PS3's falloff end in each
+`mlb-` / `moc-` record whose sound PS3 has under the same id and name (624 fields; everything else byte for byte the
+PS4 file), so remote players' footsteps and gear carry as far as on PS3. Version `u2audio1` (state item
+`dc1/audio.bin`). The 12 skeleton sounds whose records are spelled otherwise than the names the game asks for
+(`ske-heel-creaky-wood` for `ske-heel-wood-creaky`, and the same for hollow/thick wood, toe and stealth) are spelled
+that way in the PS3 data too, so they stay as they are (PS3 played no sound there either).
 
 ## Format differences found (U2 pak22 / actor27 vs U3 pak23 / actor33)
 

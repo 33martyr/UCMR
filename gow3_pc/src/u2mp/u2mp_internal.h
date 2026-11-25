@@ -116,8 +116,14 @@ uint32_t dlc_packs();
 // dlc.cpp: the map pack of the *net-games* record's map (0 base, 1 / 2 map pack), -1 unknown; `local_ok` says
 // whether this PC can play that map (false when the pack is absent here; Ruins falls back to the base map).
 int32_t dlc_net_game_pack(int32_t index, bool &local_ok);
-// menus.cpp: the playlist's maximum party size, 0 when not known (no check).
+// menus.cpp: the playlist record's maximum party size (+0x1c) and maximum player count (+0x18, PS3 0x49a958);
+// 0 for an unknown playlist id.
 int32_t playlist_max_party(uint32_t id);
+int32_t playlist_max_players(uint32_t id);
+// teams.cpp: AssignTeams' per-slot party group and level (spec parity-e-flow2.md 2.6).
+void install_teams(int &installed);
+// Tracker slot `slot` (0..9): its party id (0 none) and its level (0 = empty slot, read as 1).
+void teams_set_slot(int slot, uint32_t party, uint32_t level);
 // True when the function at `offset` is a stripped stub: ret, then alignment padding.
 inline bool is_ret_stub(uint64_t offset) {
     static const unsigned char stub[] = {0xc3, 0x66, 0x66, 0x66, 0x66};
