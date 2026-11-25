@@ -372,3 +372,58 @@ Test (no build needed): put `GOW3_HTILE_KEEP_CLEARS=1` in `analysis/uncharted-us
 and look at the pools; `boot.log` then shows `HTILE fill by cs ...` / `HTILE clear kept for depth ...` when the
 case occurs. If the water stays black: a frame capture at the pool (`capture.trigger`) and the water draw's inputs
 (`GOW3_TRACE_PS` with the water pixel shader) are the next step, and the launcher line goes back to `u1` only.
+
+### After the HTILE fix: reflection back, floor still missing (2026-11-25)
+
+Owner test with `GOW3_HTILE_KEEP_CLEARS=1`: the pools are no longer black and show the pillar / ceiling
+reflection, but the floor under the water is not seen (PS3: floor clearly seen, reflection on top). `boot.log`
+shows the case: `HTILE fill by cs e8746089` and `HTILE clear kept for depth D32SfloatS8Uint 960x540 at
+0x114d290000` (the half-size reflection pass), so the HTILE fix is what brought the reflection back. Keep it on.
+
+The water pixel shaders, found by their binary hash (`OrbShdr` footer) in the retail `treasure-multi.pak` through
+the materials' EFFECT_TABLE entries, and all three in the owner's shader cache since the 14:20 run:
+
+| material | vertex | pixel (used) | second pixel (not drawn) |
+| --- | --- | --- | --- |
+| `temple-mp-water-reflect` | e8f0881a | 7147ab5e | 32b53e3d |
+| `temple-mp-water-foam-reflect` | 9c1b5177 | 8e326238 | d272e100 |
+| `temple-mp-water-foam-env` | 9c1b5177 | f8ba0158 | 56ca2b69 |
+
+What 7147ab5e computes (its recompiled SPIR-V, `spirv-cross` of `cache/CUSA02320/0x000000007147ab5e_0.spv`):
+
+* images 0-2: the bump, flow and ripple maps, at mesh UVs and world positions;
+* image 3 (point sampler), screen position: only `.w` is read, the scene depth behind the water. Its difference
+  to the water's own depth is the water thickness: it scales the refraction offset and gives the edge alpha
+  (`alpha = c72 + (1 - c72) * c71 * thickness`), so deep water is opaque (alpha 1);
+* image 4, screen position (and the same position moved by the bump normal when image 3 says the moved point is
+  still behind the water): the refraction colour, the scene behind the water;
+* image 5, projected position: the planar reflection (the 960x540 pass);
+* colour = lerp(reflection, refraction, w), w from the Fresnel constants (0.9 looking straight down, 0.1 at a
+  grazing angle, exponent 2.2). Base colour 0 0 0 only shows where both brightnesses are 0.
+
+So everything under the water that PS3 shows comes from image 4. With the reflection now right and the floor
+gone, image 4 samples black: at the owner's view angle w is about 0.8, i.e. the shot shows about 20 % of the
+reflection over black, which is what the PC screenshot looks like. The depth (image 3) cannot hide the floor: a
+wrong depth changes the alpha (transparent water would show the floor) or the refraction offset, not the colour.
+In the game these two are the engine's global textures `FullScreenRefractionSampler` (image 4) and
+`FullScreenRefractionDepthSampler` (image 3), filled by the pass the GPU markers call `.CopyFp16ForRefraction`
+(the HDR scene colour copied before the water); their T# slots are at image offsets 0x1062ba0 / 0x1062bc0
+(entries of the global texture name table, the colour one at 0x109e768). The game's debug menu has `Show
+Refraction Color` / `Show Refraction Depth` views of them.
+
+Not yet known: whether image 4 is a null T# (the copy pass never ran or never set the slot in a match: a game-side
+case for `src/u2mp`), an image the runtime made again from guest memory (the copy's GPU result lost, like the
+HTILE case: a texture cache case), a read of the draw's own render target, or a copy that really holds black.
+Each needs a different fix, so none is guessed. The runtime now prints, for traced shaders, the image each
+binding resolved to (`PS trace image: shader .. binding N -> address WxH format flags (gpu modified 0/1) target
+0/1`; vk_rasterizer.cpp BindTextures, diagnostics only).
+
+Test (owner, one run, add to `analysis/uncharted-user/test-env.txt` next to `GOW3_HTILE_KEEP_CLEARS=1`):
+
+    GOW3_TRACE_PS=7147ab5e,8e326238,f8ba0158
+
+Play The Temple, look at a pool for a few seconds, quit, send `boot.log`. Lines to read: `PS trace: ps 7147ab5e
+...` (render target and depth of the water draw) and `PS trace texture: shader 7147ab5e image 4 ...` (the T#:
+address 0 or format 0 = null slot). With the build of this branch also `PS trace image: shader 7147ab5e binding
+4 ...`: `gpu modified 0` = the runtime lost the copy, `target 1` = a feedback read of the draw's own target. A
+second run can then watch who writes that address (`GOW3_WATCH_RANGE=<lo>:<hi>`, the image 4 address and size).

@@ -6344,6 +6344,25 @@ void Rasterizer::BindTextures(const Shader::Info& stage, const PreparedStage* pr
             auto& image_view = texture_cache.FindTexture(
                 image_id, desc, memo_entry ? &memo_entry->view_memo : nullptr, !on_helper);
             const auto binding = image.binding;
+            // gow3 25 Nov 2026 (GOW3_TRACE_PS, The Temple's water): the image each binding of a
+            // traced shader resolved to. No GpuModified flag: the GPU never wrote this image since
+            // it was made, so it holds the guest memory's bytes; target 1: a render target of the
+            // same draw (a feedback read).
+            if (TracedShader(stage.pgm_hash)) {
+                static std::atomic<int> traced{0};
+                if (traced.fetch_add(1) < 80) {
+                    std::printf("PS trace image: shader %08llx binding %u -> %#llx %ux%u levels %u %s "
+                                "flags %#x (gpu modified %d) target %d storage %d\n",
+                                static_cast<unsigned long long>(stage.pgm_hash), binding_index,
+                                static_cast<unsigned long long>(image.info.guest_address),
+                                image.info.size.width, image.info.size.height,
+                                image.info.resources.levels,
+                                vk::to_string(image.info.pixel_format).c_str(), u32(image.flags),
+                                int(True(image.flags & VideoCore::ImageFlagBits::GpuModified)),
+                                int(binding.is_target), int(is_storage));
+                    std::fflush(stdout);
+                }
+            }
 
             // gow3: a proxied scene image sampled with normalized coordinates reads the proxy:
             // no resample to the native size (the native image is not touched).
