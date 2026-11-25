@@ -118,6 +118,26 @@ static void test_matches() {
     for (const PlayerStats &p : s.recent) CHECK(p.name != "Drake");
 }
 
+// Players met at match / round start (spec parity-e-flow2.md 2.9): new names come in without statistics, known
+// ones move to the top with their statistics kept, the local player never; the Leave statistics add up later.
+static void test_met() {
+    Store s;
+    s.local_name = "Drake";
+    std::vector<MatchPlayer> m(1);
+    m[0].name = "Chloe", m[0].kills = 3;
+    note_match(s, m, 100);
+    CHECK(note_met(s, {"Sully", "Chloe", "Drake", ""}, 200));
+    CHECK(s.recent.size() == 2);
+    const PlayerStats *sully = nullptr, *chloe = nullptr;
+    for (const PlayerStats &p : s.recent) (p.name == "Sully" ? sully : chloe) = &p;
+    CHECK(sully && sully->matches == 0 && sully->kills == 0 && sully->last_seen == 200);
+    CHECK(chloe && chloe->matches == 1 && chloe->kills == 3 && chloe->last_seen == 200);
+    CHECK(!note_met(s, {"Sully"}, 200));   // a new round in the same second: nothing to write
+    note_match(s, m, 300);
+    for (const PlayerStats &p : s.recent)
+        if (p.name == "Chloe") CHECK(p.matches == 2 && p.kills == 6);
+}
+
 static void test_boards() {
     Store s;
     for (int i = 0; i < 30; ++i) {
@@ -166,6 +186,7 @@ int main() {
     test_roundtrip();
     test_files();
     test_matches();
+    test_met();
     test_boards();
     if (failures) {
         std::printf("%d failure(s)\n", failures);

@@ -40,7 +40,9 @@ own failure lines), `show_page(page)` (guest ShowPage(menu, page, 0)), `net::Tra
 `gamenet::*`, `voice::*`, `online::*`, `matchmaking::*`, `frontend6::*`, `netheap_install`,
 `netheap_alloc`, `netinit_prepare`, `netinit_match`, `netinit_dump`, `netpatch_load`,
 `extra_net_package`, `playlist_pick_type`, `dlc_net_game_available`, `unlocks_skin_fingerprint`,
-`progression_publish`, `show_notice`, `runtime_file_translate` (extern "C", returns 0 on success).
+`progression_publish`, `show_notice`, `runtime_file_translate` (extern "C", returns 0 on success); since
+parity group D also `game_message_box`, `dlc_packs`, `dlc_net_game_pack`, `playlist_max_party`,
+`cinema::start_playback` (u2mp_internal.h, cinema.h).
 
 ---
 
@@ -324,7 +326,7 @@ Roles: the host is transport slot 0; clients have slots 1..10. A client only tal
 
 | type | name | direction | layout after the type byte |
 |---|---|---|---|
-| 1 | Info | client -> host | u8 len (<= 31), name[len], u8 rank, u8 team, u32 skin fingerprint (LE), then three length-prefixed strings: hero skin (<= 47), villain skin (<= 47), clan tag (<= 4; newer clients only, older hosts stop before it) |
+| 1 | Info | client -> host | u8 len (<= 31), name[len], u8 rank, u8 team, u32 skin fingerprint (LE), then three length-prefixed strings: hero skin (<= 47), villain skin (<= 47), clan tag (<= 4; newer clients only, older hosts stop before it), then u8 map packs (`dlc_packs()` bits: 1 base, 2 map pack 1, 4 map pack 2; parity group D, older hosts stop before it) |
 | 2 | Roster | host -> all | repeated {u8 slot, u8 len (<= 31), u8 rank, name[len], u8 hero len, hero, u8 villain len, villain} in slot order (`roster_wire.h`) |
 | 3 | Mode | host -> all | s32 mode (LE) |
 | 4 | Follow | host -> clients | nothing (LAN), or u64 match room id (LE) when online |
@@ -347,8 +349,9 @@ Receiving (from = transport slot of the sender):
   call `unlocks_skin_fingerprint()` once (mine); if fingerprint != 0, mine != 0 and they differ, log
   `party: %s's skin table differs (fingerprint %08x, ours %08x): a different import; skins may show as others`
   (name, theirs, mine) and call `show_notice(name + " has a different Uncharted 2 multiplayer import. Their character skins may show differently. Both players should run the importer again.")`.
-  Then the hero and villain skin strings (u8 length, bytes; a cut string ends parsing) and the clan tag
-  (u8 length, bytes, first 4 kept; absent or cut = no tag).
+  Then the hero and villain skin strings (u8 length, bytes; a cut string ends parsing), the clan tag
+  (u8 length, bytes, first 4 kept; absent or cut = no tag) and the map packs byte (absent = 0xff, "not
+  told": an older client is never refused for map packs).
   Then: refresh sessions (5.1), broadcast Roster (+ Ids), broadcast Teams. Not host / bad slot / short:
   nothing.
 - Roster (client only). Remember every entry's team; clear all 11 entries; parse from offset 1 while
@@ -475,12 +478,13 @@ rank/team, last seen NET_SM, the frame and rate-log counters, the net clock obje
 - Close transport: `transport.close()`, then empty the block list. Every place below that closes the
   transport (teardown, frame work step 6, `online_reopen`, `online_rehost`) does it this way, so the
   block list lives exactly as long as one hosted transport.
-- Block list (griefer kick, PS3 room kickout with block flag 1): a map online id (NpId text) -> number
+- Block list (Kick From Party and the griefer kick, PS3 room kickout with block flag 1): a map online id
+  (NpId text) -> number
   of refused Hellos. Admit (installed as `transport.admit`, asked by the host transport before it gives
   a new peer a slot): true when the list is empty, when `online::npid_at(from)` is empty or not in the
   list. Else add 1 to that id's count; when the count before adding was a multiple of 20 (the first
   refusal, then one line per 10 s of 0.5 s Hello retries) log
-  `party: refused a join from %s (kicked as a griefer; %u tries)` (NpId, new count); false. A refused
+  `party: refused a join from %s (kicked from this session; %u tries)` (NpId, new count); false. A refused
   Hello gets no slot, no Welcome and no peer event, exactly as when the party is full: online the
   joiner gives up through its "room owner not reached" path, on LAN it keeps waiting as for a full
   host.
@@ -509,8 +513,11 @@ Only when the pointer is non-NULL and event[0] == 6:
 ### 5.4 BUTTON_MULTIPLAYER
 
 In order: log `Multiplayer selected`; `netheap_install()`; `netinit_prepare()`; `netpatch_load()`.
-If not active: start the transport (5.5); on failure netInfo+0x1c = 1, `show_page(0x53cbb5f2)` and
-return; on success active = true. Then: netInfo+0x1c = 0; netInfo+0x34 = 0; ngm+0x1ca0 = -1; party
+If not active: start the transport (5.5); on failure (PS3 bootstrap 0x438bc8 without a network, parity group
+D 2.1) log `Multiplayer could not start: network message, staying in the main menu`, close transport (5.1),
+`online::on_transport_closed("Multiplayer could not start")`, `game_message_box(0x88a082af, 0)` (body text,
+OK button) and return: no error byte, no PAGE_MULTIPLAYER, active stays false, the player stays in the main
+menu. On success active = true. Then: netInfo+0x1c = 0; netInfo+0x34 = 0; ngm+0x1ca0 = -1; party
 session set to (ctx, 1, 1) when hosting, else (ctx, my net id or 0xfff if it is 0, 1); publish members
 into party; sent mode = -1; NET_SM = 18; register the page handler; keep net package; preload (5.6);
 `show_page(0x53cbb5f2)`.
@@ -537,17 +544,27 @@ into party; sent mode = -1; NET_SM = 18; register the page handler; keep net pac
 ### 5.6 Package preload
 
 Skipped silently when `UNCHARTED_U2MP_PRELOAD` is exactly `0`. Else for each of the 21 names in order:
-if find package(sid(name)) finds it, count "present"; else request it and count "requested" when it
+if find package(sid(name)) finds it, set its keep flag (package +0x18 |= 0x40, the flag the teardown
+cleared on the last leave) and count "present"; else request it and count "requested" when it
 returns non-NULL, "not created" when NULL. Then log
 `package preload (PS3 0xe155d0): %d requested, %d already present, %d not created`.
 
 ### 5.7 LEAVE_MULTIPLAYER and teardown
 
-LEAVE_MULTIPLAYER = teardown with pop. Teardown, in order: log `leaving multiplayer`; unregister the
+LEAVE_MULTIPLAYER = teardown with pop. Teardown (pop, leaving: true except the client's "leaving the match
+room and returning to the Multiplayer menu" path of the frame work (5.8), which stays in Multiplayer), in order: log `leaving multiplayer`; unregister the
 page handler; `gamenet::detach(s)` for s = 0..10; `voice::stop()`; close transport (5.1);
 `online::on_transport_closed("Multiplayer left")`; active = false; clear party session; clear match
-session; netInfo+0x2c4 = 0; ngm+0x1ca0 = -1; guest `0x63db90(ngm)`; `progression_publish()`; NET_SM = 0;
-clear all members; with pop: guest `0x5cc6f0(menu)`.
+session; netInfo+0x2c4 = 0; guest `0x63db90(ngm)`; `progression_publish()`; NET_SM = 0;
+clear all members; when leaving, the PS3 0x4386d0 releases (parity group D 2.3): release packages, then
+`frontend6::preload_net_game(false, true, false)` (PS3 0x4a12e8(ngm, 0, 1, 0), with the net game still
+current); then ngm+0x1ca0 = -1; with pop: guest `0x5cc6f0(menu)`.
+
+Release packages: for `net`, the extra net package when `extra_net_package()` names one, and the 21 preload
+names: a package that is present and has bit 0x40 at +0x18 loses that bit (counted); absent ones are skipped.
+Then log `leaving multiplayer: %d package(s) no longer kept for Multiplayer`. The PS4 function that releases
+a package request is not known (parity-d-flow1.md question 6): nothing else is called. A cinema transfer has
+nothing to abort: `online::send_cinema` hands the whole file to the online program in one call.
 
 ### 5.8 Frame work
 
@@ -664,7 +681,7 @@ Client (events for slots other than 0 are ignored):
 - left: if `online::host_change_expected()`: log
   `online: the old host closed the link; following the leader to its new room`, `gamenet::detach(0)`.
   Else if `online::on_host_lost()` (called only now; it may call back into this file before
-  returning): log `party: lost the host; the room's new owner takes over`, detach 0. Else log
+  returning): log `party: lost the host of the matchmaking room; matchmaking searches again`, detach 0. Else log
   `party: lost the host`, detach 0, netInfo+0x1c = 1, host lost = true.
 
 ### 5.12 Net clock
@@ -735,7 +752,13 @@ A row at or past the list's end answers nothing. Else, with e = the entry and m 
 
 ### 5.14 BUTTON_MULTIPLAYER_STARTMATCH
 
-Nothing unless hosting (active is not checked). mode = s32 netInfo+0x2c4.
+Nothing unless hosting (active is not checked). mode = s32 netInfo+0x2c4. PS3 0x43aab0's checks come first
+(parity group D 2.2); a failed check logs `Start Match: %s` (the reason) and shows
+`game_message_box(body, second)`, and nothing starts. Party size = used members, at least 1.
+- mode 1 (matchmaking): when `playlist_max_party(u32 NPD+0x104)` is > 0 and the party is larger: reason
+  `the party is larger than the playlist allows`, box 0x58b7e078 / 0x3a586923, stop. (Our playlists carry
+  no maximum yet: 0, no check.) Then `online::hide_for_start(true)` (the party room is hidden for the
+  countdown; LAN: nothing).
 - mode 1 and `matchmaking::installed()`: if `frontend6::leader_starting(true)` returns false, call
   `matchmaking::leader_start()`. Return.
 - mode 1 otherwise: table = `lookup(0x3b9a067d)`; when non-NULL, count > 0 and records non-NULL:
@@ -745,7 +768,28 @@ Nothing unless hosting (active is not checked). mode = s32 netInfo+0x2c4.
   matches). If any: pick = candidates[`std::rand()` % count] (one rand call); guest
   `0x63dc30(ngm, pick, NULL, 10)`; log `matchmaking: net game %d of %zu of type %d`. Then create the
   match now.
-- other modes: if `frontend6::leader_starting(false)` returns true, return. Else create the match now.
+- mode 2 (custom game): with a current net game in `*net-games*` (else no checks), type = its +0x0c, in
+  this order:
+  1. `dlc_net_game_pack(game, local_ok)`: local_ok false -> reason `this PC lacks the map's map pack`, box
+     0x0e39fdf3 (pack 1) or 0x2341ea7b (other) / 0x13cabc15. When the pack is 1 or 2 and this PC has it
+     (`dlc_packs()` bit 1 << pack; without map pack 1 Ruins is the base map and nothing is checked), any
+     other used member whose packs byte (4.2 Info, 0xff when not told) lacks that bit -> reason
+     `a party member lacks the map's map pack`, box 0x58d7fbb3 / 0x13cabc15.
+  2. Too many: party > 10 for types 0, 1, 2, 3, 5, 6, 7, 10, 11, > 3 for co-op types 4, 8, 9, 12, > 0 for any
+     other type -> reason `too many players for the game type`, box 0x4a936499 / 0x13cabc15.
+  3. Too few: party < 1 for a co-op type (4, 8, 9, 12), < 2 for every other type (owner rule 2026-11-25; PS3: 2 only for type 10 and co-op) -> reason `too few players for the game type`, box
+     0xb90de2b1 / 0xcca3ca1f. **Deliberate difference**: PS3 needs 2 players for the co-op types 4, 8, 9,
+     12; ours starts them with 1 (solo co-op, solocoop.cpp).
+  4. Type 10: when every used member is on team 1, or every one on team 2 (team 0 breaks both; no member
+     counts as one team) -> reason `every player is on one team`, box 0x101c7f10 / 0x5350146e.
+  Then `online::hide_for_start(true)`; if `frontend6::leader_starting(false)` returns true, return. Else
+  create the match now.
+- mode 3 (cinema): log `Cinema`; `cinema::start_playback()` (BUTTON_MULTIPLAYER_STARTCINEMA's action: the
+  selected recording, menu reset, the replay task). PS3 also clears one netInfo flag (0x4a9c64): its PS4
+  counterpart is not known, not done.
+- other modes: log `Start Match: page mode %d: nothing to start` (PS3: nothing).
+
+The leader's countdown cancel (frontend3.cpp `leader_back`) calls `online::hide_for_start(false)`.
 
 Create the match now: log `Start Match: creating the match`; match+0xc8 = 0; match choice diagnostics;
 `netinit_match()`; `netinit_dump("before create")`; host create; `netinit_dump("after create")`; match
@@ -783,18 +827,18 @@ page 0x471007a1: the first entry with that page id, else (count < 32) a new entr
 - `local_name()`: `UNCHARTED_U2MP_NAME` cut to 31 bytes when non-empty, else my name.
 - `rank()`: local rank (one guest lookup).
 - `send_message(slot, body, except)`: when active and body non-empty, send as in 4.1.
-- `kick(id)`: false unless active, hosting, 2 <= id <= 11 and member id-1 used. Else log
-  `party: kicking %s (net id %u)`, send `[5]` to slot id-1, true. Kick From Party uses this; it does
-  not block.
+- `kick(id)` (Kick From Party, PS3 0x439cf8 kicks with the block flag; parity group D 2.4): false unless
+  active, hosting, 2 <= id <= 11 and member id-1 used. Else npid = `online::npid_at` of
+  `transport.peer_address(id - 1)` when that slot has an address, else empty (read before the kick); log
+  `party: kicking %s (net id %u)`, send `[5]` to slot id-1; then empty npid: log
+  `party: net id %u has no online id: kicked, not blocked`; else add npid to the block list (count 0; an id
+  already there keeps its count) and log `party: %s blocked from joining again until this session ends`
+  (npid). True.
 - `kick_griefer(id)` (NetEventKickGriefer on the host; PS3 kicks out of the match room with the block
   flag set): false unless active and hosting. If id equals my net id (the host was named): log
   `party: this PC (the host) was named as the griefer: leaving the session`, netInfo+0x1c = 1, kicked =
   true (frame work step 6 closes the transport on the next frame, as for a kicked client), true.
-  Otherwise npid = `online::npid_at` of `transport.peer_address(id - 1)` when 2 <= id <= 11 and that
-  slot has an address, else empty (read before the kick). `kick(id)`; false -> false. Then empty
-  npid: log `party: net id %u has no online id: kicked, not blocked`; else add npid to the block list
-  (count 0; an id already there keeps its count) and log
-  `party: %s blocked from joining again until this session ends` (npid). True.
+  Otherwise `kick(id)`.
 - `member_address(id, out)`: false unless active, hosting and 2 <= id <= 11; else
   `transport.peer_address(id - 1, out)`.
 - `net_id_of(npid)`: the smallest net id whose stored NpId equals npid; 0 when none.
@@ -870,8 +914,8 @@ Multiplayer entry
    party session (ctx,1,1), record 0 valid id 1 key 1, NET_SM 18, handler registered + log, package
    requests (`net` flag |= 0x40), preload log, ShowPage(0x53cbb5f2).
 7. UNCHARTED_U2MP_PORT=0 / -5 / 70000 / abc: port 27210, 27210, 4464, 27210.
-8. Host fails to listen: `cannot listen...`, netInfo+0x1c = 1, ShowPage, active stays false, NET_SM
-   unchanged.
+8. Host fails to listen: `cannot listen...`, then the start failure of 5.4 (message box 0x88a082af, no
+   ShowPage, netInfo+0x1c untouched), active stays false, NET_SM unchanged.
 9. LAN join valid / unparsable address: `joining the party at ...` and party (ctx,0xfff,1) / `cannot join
    x` and error path.
 10. Online start: link given -> online log; host_link false -> error path.
@@ -968,10 +1012,104 @@ Teardown and public calls
 57. kick_griefer: not hosting -> false; own id -> log, netInfo+0x1c = 1, next frame closes (`kicked`);
     member with an NpId -> `[1,5]` to it, blocked; its next Hello is refused (no slot, one log line,
     the next line at the 21st try); a member without NpId (LAN) -> kicked, not blocked; after any
-    close transport the same NpId joins again. Kick From Party never blocks.
+    close transport the same NpId joins again. Kick From Party blocks the same way (parity group D).
+58. Start Match checks (parity group D): mode 2, type 8 with 4 members -> too many box; 3 -> countdown;
+    type 8 with 1 member -> countdown (solo co-op); type 10 alone -> too few box; type 10 all on team 2 ->
+    one-team box; a member whose Info said packs 1 (base only) on a map pack 2 map -> member box; an older
+    member (no packs byte) -> countdown; mode 1 with a playlist maximum below the party -> party box; mode 3
+    -> `Cinema`, start playback; mode 0 -> log only. Every started countdown calls hide_for_start(true).
+59. BUTTON_MULTIPLAYER, transport start fails: log, close, box 0x88a082af, no page, active false.
+60. Teardown releases: present packages with bit 0x40 lose it (count in the log), absent skipped, then the
+    level preload release, then ngm+0x1ca0 = -1; the client's leave-the-match-room path does neither.
 
 ## Clarifications found by the differential test
 
 - Missing level package (5.9): the 20 s line is logged once per id in a row: only the last logged id is remembered,
   so a different id in between allows the same id again.
 - Match choice diagnostics (5.14): a `*levels*` table whose records pointer is NULL has no records; the name stays "?".
+
+## Parity group F changes (2026-11-25, spec parity-f-party-mm.md 7)
+
+New interface (session_api.h, frontend3.h, online.h's `u2mp::session` part):
+
+- `bool party_stranger(uint32_t net_id)`: active, online, not our own id, the NpId of that net id is known (`npids`)
+  and `online::in_own_party(npid)` is false.
+- `void leave_party()`: member only (active, not hosting). Online: `online::drop_out_of_party("left matchmaking")`
+  does it (rooms left, `online_reopen` hosts). LAN: log `party: leaving the party (Leave Matchmaking): a party of
+  our own`, detach every slot, close the transport (Bye), clear members, then host on the configured port
+  (`UNCHARTED_U2MP_PORT`, else 27210) or, when that port is taken, on any port; hosting, net id 1, member 0 = us,
+  party session published, sent mode -1, log `party: hosting a party of our own on UDP port %u`. Neither port:
+  log, active = false.
+- `int mm_balance_slot()`: host only, else -1: the slot list (`mm_list`, open slots skipped) sorted stably by the
+  number of listed players sharing the entry's party id (party id 0 counts 1), then party id, then position; the
+  last entry's transport slot when its count is 1 and it is not slot 0 / this PC, else -1.
+- `void online_party_in(bool ok)`: NET_SM 12 -> mailbox 0x10e {ok} (log `party: JOINING gets 0x10e {%u}`), also
+  while hosting (a join from the list). Then, not hosting and !ok: NET_SM 17 -> menu reset, PAGE_MULTIPLAYER,
+  NET_SM 18 (log); the match session is cleared.
+- `void online_match_abort()`: host only: log, match+0x99 = 0, match session cleared, netInfo+0x08 = 0, menu reset,
+  PAGE_MULTIPLAYER, NET_SM 18.
+- `std::vector<std::string> member_npids()`: host only: the NpIds of the used slots 1.. (transport address ->
+  `online::npid_at`), unknown ones left out.
+
+Changed behaviour:
+
+- `on_follow`: `wait` = the follow has 9+ bytes and `online::follow_match_room(room)` returned true. JOINING is
+  shown only when it is not already the top page (a join from the list shows it at the selection). NET_SM 12; with
+  `wait` log `party: waiting in JOINING until the leader says the whole party is in` and no 0x10e (the leader's
+  kOpPartyIn posts it through `online_party_in`); else 0x10e {1} as before.
+- `online_reopen` also clears the net id -> NpId map (`npids`); the next roster / kIds fills it.
+- Start Match "too few" (5.x): co-op types 1, every other type 2 (owner rule).
+
+## Parity group E changes (2026-11-25, spec parity-e-flow2.md 7)
+
+New session message types (older peers ignore them, 4.2 "12..0x0f ignored" no longer holds for 12..15):
+
+| type | name | direction | layout after the type byte |
+|---|---|---|---|
+| 12 | ClockSync | client -> host / host -> client | `{0, u64 client steady us}` request; `{1, u64 echo, u32 host game clock}` reply |
+| 13 | PartyUp | client -> host / host -> client | `{0, u64 party, u8 size}` pressed (PS3 0x11a); `{1, u64 party room}` join (0x119); `{2}` back (0x118) |
+| 14 | Reserve | client -> host / host -> client | `{0, u64 room, u8 n, n x {u8 len, npid}}` request (0x100); `{1, u8 ok}` reply (0x101) |
+| 15 | LeaderLeave | host -> clients | nothing: the custom-game leader leaves, leave with it (0x117) |
+
+- **Silent peer (2.2).** `transport.on_timeout` logs `%s has left : timed out (nothing heard for 20 s)` with the
+  member's name before the normal "left" path; `net::kTimeoutSeconds` is 20 s in every mode (owner decision).
+- **Net clock (2.3).** Client, per frame (`clock_sync_frame`): while fewer than 8 samples and connected, a ClockSync
+  request every 20..120 ms (LCG, steady clock in us). Host: answers at once with the echo and `own_ticks()`. Client:
+  sample = round trip, offset = int32(host - own ticks) + half the round trip in ticks (300/s); after 8, the 4 with
+  the smallest round trip are averaged and the game clock (`0x1116180+0x204`) moves by the rounded average; log
+  `net clock: 8 samples, best 4 round trips %.1f..%.1f ms: clock moved by %+d ticks to the host's`. Restarts
+  (`net clock: synchronising again (%s)`) when a host is joined, at match setup (EstablishConnection entered), after
+  a coarse type 9 correction and when the transport closes. Type 9 (1 s, > 150 ticks) stays as the coarse fallback.
+  Not done: PS3 then cleared a per-tracker timing field (PS3 tracker +0x22c); its PS4 offset is not known.
+- **Slot manager (2.6), host of an online match room.** `slots_frame`: a new `online::match_room()` while hosting
+  starts a table (capacity `online::mm_slots()`, else 10; log `slot manager: room %llx, %d slots`) and reserves the
+  present players (our NpId + transport members) as one party. `reserve_party`: players without a reservation need
+  free slots = capacity - reservations - present players without one (outside the request); expired reservations of
+  absent players go first (`slot manager: Timeout User %s (party %u)`); all or nothing (`failed to reserve %d slot(s)
+  for a party of %zu (%d free)`); a new party id per request (`adding user` / `updating user %s: party %u`), expiry
+  now + 10 s; a request whose players all hold reservations only renews the hold. Reserve requests name the room
+  (others ignored: `request for room %llx ignored`); the reply goes to the sender. `admit_peer`: a Hello from an NpId
+  without a reservation is refused while no slot is free (`slot manager: %s refused: every slot is taken or
+  reserved`, every 20th try). Member left: `removing user`. The client sends a request when it reaches the owner of a
+  match room it joined (`online::take_led_party()` + our NpId); a refusal calls `online::reservation_refused()`.
+  Not done: the party ids are not written to the trackers (see parity-e-flow2.md 7, 2.6).
+- **Party Up (2.4).** `party_up_frame` (frame work): the wait popup is up when the top page is `0x471007a1` and
+  PAGE_MULTIPLAYER_POSTGAME `0x6b7378ea` is in the page stack. First frame: log, give-up = now + 15 s, the press
+  (party = `online::party_room_id()`, size `online::party_size()`; LAN: party 1, size = member count) goes to the
+  host (or is noted there). Host: 4 s after the first press, parties in press order are merged while the group stays
+  below 6 players (size = max(told size, pressed players)); a group of 2+ parties sends "join" with the first party's
+  room to the players of the other parties; everyone else gets "back". Answer: join = `online::party_up_join(room)`;
+  back = `online::mm_host_gone(.., false)` when a stranger hosts our matchmaking room; both then post mailbox 0x118
+  with the u64 at match session +0x10 (POSTGAME's consumer: pop, NET_SM 19, PAGE_MULTIPLAYER_MATCHMAKING). 15 s
+  without an answer: back. Log lines start with `party up:`.
+- **Voluntary leave (2.5).** Leave state entered with the leave byte `0x104f1c0` set = voluntary. Host in a custom
+  game (netInfo +0x2c4 == 2): LeaderLeave to all before kLobby. Client: LeaderLeave posts mailbox 0x117 with its own
+  netInfo +0x60 u64 (Playing::Update's consumer) and marks "asked by the leader". A client's own voluntary leave
+  (not asked): after the existing teardown, `host_own_party()` leads a party of its own (online link or UDP port,
+  never UNCHARTED_U2MP_JOIN; log `party: left the party with the match (PS3 Leave::Enter): leading a party of our
+  own`).
+- **Players Met (2.9).** Playing entered (every match and round start): the names (+0x20) of the used, not excluded
+  trackers other than the local one go to `progression_note_met`.
+- **Version text (2.11).** Page handler, once per frame clock, NET_SM != 0 and package `menu-temple` in state 7
+  with flag 0x80: `hud_menu_text(1140, 60, 0.4, "%i.%02i.%03i")` of 1, bits 16..23 and bits 0..15 of netInfo +0
+  (0 there: PS3's 0x0009004e, "1.09.078").

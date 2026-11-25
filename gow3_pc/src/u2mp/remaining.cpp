@@ -70,7 +70,10 @@ constexpr uint32_t kMaxCallbacks = 128;
 constexpr uint32_t kPageMessageBox = 0x719e9fec;
 constexpr uint32_t kPagePopup = 0x99ab57c2;
 constexpr uint32_t kPageLobby = 0xb99a3235;
-constexpr uint32_t kTextMute = 0xffbbac12, kCbMute = 0x6547d63c;
+constexpr uint32_t kTextMute = 0xffbbac12, kCbMute = 0x6547d63c, kCbMatchMute = 0x7273924c;
+constexpr uint32_t kTextUnmute = 0xfa9c4838;
+constexpr uint32_t kTextMuteAll = 0xd381d5d8, kCbMuteAll = 0x8d703d6c;
+constexpr uint32_t kTextUnmuteAll = 0x3efad3ba, kCbUnmuteAll = 0x65be38af;
 constexpr uint32_t kTextPromote = 0x9fdf8887, kCbPromote = 0x2d32c8b0;
 constexpr uint32_t kTextKick = 0x1e2955af, kCbKick = 0x7cc46b94;
 constexpr uint32_t kTextJoin = 0xb1600ce3, kCbJoin = 0x0ace8463;
@@ -111,17 +114,37 @@ bool session_is_host(uint64_t session) {
     return load_at<uint64_t>(s, 0x10) == 0 || load_at<uint32_t>(s, 0xb00) == load_at<uint32_t>(s, 0xb04);
 }
 
-// The game's one-button message box with text `text`; it needs the descriptor the menu manager owns.
-void message_box(uint32_t text) {
+// The game's one-button message box with text `text` and an optional second text (word 6 of the block at
+// box +0x40, PS3 0x42a3e8's arg4); it needs the descriptor the menu manager owns.
+void message_box(uint32_t text, uint32_t second = 0) {
     uint8_t *box = load_at<uint8_t *>(menu_manager(), 0x17d0);
     if (!box) return;
     store_at<uint32_t>(box, 0x08, text);
-    const uint32_t words[7] = {0, 0xc6467f2d, 0x11d8e78a, 0, 0x1519fa3d, 0, 0};
+    const uint32_t words[7] = {0, 0xc6467f2d, 0x11d8e78a, 0, 0x1519fa3d, second, 0};
     std::memcpy(box + 0x40, words, sizeof words);
     show_page(kPageMessageBox);
 }
 
 void pop_page() { reinterpret_cast<void(U2MP_GUEST *)(void *)>(image_ptr(fPopPage))(menu_manager()); }
+
+// The page id at stack position i (menu manager +0x9d0, top index at +0x1010); 0 when there is none.
+uint32_t page_at(int32_t i) {
+    const uint8_t *page = load_at<uint8_t *>(menu_manager(), 0x9d0 + 8 * uint64_t(i));
+    return page ? load_at<uint32_t>(page, 0x10) : 0;
+}
+
+// Go to `page`: back to it when it is on the page stack (the pages above it are popped), else it is opened.
+void go_to_page(uint32_t page) {
+    const int32_t top = load_at<int32_t>(menu_manager(), 0x1010);
+    int32_t at = -1;
+    for (int32_t i = 0; top >= 0 && top <= 0x40 && i <= top; ++i)
+        if (page_at(i) == page) at = i;
+    if (at < 0) {
+        show_page(page);
+        return;
+    }
+    for (int32_t i = top; i > at; --i) pop_page();
+}
 
 // The game's popup: a title, a page and up to eight {text, callback} options, laid out as the
 // game reads them (19 words). Kept in static storage so it stays valid however long the game
@@ -148,6 +171,7 @@ public:
         ++desc_.count;
     }
     bool empty() const { return desc_.count == 0; }
+    void set_title(uint32_t title) { desc_.title = title; }   // 0: no title
     void show() {
         reinterpret_cast<void(U2MP_GUEST *)(void *, void *, uint32_t)>(image_ptr(fShowPopup))(menu_manager(), &desc_, 1);
     }
@@ -177,12 +201,6 @@ bool register_callback(uint32_t id, MenuCallback fn) {
     store_at<uint64_t>(entry, 0x10, 0);
     store_at<uint32_t>(menu, 0x18ec, count + 1);
     return true;
-}
-
-// Appends one of our own texts; a missing text must not crash, so it then adds nothing.
-std::string with_own_text(std::string base, uint32_t id) {
-    if (const char *t = own_text(id)) base += t;
-    return base;
 }
 
 // ---- B1: level record package (0x644130) ---------------------------------------------------------------
@@ -357,6 +375,7 @@ U2MP_GUEST void kick_griefer_apply(void *event, void *) {
 
 // The popup of another player's row. The own row has none: its row query answers op 7 with 0 (PS3), so the
 // game drops the press before it gets here; a press that still arrives does nothing.
+// Party rows (PS3 0x4417f0): "Mute" or "Unmute" by the member's voice state, then the leader's Promote / Kick.
 void player_options(bool found, int row, uint32_t id, const std::string &name) {
     if (!found) {
         log("player options: no player in row %d", row);
@@ -366,7 +385,7 @@ void player_options(bool found, int row, uint32_t id, const std::string &name) {
     g_selected_member = id;
     text_set_player(name.c_str());
     Popup popup;
-    popup.add(kTextMute, kCbMute);
+    popup.add(voice::muted(id) ? kTextUnmute : kTextMute, kCbMute);
     if (session::is_host() && online::active()) popup.add(kTextPromote, kCbPromote);
     if (session::is_host()) popup.add(kTextKick, kCbKick);
     popup.show();
@@ -379,14 +398,49 @@ void player_options(int row) {
     player_options(found, row, id, name);
 }
 
+// The other players of the match list (matchmaking slot list, PS3 match player list 0xf21de8).
+std::vector<uint32_t> match_others() {
+    std::vector<uint32_t> ids;
+    for (int row = 0; row < 10; ++row) {
+        uint32_t id = 0;
+        std::string name;
+        if (session::mm_member_at(row, id, name) && id && id != session::local_id()) ids.push_back(id);
+    }
+    return ids;
+}
+
+// Mute All / Unmute All: every other player of the match, silently (as Mute).
+U2MP_GUEST void mute_all(void *, void *, void *) {
+    for (uint32_t id : match_others()) voice::set_muted(id, true);
+}
+U2MP_GUEST void unmute_all(void *, void *, void *) {
+    for (uint32_t id : match_others()) voice::set_muted(id, false);
+}
+
 U2MP_GUEST void party_player_row(void *arg, void *, void *) { player_options(int(arg_word(arg, 8) % 10)); }
-// Matchmaking rows show the matchmaking slot list (session.cpp), not the party order.
+// Matchmaking / postgame rows (PS3 0x440620): the matchmaking slot list (session.cpp), not the party order. No
+// title, no Kick / Promote: "Mute" / "Unmute" (not on the own row), "Mute All" unless every other player is muted,
+// "Unmute All" unless none is.
 U2MP_GUEST void match_player_row(void *arg, void *, void *) {
     const int row = int32_t(arg_word(arg, 8));
     uint32_t id = 0;
     std::string name;
-    const bool found = session::mm_member_at(row, id, name);
-    player_options(found, row, id, name);
+    if (!session::mm_member_at(row, id, name)) {
+        log("player options: no player in row %d", row);
+        return;
+    }
+    const std::vector<uint32_t> others = match_others();
+    size_t muted = 0;
+    for (uint32_t o : others) muted += voice::muted(o);
+    g_selected_member = id;
+    text_set_player(name.c_str());
+    const bool cbs = register_callback(kCbMuteAll, mute_all) && register_callback(kCbUnmuteAll, unmute_all);
+    Popup popup;
+    popup.set_title(0);
+    if (id != session::local_id()) popup.add(voice::muted(id) ? kTextUnmute : kTextMute, kCbMatchMute);
+    if (cbs && muted < others.size()) popup.add(kTextMuteAll, kCbMuteAll);
+    if (cbs && muted > 0) popup.add(kTextUnmuteAll, kCbUnmuteAll);
+    if (!popup.empty()) popup.show();
 }
 
 // ---- B9 / B10: friends list ---------------------------------------------------------------------------
@@ -425,14 +479,18 @@ void friend_options(int r) {
     case online::kRowRequestOut:
         if (cbs) popup.add(kTextCancelRequest, kCbFriendRemove);
         break;
-    default:
-        if (online::friend_joinable(r)) popup.add(kTextJoin, kCbJoin);
-        if (online::friend_online(r)) popup.add(kTextInviteParty, kCbInviteParty);
+    default: {
+        // PS3 0x43f830: Join and Invite only for a friend who is not already in our party.
+        online::FriendView v;
+        const bool in_party = online::friend_view(r, v) && v.party_member;
+        if (!in_party && online::friend_joinable(r)) popup.add(kTextJoin, kCbJoin);
+        if (!in_party && online::friend_online(r)) popup.add(kTextInviteParty, kCbInviteParty);
         if (cbs) {
             popup.add(kTextViewProfile, kCbFriendProfile);
             popup.add(kTextRemoveFriend, kCbFriendRemove);
         }
         break;
+    }
     }
     if (popup.empty())
         message_box(kTextPlayer);
@@ -486,20 +544,21 @@ U2MP_GUEST void kick_from_party(void *, void *, void *) {
         log("Kick From Party: net id %u not kicked", g_selected_member);
 }
 
+// PS3 0x439bf0 / 0x439d60: flip the member's muted flag, nothing shown (the row's muted icon follows voice.cpp).
+// The member must exist and not be this PC.
 U2MP_GUEST void mute_member(void *, void *, void *) {
-    if (!voice::enabled()) {
-        message_box(kTextVoice);
-        return;
-    }
     std::string name;
-    if (!session::member_name(g_selected_member, name)) return;
-    const bool muted = voice::toggle_mute(g_selected_member);
-    text_set_player(with_own_text(name + ": ", muted ? kTextMuted : kTextUnmuted).c_str());
-    message_box(kTextPlayer);
+    if (g_selected_member == session::local_id() || !session::member_name(g_selected_member, name)) return;
+    voice::toggle_mute(g_selected_member);
 }
 
+// PS3 0x439c7c: hand the party to the member, then PAGE_LOBBY. Our failure box is a PC addition (LAN has no
+// promote, or the member is not in the room).
 U2MP_GUEST void promote_leader(void *, void *, void *) {
-    if (g_selected_member != 0 && online::promote(g_selected_member)) return;
+    if (g_selected_member != 0 && online::promote(g_selected_member)) {
+        go_to_page(kPageLobby);
+        return;
+    }
     message_box(kTextLeader);
 }
 
@@ -714,6 +773,16 @@ void show_notice(const char *text) {
     if (!text || !*text) return;
     text_set_player(text);
     message_box(kTextPlayer);
+}
+
+void game_message_box(uint32_t body, uint32_t second) {
+    for (uint32_t id : {body, second}) {
+        if (!id) continue;
+        const char *t = reinterpret_cast<const char *(U2MP_GUEST *)(void *, uint32_t)>(image_ptr(fTextFind))(
+            image_ptr(0x1066660), id);
+        if (!t || !*t) log("message box: text %08x is not in the game's text banks", id);
+    }
+    message_box(body, second);
 }
 
 void cinema_pick_friend() { pick_friend_for_cinema(); }

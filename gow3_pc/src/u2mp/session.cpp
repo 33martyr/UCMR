@@ -19,6 +19,7 @@
 #include <string>
 #include <vector>
 
+#include "cinema.h"
 #include "frontend3.h"
 #include "frontend6.h"
 #include "gamenet.h"
@@ -93,6 +94,13 @@ constexpr uint32_t kPageLobby = 0xb99a3235;
 constexpr uint32_t kMessageBoxPage = 0x719e9fec;
 constexpr uint64_t kHostCreateHandler = 0x6093f0;
 constexpr uint32_t kWaitText = 0x69deab50;
+constexpr uint32_t kNoNetworkText = 0x88a082af;   // BUTTON_MULTIPLAYER: no network (PS3 bootstrap 0x438bc8)
+// Start Match message boxes (PS3 0x43aab0): body / second text.
+constexpr uint32_t kPartyTooBig = 0x58b7e078, kPartyTooBigInfo = 0x3a586923;
+constexpr uint32_t kNoMapPack1 = 0x0e39fdf3, kNoMapPack2 = 0x2341ea7b, kMemberNoMapPack = 0x58d7fbb3,
+                   kCustomInfo = 0x13cabc15;
+constexpr uint32_t kTooManyPlayers = 0x4a936499, kTooFewPlayers = 0xb90de2b1, kTooFewInfo = 0xcca3ca1f;
+constexpr uint32_t kOneTeam = 0x101c7f10, kOneTeamInfo = 0x5350146e;
 constexpr uint32_t kNetPackage = 0x4240ef2e;
 constexpr uint32_t kNetU2mpPackage = 0x5e516de8;
 constexpr uint32_t kIconTalking = 0xffa98ec5;
@@ -107,7 +115,12 @@ static_assert(sid("net") == kNetPackage && sid("net-u2mp") == kNetU2mpPackage, "
 // right after every kRoster ({slot, tag length, tag bytes} per member); older peers ignore an unknown type, so
 // the roster format itself stays as old peers read it.
 enum : uint8_t { kInfo = 1, kRoster = 2, kMode = 3, kFollow = 4, kKick = 5, kTeams = 6, kIds = 8, kClock = 9,
-                  kLobby = 10, kTags = 11 };
+                  kLobby = 10, kTags = 11,
+                  // PS3 parity group E (spec parity-e-flow2.md): older peers ignore these types.
+                  kClockSync = 12,    // {0, u64 client us} request / {1, u64 echo, u32 host ticks} reply (2.3)
+                  kPartyUp = 13,      // {0, u64 party, u8 size} pressed (0x11a) / {1, u64 room} join (0x119) / {2} back (0x118) (2.4)
+                  kReserve = 14,      // {0, u64 room, u8 n, n x {u8 len, npid}} request (0x100) / {1, u8 ok} reply (0x101) (2.6)
+                  kLeaderLeave = 15 };   // {} the custom-game leader leaves: leave with it (0x117) (2.5)
 
 // ---- raw memory helpers -----------------------------------------------------------------------------
 template <typename T> T get(const uint8_t *p) { T v; std::memcpy(&v, p, sizeof v); return v; }
@@ -155,6 +168,7 @@ struct Member {
     uint8_t team = 0;
     uint32_t import_notice = 0;
     std::string tag = {};   // the clan tag the member published (kInfo / kTags), "" none; ours is read live
+    uint8_t packs = 0xff;   // host: the map packs the member has (dlc_packs bits, kInfo); 0xff = not told (older PC)
 };
 
 Member members[kSlots];
@@ -186,8 +200,8 @@ bool lobby_returning = false;
 void *online_state = nullptr;
 double lobby_grace = 0.0;
 std::map<uint32_t, std::string> npids;   // net id -> NpId (ordered, so the smallest id is found first)
-// Host: online ids kicked as griefers in this hosted session -> refused Hellos since. Lives as long as
-// the transport (close_transport clears it), like PS3's block on the match room.
+// Host: online ids kicked in this hosted session (Kick From Party, griefer kick) -> refused Hellos since. Lives
+// as long as the transport (close_transport clears it), like PS3's block on the room.
 std::map<std::string, unsigned> blocked;
 int closed_frames = 0;
 uint8_t *clock_object = nullptr;
@@ -495,24 +509,47 @@ uint8_t *keep_net_package() {
     return request_package_internal("net");
 }
 
+// The weapons and animation packages the PS3 game loaded on entering Multiplayer (PS3 0xe155d0).
+constexpr const char *kPreloadNames[] = {
+    "beretta-pistol", "beretta-pistol-magazine", "colt-defender-pistol", "colt-defender-magazine",
+    "desert-eagle", "desert-eagle-magazine", "dragunov-magazine", "dragunov-rifle", "fn-fal-clip",
+    "fn-fal-rifle", "m4-rifle", "m4-rifle-magazine", "shotgun", "spas12-shotgun", "machine-gun",
+    "machine-gun-clip", "rpg", "anim-proto-multiplayer", "anim-proto-shield", "anim-proto-carry-objects",
+    "m32-grenade-launcher"};
+
 void preload_packages() {
     const char *env = std::getenv("UNCHARTED_U2MP_PRELOAD");
     if (env && std::strcmp(env, "0") == 0) return;
-    // The weapons and animation packages the PS3 game loaded on entering Multiplayer.
-    static const char *const names[] = {
-        "beretta-pistol", "beretta-pistol-magazine", "colt-defender-pistol", "colt-defender-magazine",
-        "desert-eagle", "desert-eagle-magazine", "dragunov-magazine", "dragunov-rifle", "fn-fal-clip",
-        "fn-fal-rifle", "m4-rifle", "m4-rifle-magazine", "shotgun", "spas12-shotgun", "machine-gun",
-        "machine-gun-clip", "rpg", "anim-proto-multiplayer", "anim-proto-shield", "anim-proto-carry-objects",
-        "m32-grenade-launcher"};
     int requested = 0, present = 0, missing = 0;
-    for (const char *name : names) {
-        if (find_package(sid(name))) ++present;
-        else if (request_package_internal(name)) ++requested;
-        else ++missing;
+    for (const char *name : kPreloadNames) {
+        if (uint8_t *pkg = find_package(sid(name))) {
+            pkg[0x18] |= 0x40;   // kept for Multiplayer again (the teardown cleared it last time)
+            ++present;
+        } else if (request_package_internal(name)) {
+            ++requested;
+        } else {
+            ++missing;
+        }
     }
     log("package preload (PS3 0xe155d0): %d requested, %d already present, %d not created", requested, present,
         missing);
+}
+
+// Multiplayer teardown (PS3 0x4386d0): the "net" packages and the preload list lose the "keep for multiplayer"
+// flag our requests set (package +0x18 bit 0x40); absent ones are skipped. The game's own release of a package
+// request on PS4 is not known (spec parity-d-flow1.md question 6): the flag is cleared, nothing is called.
+void release_packages() {
+    int released = 0;
+    auto release = [&](uint32_t id) {
+        uint8_t *pkg = find_package(id);
+        if (!pkg || !(pkg[0x18] & 0x40)) return;
+        pkg[0x18] &= uint8_t(~0x40);
+        ++released;
+    };
+    release(kNetPackage);
+    if (const char *extra = extra_net_package()) release(sid(extra));
+    for (const char *name : kPreloadNames) release(sid(name));
+    log("leaving multiplayer: %d package(s) no longer kept for Multiplayer", released);
 }
 
 void request_actor_package(const char *actor) {
@@ -583,6 +620,7 @@ void send_info() {
     push_skin(villain);
     sent_tag = local_tag();
     push_skin(sent_tag.c_str());   // the clan tag: one more length-prefixed string (older hosts stop before it)
+    b.push_back(uint8_t(dlc_packs()));   // the map packs we have, for the host's Start Match check (PS3 member data)
     send_raw(0, b, -1);
 }
 
@@ -710,7 +748,14 @@ void on_info(uint8_t from, const uint8_t *d, size_t size) {
     }
     // The clan tag (newer clients; an older one sends none and shows untagged).
     m.tag.clear();
-    if (at < size && at + 1 + d[at] <= size) m.tag = cut(std::string(reinterpret_cast<const char *>(d + at + 1), d[at]), 4);
+    if (at < size && at + 1 + d[at] <= size) {
+        m.tag = cut(std::string(reinterpret_cast<const char *>(d + at + 1), d[at]), 4);
+        at += 1 + d[at];
+    } else {
+        at = size;
+    }
+    // The member's map packs (newer clients; an older one is not checked).
+    m.packs = at < size ? d[at] : 0xff;
     refresh_sessions();
     broadcast_roster();
     broadcast_teams();
@@ -779,7 +824,8 @@ void on_tags(const uint8_t *d, size_t size) {
 void on_follow(const uint8_t *d, size_t size) {
     if (hosting) return;
     log("following the host into the match");
-    if (size >= 9) online::follow_match_room(get<uint64_t>(d + 1));
+    // Online custom game: the leader posts 0x10e once the whole party is in its room (online_party_in).
+    const bool wait = size >= 9 && online::follow_match_room(get<uint64_t>(d + 1));
     netinit_match();
     g(kNetInfo)[0x08] = 0;
     guest<void(U2MP_GUEST *)(void *)>(kClearNetPlayers)(ngm());
@@ -792,8 +838,12 @@ void on_follow(const uint8_t *d, size_t size) {
     match[0xb8] = 1;
     fill_trackers();
     request_match_skin_packages();
-    show_page(kPageJoining);
+    if (top_page_id() != kPageJoining) show_page(kPageJoining);   // a join from the list shows it at the selection
     set_net_sm(12);
+    if (wait) {
+        log("party: waiting in JOINING until the leader says the whole party is in");
+        return;
+    }
     const uint8_t joined = 1;
     mailbox_post(0x10e, 1, &joined, 1);
 }
@@ -807,6 +857,416 @@ void on_ids(const uint8_t *d, size_t size) {
         npids[id] = std::string(reinterpret_cast<const char *>(d + at + 2), len);
         at += 2 + len;
     }
+}
+
+// ---- PS3 parity group E (spec parity-e-flow2.md) ---------------------------------------------------------
+void put_u64(std::vector<uint8_t> &b, uint64_t v) {
+    for (int i = 0; i < 8; ++i) b.push_back(uint8_t(v >> (8 * i)));
+}
+int64_t steady_us() {
+    return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+uint32_t own_ticks();
+std::string npid_of_net_id(uint32_t net_id) {
+    if (net_id == my_id) return online::my_npid_text();
+    const auto it = npids.find(net_id);
+    return it == npids.end() ? std::string() : it->second;
+}
+const char *member_label(uint32_t net_id) {
+    const int s = net_id == host_id ? 0 : int(net_id) - 1;
+    return s >= 0 && s < kSlots && members[s].used ? members[s].name.c_str() : "?";
+}
+
+// 2.3 Net clock synchronisation (PS3 NetConnectionUpdate 0x43cdb8 / NpNetUpdate 0x43bdd0). A client asks the host
+// for its clock at random 20..120 ms intervals until it has 8 samples; each answer gives the round trip and the
+// host's clock corrected by half of it minus ours. The 4 samples with the smallest round trip are averaged and
+// our game clock (the clock StartGame and the round timers read) moves by that offset. Once per connection.
+struct ClockSample {
+    int64_t rtt_us;
+    double offset_ticks;
+};
+std::vector<ClockSample> clock_samples;
+bool clock_synced = false;
+int64_t next_clock_request = 0;
+uint32_t clock_rng = 0x2545f491u;
+
+void clock_sync_reset(const char *why) {
+    if (!clock_samples.empty() || clock_synced) log("net clock: synchronising again (%s)", why);
+    clock_samples.clear();
+    clock_synced = false;
+    next_clock_request = 0;
+}
+
+void clock_sync_frame() {
+    if (hosting || clock_synced || my_id == 0 || !transport.connected()) return;
+    const int64_t t = steady_us();
+    if (t < next_clock_request) return;
+    clock_rng = clock_rng * 1103515245u + 12345u;
+    next_clock_request = t + 20000 + int64_t((clock_rng >> 8) % 100001u);
+    std::vector<uint8_t> b{kClockSync, 0};
+    put_u64(b, uint64_t(t));
+    send_raw(0, b, -1);
+}
+
+void on_clock_sync(uint8_t from, const uint8_t *d, size_t size) {
+    if (size < 2) return;
+    if (d[1] == 0) {   // host: answer at once with the request's own time and our clock
+        if (!hosting || size < 10) return;
+        std::vector<uint8_t> b{kClockSync, 1};
+        b.insert(b.end(), d + 2, d + 10);
+        const uint32_t ticks = own_ticks();
+        for (int i = 0; i < 4; ++i) b.push_back(uint8_t(ticks >> (8 * i)));
+        send_raw(from, b, -1);
+        return;
+    }
+    if (d[1] != 1 || hosting || from != 0 || size < 14 || clock_synced) return;
+    const int64_t sent = int64_t(get<uint64_t>(d + 2));
+    const int64_t rtt = steady_us() - sent;
+    if (rtt < 0 || rtt > 5000000) return;   // not one of ours (or from before a restart)
+    const uint32_t host_ticks = get<uint32_t>(d + 10);
+    const double half = double(rtt) * 0.5 * 300.0 / 1e6;
+    clock_samples.push_back({rtt, double(int32_t(host_ticks - own_ticks())) + half});
+    if (clock_samples.size() < 8) return;
+    std::sort(clock_samples.begin(), clock_samples.end(),
+              [](const ClockSample &a, const ClockSample &b) { return a.rtt_us < b.rtt_us; });
+    double sum = 0;
+    for (int i = 0; i < 4; ++i) sum += clock_samples[size_t(i)].offset_ticks;
+    const int32_t offset = int32_t(std::lround(sum / 4.0));
+    uint8_t *clock = g(kGameClock);
+    put<uint32_t>(clock, get<uint32_t>(clock) + uint32_t(offset));
+    clock_synced = true;
+    log("net clock: 8 samples, best 4 round trips %.1f..%.1f ms: clock moved by %+d ticks to the host's",
+        double(clock_samples[0].rtt_us) / 1000.0, double(clock_samples[3].rtt_us) / 1000.0, int(offset));
+}
+
+// 2.6 Slot manager (PS3 0x4d987c..0x4da3f8, room handler 0x4da278). The host of an online match room keeps one
+// reservation per player: NpId, party id, expiry. A joining player asks for its whole party (0x100) once its
+// transport reaches the host; the host reserves all of them or none and answers (0x101). A newcomer without a
+// reservation only gets in while a slot is free besides the live reservations.
+struct Reservation {
+    std::string npid;
+    uint32_t party = 0;
+    double expiry = 0;
+};
+constexpr double kReserveSeconds = 10.0;
+std::vector<Reservation> reservations;
+uint64_t slots_room = 0;
+int slot_capacity = 0;
+uint32_t next_party_id = 1;
+unsigned slot_refusals = 0;
+
+std::vector<std::string> present_npids() {
+    std::vector<std::string> out;
+    if (!online::my_npid_text().empty()) out.push_back(online::my_npid_text());
+    for (int s = 1; s < kSlots; ++s) {
+        net::Address a;
+        if (members[s].used && transport.peer_address(uint8_t(s), a)) {
+            const std::string n = online::npid_at(a);
+            if (!n.empty()) out.push_back(n);
+        }
+    }
+    return out;
+}
+bool contains(const std::vector<std::string> &v, const std::string &s) { return std::find(v.begin(), v.end(), s) != v.end(); }
+Reservation *reservation_of(const std::string &npid) {
+    for (Reservation &r : reservations)
+        if (r.npid == npid) return &r;
+    return nullptr;
+}
+
+// Free slots for `newcomers`: the capacity minus the reservations minus the players present without one. Expired
+// reservations of players that never arrived are dropped first (PS3 "Timeout User").
+int free_slots(const std::vector<std::string> &newcomers, double now) {
+    const std::vector<std::string> present = present_npids();
+    for (size_t i = 0; i < reservations.size();) {
+        if (reservations[i].expiry <= now && !contains(present, reservations[i].npid)) {
+            log("slot manager: Timeout User %s (party %u)", reservations[i].npid.c_str(), reservations[i].party);
+            reservations.erase(reservations.begin() + std::ptrdiff_t(i));
+        } else {
+            ++i;
+        }
+    }
+    int unreserved = 0;
+    for (const std::string &n : present) unreserved += !reservation_of(n) && !contains(newcomers, n);
+    return slot_capacity - int(reservations.size()) - unreserved;
+}
+
+bool reserve_party(const std::vector<std::string> &party, double now) {
+    int needed = 0;
+    for (const std::string &n : party) needed += !reservation_of(n);
+    if (needed == 0) {   // a member that followed its leader asks for itself again: only the hold is renewed
+        for (const std::string &n : party) reservation_of(n)->expiry = now + kReserveSeconds;
+        return true;
+    }
+    const int free = free_slots(party, now);
+    if (needed > free) {
+        log("slot manager: failed to reserve %d slot(s) for a party of %zu (%d free)", needed, party.size(), free);
+        return false;
+    }
+    const uint32_t id = next_party_id++;
+    for (const std::string &n : party) {
+        if (Reservation *r = reservation_of(n)) {
+            log("slot manager: updating user %s: party %u", n.c_str(), id);
+            r->party = id;
+            r->expiry = now + kReserveSeconds;
+        } else {
+            log("slot manager: adding user %s: party %u", n.c_str(), id);
+            reservations.push_back({n, id, now + kReserveSeconds});
+        }
+    }
+    return true;
+}
+
+void release_reservation(const std::string &npid) {
+    for (size_t i = 0; i < reservations.size(); ++i)
+        if (reservations[i].npid == npid) {
+            log("slot manager: removing user %s (party %u)", npid.c_str(), reservations[i].party);
+            reservations.erase(reservations.begin() + std::ptrdiff_t(i));
+            return;
+        }
+}
+
+// Host, per frame: a new match room of ours starts a new table with the room's capacity and our party as one group.
+void slots_frame() {
+    const uint64_t room = hosting && online::active() ? online::match_room() : 0;
+    if (room == slots_room) return;
+    slots_room = room;
+    reservations.clear();
+    slot_refusals = 0;
+    if (!room) return;
+    slot_capacity = online::mm_slots() > 0 ? online::mm_slots() : 10;
+    log("slot manager: room %llx, %d slots", (unsigned long long)room, slot_capacity);
+    reserve_party(present_npids(), gamenet::clock());
+}
+
+bool slots_admit(const std::string &npid) {
+    if (!slots_room || npid.empty()) return true;
+    const double now = gamenet::clock();
+    if (reservation_of(npid) || free_slots({npid}, now) >= 1) return true;
+    if (slot_refusals++ % 20 == 0) log("slot manager: %s refused: every slot is taken or reserved", npid.c_str());
+    return false;
+}
+
+void on_reserve(uint8_t from, const uint8_t *d, size_t size) {
+    if (size < 2) return;
+    if (d[1] == 1) {   // client: the host's answer (0x101)
+        if (hosting || from != 0 || size < 3) return;
+        if (d[2]) {
+            log("slot manager: the host reserved our party's slots");
+        } else {
+            log("slot manager: the host has no slots for our party: the join fails");
+            online::reservation_refused();
+        }
+        return;
+    }
+    if (d[1] != 0 || !hosting || size < 11) return;
+    const uint64_t room = get<uint64_t>(d + 2);
+    std::vector<std::string> party;
+    size_t at = 11;
+    for (uint8_t i = 0; i < d[10] && at < size; ++i) {
+        const uint8_t len = d[at];
+        if (at + 1 + len > size) break;
+        party.emplace_back(reinterpret_cast<const char *>(d + at + 1), len);
+        at += 1 + size_t(len);
+    }
+    if (!slots_room || room != slots_room || party.empty()) {
+        log("slot manager: request for room %llx ignored (ours %llx)", (unsigned long long)room, (unsigned long long)slots_room);
+        return;
+    }
+    const bool ok = reserve_party(party, gamenet::clock());
+    send_raw(from, {kReserve, 1, uint8_t(ok ? 1 : 0)}, -1);
+}
+
+// Client: reached the owner of a match room we joined: ask for our party (or for ourselves alone).
+void request_reservation() {
+    const uint64_t room = online::active() ? online::match_room() : 0;
+    if (!room) return;
+    std::vector<std::string> party = online::take_led_party();
+    const std::string me = online::my_npid_text();
+    if (!me.empty() && !contains(party, me)) party.insert(party.begin(), me);
+    if (party.empty()) return;
+    std::vector<uint8_t> b{kReserve, 0};
+    put_u64(b, room);
+    b.push_back(uint8_t(std::min<size_t>(party.size(), 10)));
+    for (size_t i = 0; i < party.size() && i < 10; ++i) {
+        const std::string n = cut(party[i], 32);
+        b.push_back(uint8_t(n.size()));
+        b.insert(b.end(), n.begin(), n.end());
+    }
+    send_raw(0, b, -1);
+    log("slot manager: asking the host of room %llx for %zu slot(s)", (unsigned long long)room, party.size());
+}
+
+// 2.4 Post-match Party Up (PS3 popup handler 0x43df00; PS4 page 0x471007a1 over POSTGAME, handler 0x5ec4e0 = ret).
+// Pressing Party Up opens the wait popup: the press goes to the match host (0x11a). The host groups the players who
+// pressed 4 s after the first press: a party stays whole, parties merge while the group stays below 6 players, the
+// first party of a group leads it. The others of a group join the leader's party room (0x119); everyone else goes
+// back (0x118). Nobody waits longer than 15 s.
+constexpr uint32_t kPagePostgame = 0x6b7378ea;   // PAGE_MULTIPLAYER_POSTGAME
+struct PartyUpPress {
+    uint32_t net_id;
+    uint64_t party;
+    uint8_t size;
+};
+struct {
+    bool running = false;     // our wait popup is up and has no answer yet
+    bool answered = false;    // answered (or given up) for the popup that is still up
+    double give_up_at = 0;
+    std::vector<PartyUpPress> presses;   // host
+    double group_at = 0;                 // host: 4 s after the first press
+} party_up;
+
+bool page_in_stack(uint32_t id) {
+    const int32_t top = get<int32_t>(menu() + 0x1010);
+    for (int32_t i = 0; i <= top && i <= 0x40; ++i) {
+        uint8_t *page = ptr_at(menu() + 0x9d0 + 8 * uint64_t(i));
+        if (page && get<uint32_t>(page + 0x10) == id) return true;
+    }
+    return false;
+}
+
+void party_up_note(uint32_t net_id, uint64_t party, uint8_t size) {
+    for (const PartyUpPress &p : party_up.presses)
+        if (p.net_id == net_id) return;
+    if (party_up.presses.empty()) party_up.group_at = gamenet::clock() + 4.0;
+    party_up.presses.push_back({net_id, party, std::max<uint8_t>(size, 1)});
+    log("party up: %s pressed Party Up (party %llx of %u)", member_label(net_id), (unsigned long long)party, unsigned(size));
+}
+
+void party_up_answer(bool join, uint64_t room) {
+    if (!party_up.running) {
+        log("party up: an answer without the wait popup: ignored");
+        return;
+    }
+    party_up.running = false;
+    party_up.answered = true;
+    const bool joining = join && room && online::party_up_join(room);
+    log("party up: %s", joining ? "joining the new party's room (0x119)" : "back to matchmaking (0x118)");
+    // Leave the match room: in a stranger's matchmaking room back to our own party (a member to its leader).
+    if (!joining && online::active() && !hosting && !online::host_in_party())
+        online::mm_host_gone("Party Up: back to our party", false);
+    // POSTGAME's own 0x118 consumer: pops, NET_SM 19, PAGE_MULTIPLAYER_MATCHMAKING.
+    const uint64_t handle = get<uint64_t>(g(kMatchSession) + 0x10);
+    mailbox_post(0x118, 1, reinterpret_cast<const uint8_t *>(&handle), 8);
+}
+
+void send_party_up_answer(const PartyUpPress &p, bool join, uint64_t room) {
+    if (p.net_id == my_id) {
+        party_up_answer(join, room);
+        return;
+    }
+    std::vector<uint8_t> b{kPartyUp, uint8_t(join ? 1 : 2)};
+    if (join) put_u64(b, room);
+    send_raw(int(p.net_id) - 1, b, -1);
+}
+
+void party_up_group() {
+    std::vector<uint64_t> parties;   // in the order of their first press
+    for (const PartyUpPress &p : party_up.presses)
+        if (std::find(parties.begin(), parties.end(), p.party) == parties.end()) parties.push_back(p.party);
+    auto size_of = [](uint64_t party) {
+        int pressed = 0, told = 0;
+        for (const PartyUpPress &p : party_up.presses)
+            if (p.party == party) {
+                ++pressed;
+                told = std::max(told, int(p.size));
+            }
+        return std::max(pressed, told);
+    };
+    std::vector<std::vector<uint64_t>> groups;
+    int group_size = 0;
+    for (uint64_t party : parties) {
+        const int n = size_of(party);
+        if (groups.empty() || group_size + n >= 6) {
+            groups.push_back({});
+            group_size = 0;
+        }
+        groups.back().push_back(party);
+        group_size += n;
+    }
+    for (size_t gi = 0; gi < groups.size(); ++gi) {
+        const std::vector<uint64_t> &grp = groups[gi];
+        const uint64_t lead = grp.front();
+        int players = 0;
+        for (uint64_t party : grp) players += size_of(party);
+        log("party up: group %zu: %zu part%s, %d player(s), led by party %llx", gi + 1, grp.size(),
+            grp.size() == 1 ? "y" : "ies", players, (unsigned long long)lead);
+        for (const PartyUpPress &p : party_up.presses) {
+            if (std::find(grp.begin(), grp.end(), p.party) == grp.end()) continue;
+            const bool join = grp.size() > 1 && p.party != lead && lead != 0;
+            send_party_up_answer(p, join, lead);
+        }
+    }
+    party_up.presses.clear();
+    party_up.group_at = 0;
+}
+
+// Per frame (page handler and frame work).
+void party_up_frame() {
+    const double now = gamenet::clock();
+    const bool open = active && top_page_id() == kPageHostCreate && page_in_stack(kPagePostgame);
+    if (!open) {
+        if (party_up.running) log("party up: the wait popup closed");
+        party_up.running = party_up.answered = false;
+    } else if (!party_up.running && !party_up.answered) {
+        party_up.running = true;
+        party_up.give_up_at = now + 15.0;
+        const uint64_t party = online::active() ? online::party_room_id() : 1;
+        const int size = online::active() ? online::party_size() : std::max(1, session::member_count());
+        log("party up: Party Up pressed (party %llx of %d): the match host groups, giving up in 15 s",
+            (unsigned long long)party, size);
+        if (hosting) {
+            party_up_note(my_id, party, uint8_t(std::clamp(size, 1, 10)));
+        } else {
+            std::vector<uint8_t> b{kPartyUp, 0};
+            put_u64(b, party);
+            b.push_back(uint8_t(std::clamp(size, 1, 10)));
+            send_raw(0, b, -1);
+        }
+    }
+    if (party_up.running && now >= party_up.give_up_at) {
+        log("party up: no group after 15 s: giving up");
+        party_up_answer(false, 0);
+    }
+    if (hosting && !party_up.presses.empty() && now >= party_up.group_at) party_up_group();
+}
+
+void on_party_up(uint8_t from, const uint8_t *d, size_t size) {
+    if (size < 2) return;
+    if (d[1] == 0) {
+        if (hosting && from >= 1 && from < kSlots && members[from].used && size >= 11)
+            party_up_note(members[from].net_id, get<uint64_t>(d + 2), d[10]);
+        return;
+    }
+    if (hosting || from != 0) return;
+    if (d[1] == 1 && size >= 10) party_up_answer(true, get<uint64_t>(d + 2));
+    else if (d[1] == 2) party_up_answer(false, 0);
+}
+
+// 2.9 Players Met (PS3 Playing::Enter 0x444660 -> 0x43bcbc): every match and round start adds the remote players.
+void note_players_met() {
+    const uint8_t *local = ptr_at(ngm());
+    std::vector<std::string> names;
+    for (int i = 0; i < 10; ++i) {
+        const uint8_t *t = ngm() + 0x10 + 0x2c0 * uint64_t(i);
+        if (t == local || t[0x20] == 0 || t[0x26c] != 0) continue;
+        const char *name = reinterpret_cast<const char *>(t + 0x20);
+        names.emplace_back(name, strnlen(name, 64));
+    }
+    if (!names.empty()) progression_note_met(names);
+}
+
+// 2.5 Voluntary leave (PS3 Leave::Enter 0x445608): the custom-game leader asks its party to leave with it (0x117).
+bool leader_asked_leave = false;   // set by 0x117: this player leaves with its leader and stays in its party
+bool own_party_after_leave = false;
+
+void on_leader_leave(uint8_t from) {
+    if (hosting || from != 0) return;
+    log("party: the party leader leaves the game: leaving with it (0x117)");
+    leader_asked_leave = true;
+    // Playing::Update's own 0x117 consumer compares the room handle with netInfo +0x60.
+    const uint64_t room = get<uint64_t>(g(kNetInfo) + 0x60);
+    mailbox_post(0x117, 1, reinterpret_cast<const uint8_t *>(&room), 8);
 }
 
 void on_session_message(uint8_t from, const uint8_t *d, size_t size) {
@@ -847,9 +1307,14 @@ void on_session_message(uint8_t from, const uint8_t *d, size_t size) {
             if (diff > 150 || diff < -150) {
                 put<uint32_t>(clock, theirs);
                 log("game clock set to the host's (%+d ticks)", int(diff));
+                clock_sync_reset("coarse correction");   // the latency correction follows again
             }
         }
         break;
+    case kClockSync: on_clock_sync(from, d, size); break;
+    case kPartyUp: on_party_up(from, d, size); break;
+    case kReserve: on_reserve(from, d, size); break;
+    case kLeaderLeave: on_leader_leave(from); break;
     case session::kOnlineMessage: online::on_message(from, d + 1, size - 1); break;
     default: break;
     }
@@ -887,6 +1352,10 @@ void on_peer(uint8_t slot, bool joined) {
                 }
             } else {
                 log("party: %s left", m.name.c_str());
+                if (slots_room) {   // slot manager, member left (PS3 match listener slot 3)
+                    const std::string npid = npid_of_net_id(m.net_id);
+                    if (!npid.empty()) release_reservation(npid);
+                }
                 player_left(m.net_id);
                 m = Member();
                 gamenet::detach(slot);
@@ -910,6 +1379,8 @@ void on_peer(uint8_t slot, bool joined) {
         send_info();
         log("party: joined the host as net id %u", my_id);
         online::on_host_reached(my_id);
+        clock_sync_reset("joined a host");
+        request_reservation();
         if (rehost_pending) {
             // A match migration finishes once the new host is reached: the round restarts under it.
             rehost_pending = false;
@@ -924,7 +1395,7 @@ void on_peer(uint8_t slot, bool joined) {
         log("online: the old host closed the link; following the leader to its new room");
         gamenet::detach(0);
     } else if (online::on_host_lost()) {
-        log("party: lost the host; the room's new owner takes over");
+        log("party: lost the host of the matchmaking room; matchmaking searches again");
         gamenet::detach(0);
     } else {
         log("party: lost the host");
@@ -940,20 +1411,23 @@ void on_peer(uint8_t slot, bool joined) {
 }
 
 // ---- transport start ----------------------------------------------------------------------------------
-// Host: a Hello from a blocked online id gets no slot, the same way a full party turns it away.
+// Host: a Hello from a blocked (kicked) online id gets no slot, the same way a full party turns it away.
 bool admit_peer(const net::Address &from) {
-    if (blocked.empty()) return true;
+    if (blocked.empty() && !slots_room) return true;
     const std::string npid = online::npid_at(from);
     const auto it = npid.empty() ? blocked.end() : blocked.find(npid);
-    if (it == blocked.end()) return true;
+    if (it == blocked.end()) return slots_admit(npid);
     if (it->second++ % 20 == 0)   // Hellos repeat every 0.5 s: one line per 10 s
-        log("party: refused a join from %s (kicked as a griefer; %u tries)", npid.c_str(), it->second);
+        log("party: refused a join from %s (kicked from this session; %u tries)", npid.c_str(), it->second);
     return false;
 }
 
 void close_transport() {
     transport.close();
     blocked.clear();
+    reservations.clear();
+    slots_room = 0;
+    clock_sync_reset("transport closed");
 }
 
 bool start_transport() {
@@ -967,6 +1441,10 @@ bool start_transport() {
     transport.on_peer = on_peer;
     transport.on_message = on_transport_message;
     transport.admit = admit_peer;
+    transport.on_timeout = [](uint8_t slot) {   // PS3 NpNetUpdate's silent-peer drop (spec parity-e-flow2.md 2.2)
+        const char *name = slot < kSlots && members[slot].used ? members[slot].name.c_str() : "?";
+        log("%s has left : timed out (nothing heard for %.0f s)", name, net::kTimeoutSeconds);
+    };
     blocked.clear();
     gamenet::set_transport(&transport);
     voice::set_transport(&transport);
@@ -1038,7 +1516,7 @@ void unregister_handler() {
 }
 
 // ---- teardown -----------------------------------------------------------------------------------------
-void teardown(bool pop) {
+void teardown(bool pop, bool leaving = true) {
     log("leaving multiplayer");
     unregister_handler();
     for (int s = 0; s < kSlots; ++s) gamenet::detach(uint8_t(s));
@@ -1049,12 +1527,47 @@ void teardown(bool pop) {
     clear_session(kPartySession);
     clear_session(kMatchSession);
     put<int32_t>(g(kNetInfo) + 0x2c4, 0);
-    put<int16_t>(ngm() + 0x1ca0, -1);
     guest<void(U2MP_GUEST *)(void *)>(kClearNetPlayers)(ngm());
     progression_publish();
     set_net_sm(0);
     clear_members();
+    // PS3 0x4386d0's releases: the kept packages, then the net game level preload (PS3 0x4a12e8(ngm, 0, 1, 0)),
+    // with the net game still current as on PS3; our own "no net game" comes after them.
+    // A cinema transfer has nothing to abort on PC: online::send_cinema hands the whole file over in one call.
+    if (leaving) {
+        release_packages();
+        frontend6::preload_net_game(false, true, false);
+    }
+    put<int16_t>(ngm() + 0x1ca0, -1);
     if (pop) guest<void(U2MP_GUEST *)(void *)>(kPopPage)(menu());
+}
+
+// After a member quit a match on its own (PS3 Leave::Enter: it leaves the party too): it leads a party of its own,
+// on the online link or a UDP port (never UNCHARTED_U2MP_JOIN: that would join the old host again).
+void host_own_party() {
+    bool ok = false;
+    if (net::Link *link = online::start()) {
+        ok = transport.host_link(link);
+    } else {
+        uint16_t port = kDefaultPort;
+        if (const char *p = std::getenv("UNCHARTED_U2MP_PORT")) {
+            const int v = std::atoi(p);
+            if (v > 0) port = uint16_t(v);
+        }
+        ok = transport.host(port) || transport.host(0);
+    }
+    if (!ok) {
+        log("party: no transport for a party of our own: Multiplayer starts a new one");
+        return;
+    }
+    hosting = active = true;
+    my_id = host_id = 1;
+    members[0] = Member{true, 1, my_name, "", "", uint8_t(local_rank()), uint8_t(local_team())};
+    set_session(kPartySession, kCtx, 1, 1);
+    publish(kPartySession);
+    sent_mode = -1;
+    register_handler();
+    log("party: left the party with the match (PS3 Leave::Enter): leading a party of our own");
 }
 
 // ---- net clock ----------------------------------------------------------------------------------------
@@ -1148,14 +1661,19 @@ void frame_work() {
         client_leave_requested = false;
         if (active) {
             log("party: leaving the match room and returning to the Multiplayer menu");
-            teardown(false);
+            teardown(false, false);   // still in Multiplayer: the packages stay kept
             set_net_sm(3);
             show_page(kPageMultiplayer);
+            if (own_party_after_leave) host_own_party();
+            own_party_after_leave = false;
         }
     }
     if (last_state == kPlayingState && frames % 60 == 0) tier2_patch_weapon_damage();
     hud_weapon_tick();
     voice::frame();
+    clock_sync_frame();
+    slots_frame();
+    party_up_frame();
     transport.pump(now);
 
     if (kicked || host_lost) {
@@ -1305,8 +1823,27 @@ void frame_work() {
     }
 }
 
+// 2.11 The game data version on the multiplayer menu (PS3 per-frame net page update 0x447248): while the menu level
+// ("menu-temple") is loaded and ready, "%i.%02i.%03i" of 1, byte 2 and the low 16 bits of netInfo's first word,
+// scale 0.4 at (1140, 60) of the 1280x720 canvas. PS4 never fills that word: the value PS3 had (0x0009004e, as
+// online.cpp's room key) stands in, which reads "1.09.078".
+void draw_version_text() {
+    static double drawn_at = -1;
+    const double now = gamenet::clock();
+    if (now == drawn_at || net_sm() == 0) return;
+    const uint8_t *pkg = find_package(sid("menu-temple"));
+    if (!pkg || get<int32_t>(pkg + 0x30) != 7 || !(get<uint16_t>(pkg + 0x18) & 0x80)) return;
+    drawn_at = now;
+    uint32_t word = get<uint32_t>(g(kNetInfo));
+    if (word == 0) word = 0x0009004eu;
+    char text[32];
+    std::snprintf(text, sizeof text, "%i.%02i.%03i", 1, int((word >> 16) & 0xff), int(word & 0xffff));
+    hud_menu_text(1140.0f, 60.0f, 0.4f, text);
+}
+
 U2MP_GUEST void page_handler(uint32_t *event) {
     if (!event || event[0] != 6) return;   // 6: per-frame update
+    draw_version_text();
     finish_leaving_game();
     leaving_step();
     cleanup_leaving_page();
@@ -1713,19 +2250,33 @@ uint64_t state_update(int index, void *state) {
         if (index == kWaitReady) wait_ready_diagnostics();
         if (index == kLeave) {
             leave_reason("leave");
+            // PS3 Leave::Enter's voluntary path: the player chose Leave Game (the leave byte is set).
+            const bool voluntary = *g(kMatchOver) != 0 && changed;
             if (active) {
                 if (hosting) {
+                    if (voluntary && get<int32_t>(g(kNetInfo) + 0x2c4) == 2) {
+                        log("party: the party leader leaves the custom game: the party leaves with it (0x117)");
+                        send_raw(-1, {kLeaderLeave}, -1);
+                    }
                     send_raw(-1, {kLobby}, -1);
                     log("party: host left the match; telling the clients to return to the lobby");
                 } else if (!lobby_returning && gamenet::clock() > lobby_grace) {
                     client_leave_requested = true;
+                    // A member that quits on its own also leaves its party (the leader in matchmaking too: the
+                    // party room hands the party on); one that leaves because its leader asked stays with it.
+                    if (changed) own_party_after_leave = voluntary && !leader_asked_leave;
                 }
             }
+            if (changed) leader_asked_leave = false;
         }
     }
     if (active) reset_watch(index, state, ms);
     if (index == kLoadLevels) missing_level_package();
     if (index == kEstablish) {
+        if (changed) {
+            clock_sync_reset("match setup");   // PS3: the sample counter restarts with every connection setup
+            party_up.presses.clear();
+        }
         uint8_t over = *g(kMatchOver), companion = *g(kMatchOverCompanion);
         if (over || companion) {
             // A previous match's end flags would end the new one at once.
@@ -1752,6 +2303,7 @@ uint64_t state_update(int index, void *state) {
             }
             *g(kMatchOver) = 0;
             *g(kMatchOverCompanion) = 0;
+            note_players_met();
         }
         // A joiner can apply the setup before it has the host's slot (it then keeps team 0 for
         // the host); the host sends it again once every game has its slots.
@@ -1906,8 +2458,11 @@ U2MP_GUEST void button_multiplayer(void *, void *, void *) {
     netpatch_load();
     if (!active) {
         if (!start_transport()) {
-            g(kNetInfo)[0x1c] = 1;
-            show_page(kPageMultiplayer);
+            // PS3 0x438bc8 without a network: message box 0x88a082af / OK over the main menu, not in Multiplayer.
+            log("Multiplayer could not start: network message, staying in the main menu");
+            close_transport();
+            online::on_transport_closed("Multiplayer could not start");
+            game_message_box(kNoNetworkText, 0);
             return;
         }
         active = true;
@@ -2053,6 +2608,36 @@ std::vector<MmEntry> mm_list() {
     return list;
 }
 
+// Team balance before the vote (PS3 0x4b0a58 state 16, order 0x4af524): the players of the slot list sorted by how
+// many listed players share their party id (ascending), then party id, then list position; the last one is kicked
+// only when it came alone. -1: nobody (the last one is part of a party, or it is this PC).
+int balance_kick_slot() {
+    struct Row {
+        int share;
+        uint64_t party;
+        int position;
+        int slot;
+    };
+    const std::vector<MmEntry> list = mm_list();
+    std::vector<Row> rows;
+    for (size_t i = 0; i < list.size(); ++i) {
+        const MmEntry &e = list[i];
+        if (e.kind == kOpenSlot || e.slot < 0) continue;
+        int share = 0;
+        for (const MmEntry &o : list) share += e.party && o.kind != kOpenSlot && o.party == e.party;
+        rows.push_back(Row{e.party ? share : 1, e.party, int(i), e.slot});
+    }
+    if (rows.empty()) return -1;
+    std::stable_sort(rows.begin(), rows.end(), [](const Row &a, const Row &b) {
+        if (a.share != b.share) return a.share < b.share;
+        if (a.party != b.party) return a.party < b.party;
+        return a.position < b.position;
+    });
+    const Row &last = rows.back();
+    if (last.share != 1 || last.slot == 0 || members[last.slot].net_id == my_id) return -1;
+    return last.slot;
+}
+
 // The five party group colours (PS3 data, spec 11.3), by the party's position among the shared party ids.
 constexpr uint32_t kPartyColours[5] = {0x1020E0E0u, 0x102000E0u, 0x10E000E0u, 0x1020E000u, 0x10E02000u};
 
@@ -2118,19 +2703,92 @@ U2MP_GUEST void mm_roster_query(uint8_t *q) {
     }
 }
 
+// ---- Start Match checks (PS3 0x43aab0): each failure shows its message box and nothing starts ----------
+// Players in the party, this PC included (PS3 0x4d24a8: 1 with no room).
+int party_size() {
+    int n = 0;
+    for (const Member &m : members) n += m.used;
+    return n ? n : 1;
+}
+
+bool refuse(const char *why, uint32_t body, uint32_t second) {
+    log("Start Match: %s", why);
+    game_message_box(body, second);
+    return false;
+}
+
+// Matchmaking: the party must fit the playlist's maximum party size.
+bool matchmaking_start_ok() {
+    const int32_t max = playlist_max_party(get<uint32_t>(g(kNpd) + 0x104));
+    if (max <= 0 || party_size() <= max) return true;
+    return refuse("the party is larger than the playlist allows", kPartyTooBig, kPartyTooBigInfo);
+}
+
+// Players a game type takes: 10 for the competitive types, 3 for co-op, 0 for an unknown type.
+int type_max_players(int32_t type) {
+    if (coop_type(type)) return 3;
+    return (type >= 0 && type <= 3) || (type >= 5 && type <= 7) || type == 10 || type == 11 ? 10 : 0;
+}
+
+// Players a game type needs. Owner rule (2026-11-25, also matchmaking's minimum): 2 in every game mode, co-op
+// (types 4, 8, 9, 12) 1 (solo co-op, solocoop.cpp). PS3 asked 2 for type 10 and co-op only.
+int type_min_players(int32_t type) { return coop_type(type) ? 1 : 2; }
+
+// Custom game: map packs (this PC, then every member), too many, too few, type 10 on one team.
+bool custom_start_ok() {
+    Table games = table_of(lookup(kNetGamesId));
+    const int16_t game = current_game();
+    if (!games.records || game < 0 || game >= games.count) return true;   // no game chosen: nothing to check
+    const int32_t type = get<int32_t>(games.records + game * 0x90 + 0x0c);
+    const int players = party_size();
+    bool local_ok = true;
+    const int32_t pack = dlc_net_game_pack(game, local_ok);
+    if (!local_ok)
+        return refuse("this PC lacks the map's map pack", pack == 1 ? kNoMapPack1 : kNoMapPack2, kCustomInfo);
+    // Only when this PC plays the map pack version (Ruins falls back to the base map without map pack 1).
+    if ((pack == 1 || pack == 2) && (dlc_packs() & (1u << pack)))
+        for (const Member &m : members)
+            if (m.used && m.net_id != my_id && !(m.packs & (1u << pack)))
+                return refuse("a party member lacks the map's map pack", kMemberNoMapPack, kCustomInfo);
+    if (players > type_max_players(type)) return refuse("too many players for the game type", kTooManyPlayers, kCustomInfo);
+    if (players < type_min_players(type)) return refuse("too few players for the game type", kTooFewPlayers, kTooFewInfo);
+    if (type == 10) {
+        int with_data = 0, team1 = 0, team2 = 0;
+        for (const Member &m : members) {
+            if (!m.used) continue;
+            ++with_data;
+            team1 += m.team == 1;
+            team2 += m.team == 2;
+        }
+        if (team1 == with_data || team2 == with_data)
+            return refuse("every player is on one team", kOneTeam, kOneTeamInfo);
+    }
+    return true;
+}
+
 U2MP_GUEST void button_start_match(void *, void *, void *) {
     if (!hosting) return;
-    int32_t mode = get<int32_t>(g(kNetInfo) + 0x2c4);
-    if (mode == 1 && matchmaking::installed()) {
-        if (!frontend6::leader_starting(true)) matchmaking::leader_start();
-        return;
-    }
-    if (mode == 1) {
+    const int32_t mode = get<int32_t>(g(kNetInfo) + 0x2c4);
+    if (mode == 1) {   // matchmaking
+        if (!matchmaking_start_ok()) return;
+        online::hide_for_start(true);
+        if (matchmaking::installed()) {
+            if (!frontend6::leader_starting(true)) matchmaking::leader_start();
+            return;
+        }
         pick_matchmaking_game();
-    } else if (frontend6::leader_starting(false)) {
-        return;   // the "Starting in" popup creates the match when it runs out
+        create_match_now();
+    } else if (mode == 2) {   // custom game
+        if (!custom_start_ok()) return;
+        online::hide_for_start(true);
+        if (frontend6::leader_starting(false)) return;   // the "Starting in" popup creates the match when it runs out
+        create_match_now();
+    } else if (mode == 3) {   // cinema: play the selected recording (PS3: as Replay 0x43a3dc)
+        log("Cinema");
+        cinema::start_playback();
+    } else {
+        log("Start Match: page mode %d: nothing to start", int(mode));
     }
-    create_match_now();
 }
 
 U2MP_GUEST void leave_multiplayer(void *, void *, void *) { teardown(true); }
@@ -2245,10 +2903,21 @@ void create_match() {
     if (active && hosting) create_match_now();
 }
 
+// Kick From Party (PS3 0x439cf8) and the griefer kick both kick with the block flag: the kicked player's online
+// id is refused on later joins until this PC stops hosting.
 bool kick(uint32_t net_id) {
     if (!active || !hosting || net_id < 2 || net_id > 11 || !members[net_id - 1].used) return false;
+    std::string npid;
+    net::Address a;
+    if (transport.peer_address(uint8_t(net_id - 1), a)) npid = online::npid_at(a);
     log("party: kicking %s (net id %u)", members[net_id - 1].name.c_str(), net_id);
     send_raw(int(net_id - 1), {kKick}, -1);
+    if (npid.empty()) {
+        log("party: net id %u has no online id: kicked, not blocked", net_id);
+    } else {
+        blocked.emplace(npid, 0u);
+        log("party: %s blocked from joining again until this session ends", npid.c_str());
+    }
     return true;
 }
 
@@ -2261,17 +2930,7 @@ bool kick_griefer(uint32_t net_id) {
         kicked = true;   // the transport closes on the next frame, outside the event Apply
         return true;
     }
-    std::string npid;
-    net::Address a;
-    if (net_id >= 2 && net_id <= 11 && transport.peer_address(uint8_t(net_id - 1), a)) npid = online::npid_at(a);
-    if (!kick(net_id)) return false;
-    if (npid.empty()) {
-        log("party: net id %u has no online id: kicked, not blocked", net_id);
-    } else {
-        blocked.emplace(npid, 0u);
-        log("party: %s blocked from joining again until this session ends", npid.c_str());
-    }
-    return true;
+    return kick(net_id);
 }
 
 bool member_address(uint32_t net_id, net::Address &out) {
@@ -2306,6 +2965,7 @@ void online_reopen(net::Link *link, const net::Address *owner) {
     for (int s = 0; s < kSlots; ++s) gamenet::detach(uint8_t(s));
     close_transport();
     clear_members();
+    npids.clear();   // the next roster (host) or kIds (client) fills it for the new transport
     kicked = host_lost = false;
     host_id = 1;
     rehost_pending = false;
@@ -2334,6 +2994,86 @@ void online_match_member_joined() {
     const uint8_t joined = 1;
     mailbox_post(0x10e, 1, &joined, 1);
     log("party: match room joined; match start re-posted");
+}
+
+void online_party_in(bool ok) {
+    if (!active) return;
+    const int32_t s = net_sm();
+    // JOINING waits (a party member following, or a join from the list while this PC still hosts its own party):
+    // 0x10e {1} goes on to 14 -> 17, {0} pops the page and sets NET_SM 18
+    if (s == 12) {
+        const uint8_t v = ok ? 1 : 0;
+        mailbox_post(0x10e, 1, &v, 1);
+        log("party: JOINING gets 0x10e {%u}", unsigned(v));
+    }
+    if (hosting) return;
+    if (!ok && s == 17) {   // already in the client lobby: back to the Multiplayer page with the party
+        log("party: the leader went back from the custom game lobby: back to PAGE_MULTIPLAYER, NET_SM 18");
+        guest<void(U2MP_GUEST *)(void *)>(kMenuReset)(menu());
+        show_page(kPageMultiplayer);
+        set_net_sm(18);
+    }
+    if (!ok) clear_session(kMatchSession);
+}
+
+void online_match_abort() {
+    if (!active || !hosting) return;
+    log("party: the custom game is dropped (a party member could not join): back to PAGE_MULTIPLAYER, NET_SM 18");
+    g(kMatchSession)[0x99] = 0;
+    clear_session(kMatchSession);
+    g(kNetInfo)[0x08] = 0;
+    guest<void(U2MP_GUEST *)(void *)>(kMenuReset)(menu());
+    show_page(kPageMultiplayer);
+    set_net_sm(18);
+}
+
+std::vector<std::string> member_npids() {
+    std::vector<std::string> out;
+    if (!active || !hosting) return out;
+    for (int s = 1; s < kSlots; ++s) {
+        net::Address a;
+        if (members[s].used && transport.peer_address(uint8_t(s), a)) {
+            const std::string npid = online::npid_at(a);
+            if (!npid.empty()) out.push_back(npid);
+        }
+    }
+    return out;
+}
+
+bool party_stranger(uint32_t net_id) {
+    if (!active || !online::active() || net_id == my_id) return false;
+    const auto it = npids.find(net_id);
+    return it != npids.end() && !it->second.empty() && !online::in_own_party(it->second);
+}
+
+int mm_balance_slot() { return active && hosting ? balance_kick_slot() : -1; }
+
+void leave_party() {
+    if (!active || hosting) return;
+    if (online::drop_out_of_party("left matchmaking")) return;   // online: rooms left, online_reopen hosts our party
+    log("party: leaving the party (Leave Matchmaking): a party of our own");
+    for (int s = 0; s < kSlots; ++s) gamenet::detach(uint8_t(s));
+    close_transport();
+    clear_members();
+    kicked = host_lost = false;
+    uint16_t port = kDefaultPort;
+    if (const char *p = std::getenv("UNCHARTED_U2MP_PORT")) {
+        const int v = std::atoi(p);
+        if (v > 0) port = uint16_t(v);
+    }
+    if (!transport.host(port) && !transport.host(0)) {
+        log("party: no UDP port for a party of our own: Multiplayer starts a new one");
+        active = false;
+        return;
+    }
+    hosting = true;
+    my_id = host_id = 1;
+    rehost_pending = false;
+    members[0] = Member{true, 1, my_name, "", "", uint8_t(local_rank()), uint8_t(local_team())};
+    set_session(kPartySession, kCtx, 1, 1);
+    publish(kPartySession);
+    sent_mode = -1;
+    log("party: hosting a party of our own on UDP port %u", unsigned(transport.bound_port()));
 }
 
 void online_match_ready(uint64_t room_id) {

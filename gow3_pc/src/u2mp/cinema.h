@@ -34,6 +34,9 @@ bool recording();
 bool read_selected(std::vector<uint8_t> &bytes, std::string &name);
 // A recording a friend sent: 1 saved, 0 no free slot (all protected), -1 invalid / write failed.
 int add_received(const uint8_t *data, size_t size, const std::string &name);
+// BUTTON_MULTIPLAYER_STARTCINEMA's action, also Start Match in cinema mode (PS3 0x43aab0 mode 3): the selected
+// recording goes into the replay stream, the menu list is refreshed and the replay task plays.
+void start_playback();
 }  // namespace cinema
 // remaining.cpp: BUTTON_CINEMA_UPLOAD -> "send to which friend?" popup.
 void cinema_pick_friend();

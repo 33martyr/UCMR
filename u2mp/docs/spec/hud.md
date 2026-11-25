@@ -980,3 +980,9 @@ Weapon trigger:
     frames); controller slot holding the probe; first weapon seen (900-frame window, no switch
     counted); a switch; weapon NULL; window expiry; frame counter wrap; probe calls from 7
     different return addresses (only 6 kept) and the counts in the next periodic log line.
+
+## Parity group E changes (2026-11-25, spec parity-e-flow2.md 2.11)
+
+`hud_menu_text(x, y, scale, text)`: `draw_text` with white, flags 8, box 999999 x 40, only after `install_hud`
+passed its byte checks (the flag is set before the draw stub check). Used for the multiplayer menu version text.
+The unused marker mask read keeps its read (`[[maybe_unused]]`).

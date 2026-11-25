@@ -34,6 +34,9 @@ uint32_t net_ticks();
 void create_match();
 // The rank (badge index) a party member published; 0 when unknown.
 uint32_t member_rank(uint32_t net_id);
+// Host: the transport slot of the player the team balance removes before the vote (PS3 0x4b0a58 state 16 with the
+// slot list order 0x4af524): the last of the sorted list when it came alone; -1 none.
+int mm_balance_slot();
 }  // namespace session
 
 namespace matchmaking {
@@ -45,8 +48,14 @@ void leader_start();
 void on_message(uint8_t from, const uint8_t *data, size_t size);
 // Host, online: a player reached the transport (a stranger joined our matchmaking room).
 void on_peer_joined(uint8_t slot);
-// Online: the matchmaking room's host left and the room goes on under a new one (host = this PC).
+// Online: the matchmaking room's host left and the room goes on under a new one (host = this PC). Not reached
+// while lobby host migration is off (online.cpp on_host_lost): on_host_left replaces it.
 void on_migrated(bool host);
+// Online (PS3 state 17 -> 35 -> 19): we left a stranger's matchmaking room because its host went away (or it removed
+// us). host: this PC searches again from the first criteria; else a party member waits for its leader in 19.
+void on_host_left(bool host);
+// Voice (PS3 0x4b0700 / 0x4b0868): players outside our party are silent while an online matchmaking room gathers.
+bool strangers_muted();
 }  // namespace matchmaking
 
 }  // namespace u2mp

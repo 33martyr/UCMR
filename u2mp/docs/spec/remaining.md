@@ -30,7 +30,9 @@ Shared helpers from other files (use them, do not reimplement them):
   `invite_friend`, `invite_count`, `friend_add`, `accept_request`, `remove_friend`,
   `profile_text`, `send_cinema`, `cinema_received`, and `kRowFriend` 0, `kRowRequestIn` 1,
   `kRowRequestOut` 2.
-- Voice (`voice.h`): `voice::enabled`, `voice::toggle_mute`.
+- Voice (`voice.h`): `voice::toggle_mute`.
+- Exported by this file besides `show_notice` / `cinema_pick_friend`: `game_message_box(body, second)`
+  (u2mp_internal.h, parity group D).
 - Progression (`progression.h`): `progression_publish`, `progression_recent_players`,
   `progression_player_summary`.
 - Runtime text input (C linkage, declared by the user of it, implemented in
@@ -263,10 +265,19 @@ cinema picker: at most 8 friends.
 **F-host (IsHost of a session).** A session "is host" when its +0x10 pointer is 0, or when its
 +0xb00 and +0xb04 words are equal.
 
-**F-box (message box with text T).** Read the pointer at menu manager +0x17d0. If it is NULL, do
-nothing else (no guest call). Otherwise write T at box +0x08, then write the seven words
-0, 0xc6467f2d, 0x11d8e78a, 0, 0x1519fa3d, 0, 0 at box +0x40 .. +0x5b, then call ShowPage
-(menu manager, 0x719e9fec, 0).
+**F-box (message box with text T, second text S = 0 unless given).** Read the pointer at menu manager
++0x17d0. If it is NULL, do nothing else (no guest call). Otherwise write T at box +0x08, then write the
+seven words 0, 0xc6467f2d, 0x11d8e78a, 0, 0x1519fa3d, S, 0 at box +0x40 .. +0x5b (S at +0x54, PS3
+0x42a3e8's arg4), then call ShowPage (menu manager, 0x719e9fec, 0).
+
+**`game_message_box(body, second)`** (u2mp_internal.h, for session.cpp; parity group D): for each of body
+and second that is non-zero, TextDb::Find(0x1066660, id) through the hooked 0xcddc00; NULL or empty -> log
+`message box: text %08x is not in the game's text banks`. Then F-box(body, second).
+
+**F-goto (go to page P, PS3 "back to the page when it is on the stack, else open it").** top = s32 menu
+manager +0x1010. When 0 <= top <= 0x40, look at stack entries 0..top (pointer at menu manager +0x9d0 + 8 i,
+page id at +0x10; NULL entries have id 0); the highest entry with id P is the target. None: ShowPage(P).
+Else PopPage once for every entry above the target.
 
 **F-notice = `show_notice(text)`.** If text is NULL or empty, do nothing. Otherwise set the player
 text (`text_set_player`) to text, then F-box(`kTextPlayer`).
@@ -462,19 +473,21 @@ F-friend-options(r):
 
 If the selected member net id is 0, or `session::kick(id)` returns false: log
 `"Kick From Party: net id %u not kicked"` (the selected id). (`kick` is not called when the id is 0.)
-Kick From Party does not block: the player may join again at once (only the griefer kick, B7,
-blocks; whether PS3's party kick sets the block flag is not checked, `parity-c-match.md` 4).
+`session::kick` blocks the kicked player's online id from joining again until the session ends, as PS3
+0x439cf8 kicks with the block flag (parity group D 2.4).
 
 #### B14. Mute 0x5ec4b0 and 0x5ec480 (same behaviour)
 
-If `voice::enabled()` is false: F-box(`kTextVoice`). Else if `session::member_name(selected id)`
-fails: nothing. Else muted = `voice::toggle_mute(selected id)`; player text := name + `: ` +
-`own_text(muted ? kTextMuted : kTextUnmuted)`; F-box(`kTextPlayer`).
+PS3 0x439bf0 / 0x439d60 (parity group D 2.4): a silent toggle. If the selected id is this PC's
+(`session::local_id()`) or `session::member_name(selected id)` fails: nothing. Else
+`voice::toggle_mute(selected id)`; nothing is shown (the row's muted icon follows `voice::muted`). Voice
+off changes nothing here: the flag still flips.
 
 #### B15. Promote To Party Leader 0x5ec4c0
 
-If the selected id is non-zero and `online::promote(id)` returns true: nothing more. Otherwise
-F-box(`kTextLeader`). (`promote` is not called when the id is 0.)
+If the selected id is non-zero and `online::promote(id)` returns true: F-goto(0xb99a3235 PAGE_LOBBY)
+(PS3 0x439c7c, parity group D 2.4). Otherwise F-box(`kTextLeader`), a PC addition (LAN has no promote).
+(`promote` is not called when the id is 0.)
 
 #### B16. Party IsHost 0x5ecb70
 
@@ -659,8 +672,9 @@ already present (overwritten in place, count unchanged); arg NULL.
 B11/B12: empty list; row 49 of 50; online and offline; registration failure; add true/false;
 profile summary empty and non-empty.
 
-B13-B17: selected id 0; kick false; voice off; member gone; toggle to muted and unmuted; promote
-true/false/id 0; party IsHost both ways; Save log.
+B13-B17: selected id 0; kick false; voice off (still toggles, no box); member gone; own id (nothing);
+toggle to muted and unmuted (no box either way); promote true with PAGE_LOBBY on the stack (pages above it
+popped) and without (ShowPage), false, id 0; party IsHost both ways; Save log.
 
 B18-B21: join list true; false with mode 0 and non-zero (page then box); join/invite with online
 off, selected row -1, valid row; cond 48 op 1 with 0 and 3 invites, op 2 column 1 with 0 and 12
@@ -765,3 +779,14 @@ None. Nothing is patched and `installed` is not changed.
   undefined.
 - In B6 the npc lookup does not stop at the end node while walking; it only rejects the end node
   as the final result. Keep that.
+
+## Parity group E changes (2026-11-25, spec parity-e-flow2.md 2.7, 2.8)
+
+- B8 party rows: the first option is "Unmute" `0xfa9c4838` while `voice::muted(id)`, else "Mute" `0xffbbac12`
+  (callback `0x6547d63c`); Promote / Kick as before.
+- B8 match rows (`match_player_row`, PS3 0x440620): no title (descriptor title 0), no Kick / Promote. Options:
+  Mute / Unmute (callback `0x7273924c`) unless the row is the local player; "Mute All" `0xd381d5d8` (callback
+  `0x8d703d6c`, registered: `voice::set_muted(id, true)` for every other player of the matchmaking list) unless all
+  of them are muted; "Unmute All" `0x3efad3ba` (callback `0x65be38af`) unless none is. An empty row logs `player
+  options: no player in row %d`; no options: no popup.
+- B9 friends: Join and Invite To Party only when `online::friend_view(r).party_member` is false.

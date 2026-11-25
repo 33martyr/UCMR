@@ -27,8 +27,10 @@ void frame();
 bool create_match_room();
 // The match room this PC is in (0 none): sent with the follow so that party members join it too.
 uint64_t match_room();
-// A client got the host's follow carrying the match room id: join that room as a member.
-void follow_match_room(uint64_t room_id);
+// A client got the host's follow carrying the match room id: join that room as a member. True: a custom game
+// join was started and the leader tells when the whole party is in (PS3 0x10e after 0x4c3b58), so the caller
+// must not post 0x10e itself; session::online_party_in() follows.
+bool follow_match_room(uint64_t room_id);
 // The transport reached the room owner (client), or a peer joined / left it (host).
 void on_host_reached(uint32_t net_id);
 // The transport lost its host while online is switching it to another room on purpose (follow).
@@ -37,6 +39,10 @@ bool host_change_expected();
 void on_transport_closed(const char *why);
 // A session message of type session kOnlineMessage (from transport slot `from`).
 void on_message(uint8_t from, const uint8_t *data, size_t size);
+// Party leader, Start Match (PS3 0x43aab0 / 0x4d5338): true hides (closes) the owned party room from the
+// countdown on, false shows it again (the leader cancelled, 0x439a88 / 0x439b04). The match's own hide takes
+// over once it runs; leaving matchmaking or the transport closing also ends this hide.
+void hide_for_start(bool on);
 
 // ---- menus ----
 // BUTTON_MULTIPLAYER_INVITES while online: opens the join list (PAGE_MULTIPLAYER_JOIN) and searches.
@@ -97,6 +103,16 @@ int friend_index(const std::string &name);   // the row of that friend (or reque
 const char *request_state(int i);            // a request row's state text ("" for other rows)
 void refresh_friend_list();                  // fetch the list and presence again (the list's op 8)
 
+// ---- PAGE_MULTIPLAYER's friends stats ticker (PS3 0x446c60 / 0x43b30c / 0x43b290, spec parity-d-flow1.md 2.10) ----
+// One ticker text: a random category (0 cash .. 6 time played), then up to 5 random friends (of the first 101)
+// whose presence is this build's multiplayer with stats (presence version 3). No such friend: the heading only.
+// The PS4 call that puts a text into the ticker control is not known yet, so nothing shows it so far.
+std::string stats_ticker_text();
+// The ticker's pieces, for tests: one friend entry appended to `out` (false, `out` unchanged, when it would reach
+// 511 characters), and the time played text ("Nd Nh Nm", "Nh Nm", "Nm").
+bool ticker_append_entry(std::string &out, const std::string &name, int category, uint64_t value);
+std::string ticker_time(uint64_t seconds);
+
 // ---- cinema files to and from friends (PS3 fe0e7de7 / 6b2970e2) ----
 bool send_cinema(const std::string &npid);   // the selected cinema of the cinema page
 int cinema_received();                       // files friends sent us this session
@@ -114,14 +130,43 @@ const U2oScore *board_row(int i);
 bool record_score(uint32_t board, int64_t score, const char *comment, const uint8_t *info = nullptr, uint32_t info_len = 0);
 
 // ---- stranger matchmaking (frontend3.cpp; PS3 0x4b0a58 search / join / create) ----
-enum { kMmIdle = 0, kMmBusy = 1, kMmHosting = 2, kMmJoined = 3, kMmFailed = 4 };
+// kMmNoRoom: the search pass found no room that worked out (frontend3 waits 1..3 s and runs the next criteria pass,
+// or creates its own room after the last one, PS3 0x4b0a58 state 6).
+enum { kMmIdle = 0, kMmBusy = 1, kMmHosting = 2, kMmJoined = 3, kMmFailed = 4, kMmNoRoom = 5 };
+// One search pass (PS3 criteria row b25ab071[index]): the row's ping limit (0 none) and whether only rooms within
+// 20 ranks of ours count (the first pass).
+struct MmCriteria {
+    int pass = 0;
+    uint32_t ping_limit_ms = 0;
+    bool rank_only = false;
+};
 bool mm_online();                    // online with a world: matchmaking finds strangers
-void mm_begin(uint32_t playlist, uint32_t playlist_index);    // host in NET_SM 19: search, then join a room or create one
+// Host in NET_SM 19: one search pass; joins the best room (link up, ping check, admit) or ends in kMmNoRoom.
+void mm_begin(uint32_t playlist, uint32_t playlist_index, const MmCriteria &criteria);
+void mm_create();                    // after the last pass: our own matchmaking room (PS3 "GATHER")
 int mm_step();
 void mm_reset();
 void mm_research();                  // nobody came: leave our gather room, search again
 void mm_leave();                     // matchmaking ends for this PC
 int mm_players();                    // players in our matchmaking room
+// Host of a gather room: room members that joined less than 6 s ago and are not on the transport yet (PS3: an
+// open slot reservation, 0x100 / 0x101 still running).
+int mm_pending_members();
+// Party leader: members of our party room that are not on our transport (they come back after a lost host).
+int party_missing();
+// The transport host is this PC or a member of our party room (false: a stranger hosts our matchmaking room).
+bool host_in_party();
+// We are in another player's party room (not its owner).
+bool party_member();
+// A stranger's matchmaking room is over for us (PS3 0x4b0a58 state 17: host gone, 0x103, kicked): leave it, then a
+// player alone (or a party leader) searches again from the first criteria; a party member goes back to its
+// leader and waits. bad_room: do not join that room again (kicked to balance the teams). Runs on the next frame.
+void mm_host_gone(const char *why, bool bad_room);
+// A party member whose leader left matchmaking (PS3 0x108): leave the room and go back to the leader's transport.
+void mm_leave_to_leader();
+// Leave the party (Leave Matchmaking as a member, PS3 party "leave" flag 0x4c36c8): every room, then a party of
+// our own. False when online is off (the caller does the LAN part).
+bool drop_out_of_party(const char *why);
 std::string room_member_name(uint32_t net_id);   // party/match room member name by net id
 // The matchmaking rows (session.cpp cond 6..15, PS3 slot list 0x4b0008):
 bool in_own_party(const std::string &npid);          // this PC or a member of our party room
@@ -129,6 +174,18 @@ uint64_t own_party_id();                             // our party room while it 
 uint64_t member_party_id(const std::string &npid);   // the party id a match room member published (+0), 0 none
 bool peer_rtt(const std::string &npid, uint32_t &rtt_ms, bool &up);   // false: no connection record
 int mm_slots();                      // the size of the match matchmaking fills (room max), 0 when it is off
+
+// ---- PS3 parity group E (session.cpp; spec parity-e-flow2.md 2.4 Party Up, 2.6 slot manager) ----
+uint64_t party_room_id();            // our party room (also a party of one), 0 none
+int party_size();                    // members of our party room, at least 1
+// The NpIds of the members we last told to follow us into another room (cleared by the call): the party a joining
+// leader asks the room owner's slot manager for (PS3 0x100).
+std::vector<std::string> take_led_party();
+// Party Up 0x119: join that party room by ourselves (we lead nobody into it). False: not started, no room, or ours.
+bool party_up_join(uint64_t room);
+// The room owner's slot manager refused our party (PS3 0x101 "not reserved"): matchmaking goes to the next room;
+// a custom game join fails (JOINING pops, NET_SM 18) and we go back to a party of our own.
+void reservation_refused();
 
 }  // namespace u2mp::online
 
@@ -148,6 +205,14 @@ void online_reopen(net::Link *link, const net::Address *owner);
 void online_match_ready(uint64_t room_id);
 // online.cpp -> session.cpp: a client finished joining the leader's match room after the follow.
 void online_match_member_joined();
+// online.cpp -> session.cpp: the leader says whether the whole party is in the custom game room (PS3 0x10e {1} /
+// {0}); also a failed join from the list (0). Posts mailbox 0x10e for the JOINING page while it waits (NET_SM 12).
+void online_party_in(bool ok);
+// online.cpp -> session.cpp, leader: a party member could not join the custom game room (PS3 0x465da0 state 10
+// failure): the match is dropped and the leader goes back to PAGE_MULTIPLAYER with NET_SM 18.
+void online_match_abort();
+// The NpIds of the other members on our transport (host), in slot order; empty when unknown.
+std::vector<std::string> member_npids();
 // online.cpp -> session.cpp: this player's name is the RPCN online name.
 void set_local_name(const std::string &name);
 // online.cpp -> session.cpp: the transport address of the member with this net id.

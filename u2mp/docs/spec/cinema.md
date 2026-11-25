@@ -399,6 +399,9 @@ Return true only when acceptable, read complete, and `valid_header(bytes)`. (Whe
 7. Refresh (4.1, writes game memory). Log `"cinema: received file saved as %s (%zu bytes)"` (final name,
    size). Return 1.
 
+**`start_playback()`** (parity group D: session.cpp's Start Match in cinema mode, PS3 0x43aab0 mode 3): exactly
+BUTTON_MULTIPLAYER_STARTCINEMA's action (4.7), with a NULL argument.
+
 ### 4.9 File store (cinema_store)
 
 **`get32/put32/get64/put64`**: unaligned little-endian (native) load / store.

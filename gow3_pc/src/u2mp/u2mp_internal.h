@@ -75,6 +75,9 @@ void install_scripttime(int &installed); // scripttime.cpp: net-timer track-grou
 void install_hud(int &installed);       // hud.cpp: multiplayer HUD draw, PS3 0x8aef68 (PORT-HUD.md)
 void install_medals(int &installed);    // medals.cpp: default icon for medals net.pak lacks
 void hud_weapon_tick();                 // hud.cpp: weapon panel trigger, from the frame (not the HUD draw)
+// hud.cpp: white text through the game's DrawText (0xcc9a70) at (x, y) of the 1280x720 canvas; nothing when
+// install_hud did not check DrawText's bytes. The menu version text (session.cpp, spec parity-e-flow2.md 2.11).
+void hud_menu_text(float x, float y, float scale, const char *text);
 void install_scoreboard(int &installed); // scoreboard.cpp: in-match scoreboard, PS3 0x4cbf00 / 0x4cbc10
 void sync_netstat_ranks();               // session.cpp: copy current NetStatGame levels from the trackers
 void show_round_results();               // scoreboard.cpp: round/end results page from the session state
@@ -104,6 +107,17 @@ const char *extra_net_package();
 int32_t playlist_pick_type();
 // ShowPage(menu manager, page id, 0) in the guest.
 void show_page(uint32_t page);
+// remaining.cpp: the game's message box with body text `body`, the OK button and second text `second` (0 none),
+// both game text ids (PS3 0x42a3e8); logs an id the text banks lack.
+void game_message_box(uint32_t body, uint32_t second);
+// dlc.cpp: the map packs present on this PC as bits (1 << pack: bit 1 map pack 1, bit 2 map pack 2; bit 0 the
+// base game, always set).
+uint32_t dlc_packs();
+// dlc.cpp: the map pack of the *net-games* record's map (0 base, 1 / 2 map pack), -1 unknown; `local_ok` says
+// whether this PC can play that map (false when the pack is absent here; Ruins falls back to the base map).
+int32_t dlc_net_game_pack(int32_t index, bool &local_ok);
+// menus.cpp: the playlist's maximum party size, 0 when not known (no check).
+int32_t playlist_max_party(uint32_t id);
 // True when the function at `offset` is a stripped stub: ret, then alignment padding.
 inline bool is_ret_stub(uint64_t offset) {
     static const unsigned char stub[] = {0xc3, 0x66, 0x66, 0x66, 0x66};

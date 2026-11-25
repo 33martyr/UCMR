@@ -707,6 +707,15 @@ std::vector<std::string> progression_recent_players(size_t max) {
     return names;
 }
 
+void progression_note_met(const std::vector<std::string> &names) {
+    if (!image.base || names.empty()) return;
+    load_store();
+    const uint64_t now = uint64_t(std::time(nullptr));
+    if (!store_api::note_met(g_store, names, now)) return;
+    const std::string path = store_path();
+    if (!store_api::save(path, g_store, now)) log("progression: could not write %s", path.c_str());
+}
+
 std::string progression_player_summary(const std::string &name) {
     load_store();
     for (const auto &p : g_store.recent) {

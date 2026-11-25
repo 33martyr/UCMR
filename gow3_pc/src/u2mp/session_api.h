@@ -23,18 +23,23 @@ uint32_t local_id();
 void note_leaving();
 // True when this PC leads the party (it hosts the transport).
 bool is_host();
-// Host only: tells the member with this net id that it was kicked. It leaves the party, and the
-// host drops it (NetEventPlayerLeft, roster) when its goodbye arrives. False when not hosting,
-// for the host itself, or for an unknown member.
+// Host only (Kick From Party, PS3 0x439cf8 with the block flag): tells the member with this net id that it
+// was kicked and refuses its online id on later joins until this PC stops hosting (the transport closes).
+// It leaves the party, and the host drops it (NetEventPlayerLeft, roster) when its goodbye arrives. False
+// when not hosting, for the host itself, or for an unknown member.
 bool kick(uint32_t net_id);
-// Host only, for NetEventKickGriefer: kicks the member as kick() does and refuses its online id on
-// later joins until this PC stops hosting (the transport closes). Naming this PC itself makes it leave
-// the session, as PS3 does. False when not hosting or for an unknown member.
+// Host only, for NetEventKickGriefer: kick(). Naming this PC itself makes it leave the session, as PS3 does.
+// False when not hosting or for an unknown member.
 bool kick_griefer(uint32_t net_id);
 // This PC's player name (UNCHARTED_U2MP_NAME, else "Drake").
 std::string local_name();
 int rank();   // this PC's rank badge index (profile panel)
 // Players in the party, this PC included; 0 when not in one.
 int member_count();
+// Online: the player with this net id is on our transport but not in our party (a stranger of a matchmaking room).
+bool party_stranger(uint32_t net_id);
+// A member leaves its party and hosts a party of its own (Leave Matchmaking as a member, PS3 party "leave" flag):
+// online the rooms are left (online::drop_out_of_party), on LAN the transport is closed and opened again as host.
+void leave_party();
 
 }  // namespace u2mp::session

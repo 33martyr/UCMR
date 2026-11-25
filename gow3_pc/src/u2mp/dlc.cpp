@@ -226,6 +226,28 @@ bool dlc_net_game_available(int32_t index) {
     return true;   // unknown map: the game itself decides (0x654c80 skips it)
 }
 
+uint32_t dlc_packs() {
+    uint32_t bits = 1;
+    for (int32_t p = 1; p < 3; ++p)
+        if (pack_available(p)) bits |= 1u << p;
+    return bits;
+}
+
+int32_t dlc_net_game_pack(int32_t index, bool &local_ok) {
+    local_ok = true;
+    auto *games = static_cast<DcTable *>(dc_lookup(kNetGames));
+    auto *maps = static_cast<DcTable *>(dc_lookup(kNetMaps));
+    if (!games || !games->records || index < 0 || index >= games->count || !maps || !maps->records) return -1;
+    const uint32_t map = *reinterpret_cast<const uint32_t *>(games->records + NG_STRIDE * uint64_t(index) + NG_MAP);
+    for (int32_t i = 0; i < maps->count; ++i) {
+        const uint8_t *rec = maps->records + MAP_STRIDE * uint64_t(i);
+        if (*reinterpret_cast<const uint32_t *>(rec) != map) continue;
+        local_ok = map_available(rec);
+        return *reinterpret_cast<const int32_t *>(rec + MAP_PACK);
+    }
+    return -1;
+}
+
 void install_dlc(int &installed) {
     check_packs();
     if (!image.executable(fDcLookup, 16)) {

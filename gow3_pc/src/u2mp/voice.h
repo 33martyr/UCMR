@@ -122,6 +122,7 @@ void set_volume(float v);
 // Local mute of one member (by net id); toggle returns the new state.
 bool muted(uint32_t net_id);
 bool toggle_mute(uint32_t net_id);
+void set_muted(uint32_t net_id, bool on);   // Mute All / Unmute All (spec parity-e-flow2.md 2.7)
 // True while voice from this member (by net id; the local id: our own) arrived in the last 300 ms:
 // the roster rows' talking icon (PS3 0x4bc9f0 image 1, cellVoice energy level).
 bool talking(uint32_t net_id);

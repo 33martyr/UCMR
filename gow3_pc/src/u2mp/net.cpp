@@ -26,7 +26,7 @@ namespace u2mp::net {
 namespace {
 
 constexpr size_t kHeader = 15;
-enum Kind : uint8_t { kData = 0, kHello = 1, kWelcome = 2, kBye = 3 };
+enum Kind : uint8_t { kData = 0, kHello = 1, kWelcome = 2, kBye = 3, kPing = 4, kPong = 5 };
 constexpr double kKeepalive = 0.1;
 constexpr double kHelloRetry = 0.5;
 
@@ -301,6 +301,10 @@ bool Transport::peer_address(uint8_t slot, Address &out) const {
     return true;
 }
 
+int Transport::rtt_ms(uint8_t slot) const {
+    return slot <= kMaxPeers && peers_[slot].connected ? peers_[slot].rtt_ms : -1;
+}
+
 void Transport::send_raw(const Address &to, const std::vector<uint8_t> &packet) {
     if (link_) {
         link_->send(to, packet.data(), packet.size());
@@ -374,6 +378,19 @@ void Transport::handle(const Address &from, const uint8_t *packet, size_t size, 
     Connection *c = find(from);
     if (!c) return;
     c->last_heard = now;
+    if ((kind == kPing || kind == kPong) && size >= kHeader + sizeof(double)) {
+        if (kind == kPing) {   // echo the sender's clock
+            std::vector<uint8_t> p;
+            header(p, kPong, 0, 0, 0);
+            p.insert(p.end(), packet + kHeader, packet + kHeader + sizeof(double));
+            send_raw(from, p);
+        } else {
+            double sent = 0;
+            std::memcpy(&sent, packet + kHeader, sizeof sent);
+            if (sent > 0 && sent <= now) c->rtt_ms = int((now - sent) * 1000.0 + 0.5);
+        }
+        return;
+    }
     if (kind == kBye) {
         const uint8_t slot = c->slot;
         c->reset();
@@ -415,9 +432,19 @@ void Transport::pump(double now) {
         if (!c.connected) continue;
         if (now - c.last_heard > kTimeoutSeconds) {
             const uint8_t slot = c.slot;
+            if (on_timeout) on_timeout(slot);
             c.reset();
             if (on_peer) on_peer(slot, false);
             continue;
+        }
+        if (c.last_ping <= 0 || now - c.last_ping >= kPingSeconds) {
+            std::vector<uint8_t> p;
+            header(p, kPing, 0, 0, 0);
+            const double stamp = now > 0 ? now : 1e-9;   // 0 means "no stamp"
+            const auto *b = reinterpret_cast<const uint8_t *>(&stamp);
+            p.insert(p.end(), b, b + sizeof stamp);
+            send_raw(c.address, p);
+            c.last_ping = now > 0 ? now : 1e-9;
         }
         if (c.build(packet, now - c.last_sent >= kKeepalive)) {
             send_raw(c.address, packet);
