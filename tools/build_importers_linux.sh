@@ -36,8 +36,9 @@ build() {   # <name> <flags as one string> <sources...>: compiles in parallel; t
 link() {   # <program> <objects.txt> [extra...]
     local exe=$1 list=$2
     shift 2
+    # the C++ runtime linked in (as the launcher core's): the programs need only the system's C library
     # shellcheck disable=SC2046
-    if ! "$CXX" -s -Wl,--gc-sections $(cut -d' ' -f1 "$list") "$@" -pthread -o "$exe" 2> "$exe.log"; then
+    if ! "$CXX" -s -Wl,--gc-sections -static-libstdc++ -static-libgcc $(cut -d' ' -f1 "$list") "$@" -pthread -o "$exe" 2> "$exe.log"; then
         cat "$exe.log"; echo "::error title=link $(basename "$exe")::$(grep -m4 'undefined\|error' "$exe.log" | tr '\n' ' ')"; return 1
     fi
 }

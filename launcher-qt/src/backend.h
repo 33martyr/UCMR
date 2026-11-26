@@ -8,6 +8,8 @@
 #include <QTimer>
 #include <QVariant>
 
+#include "native.h"   // launcher/native: un_path_char, the core's path type (wchar_t on Windows, char on Linux)
+
 class Backend : public QObject {
     Q_OBJECT
     Q_PROPERTY(QVariantMap chrome READ chrome NOTIFY chromeChanged)
@@ -57,7 +59,7 @@ signals:
 
 private:
     void navPoll();   // reads the controllers for navigation (only while this window is the active one)
-    using PadInitFn = int (*)(const wchar_t *);
+    using PadInitFn = int (*)(const un_path_char *);
     using PadNavFn = int (*)(unsigned *, int *, int *);
     PadInitFn m_padInit = nullptr;
     PadNavFn m_padNav = nullptr;
@@ -81,7 +83,7 @@ private:
     void showCapture();                  // chrome's capturing flags from it
     bool nativeCapturing() const;
 
-    using CoreOpenFn = int (*)(const wchar_t *, const char *);
+    using CoreOpenFn = int (*)(const un_path_char *, const char *);
     using CoreSendFn = int (*)(const char *, char *, int);
     using CoreTickFn = int (*)(char *, int);
     using CoreCloseFn = void (*)();

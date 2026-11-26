@@ -10,10 +10,56 @@
 #   import (u3mp/bin)       (sound banks, convert_banks.py); both pinned to 8.1.1 so their output stays the same
 #
 # Run from an MSYS2 CLANG64 shell (needs make and nasm); a finished build is kept. Prints the pkg-config folder.
+# On Linux (make, nasm, a C compiler: CC, default cc; zlib's headers) it builds the same FFmpeg as one ffmpeg program
+# with the libraries linked in, into downloads/ffmpeg-8.1.1-min-linux (tools/package_linux.sh ships bin/ffmpeg).
 set -euo pipefail
 cd -- "$(dirname -- "$0")/.."
 version=8.1.1
 sha256=b6863adde98898f42602017462871b5f6333e65aec803fdd7a6308639c52edf3   # as MSYS2's recipe for 8.1.1
+# the source, checked, unpacked into downloads/ffmpeg-<version>-build; the shell is left in that folder
+unpack() {
+    local source=downloads/ffmpeg-$version.tar.xz
+    if [[ ! -s $source ]]; then
+        mkdir -p downloads
+        curl -fsSL --retry 3 -o "$source.part" "https://ffmpeg.org/releases/ffmpeg-$version.tar.xz"
+        mv -- "$source.part" "$source"
+    fi
+    echo "$sha256 *$source" | sha256sum -c --quiet - >&2
+    local work=downloads/ffmpeg-$version-build
+    rm -rf -- "$work"
+    mkdir -p "$work"
+    tar -C "$work" --strip-components=1 -xJf "$source"
+    cd "$work"
+}
+
+if [[ $(uname -s) == Linux ]]; then
+    prefix=$PWD/downloads/ffmpeg-$version-min-linux
+    if [[ -x $prefix/bin/ffmpeg ]] && grep -qs "^prefix=$prefix\$" "$prefix/lib/pkgconfig/libavcodec.pc"; then
+        echo "$prefix/lib/pkgconfig"
+        exit 0
+    fi
+    unpack
+    mkdir -p tmp
+    export TMPDIR=$PWD/tmp
+    # the same parts as the Windows build below; static libraries, so ffmpeg needs only the C library and zlib
+    ./configure --prefix="$prefix" --cc="${CC:-cc}" \
+        --disable-shared --enable-static --disable-debug --disable-doc --disable-autodetect --disable-network \
+        --enable-pthreads --enable-zlib --disable-everything --disable-programs --enable-ffmpeg --disable-avdevice \
+        --enable-decoder=h264,hevc,aac,aac_latm,mp3,mp3float,png,mjpeg \
+        --enable-parser=h264,hevc,aac,aac_latm,mpegaudio,png,mjpeg \
+        --enable-demuxer=mov,mp3,aac,h264,hevc,wav,image_jpeg_pipe,image_png_pipe \
+        --enable-muxer=rawvideo,pcm_s16le,wav \
+        --enable-encoder=rawvideo,pcm_s16le \
+        --enable-filter=scale,format,aresample,aformat,null,anull,buffer,buffersink,abuffer,abuffersink \
+        --enable-protocol=file,pipe,fd > configure.log 2>&1 || { tail -30 configure.log >&2; exit 1; }
+    make -j"$(nproc)" > make.log 2>&1 || { tail -40 make.log >&2; exit 1; }
+    make install > /dev/null
+    strip "$prefix/bin/ffmpeg"
+    cp COPYING.LGPLv2.1 "$prefix/COPYING.LGPLv2.1"
+    echo "$prefix/lib/pkgconfig"
+    exit 0
+fi
+
 # Windows form (C:/...): the .pc files carry it, and CLANG64's pkg-config and clang are Windows programs
 prefix=$(cygpath -m "$PWD/downloads/ffmpeg-$version-min")
 msys=${MSYS2_ROOT:-/c/msys64}
@@ -39,19 +85,7 @@ if [[ -f $prefix/bin/ffmpeg.exe && -f $prefix/lib/pkgconfig/libavcodec.pc ]] && 
     exit 0
 fi
 
-source=downloads/ffmpeg-$version.tar.xz
-if [[ ! -s $source ]]; then
-    mkdir -p downloads
-    curl -fsSL --retry 3 -o "$source.part" "https://ffmpeg.org/releases/ffmpeg-$version.tar.xz"
-    mv -- "$source.part" "$source"
-fi
-echo "$sha256 *$source" | sha256sum -c --quiet - >&2
-work=downloads/ffmpeg-$version-build
-rm -rf -- "$work"
-mkdir -p "$work"
-tar -C "$work" --strip-components=1 -xJf "$source"
-
-cd "$work"
+unpack
 # configure's scratch files, in a POSIX path (a Windows TEMP like C:\Users\... loses its backslashes there)
 mkdir -p tmp
 export TMPDIR=$PWD/tmp
