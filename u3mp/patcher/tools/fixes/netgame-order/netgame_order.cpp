@@ -355,6 +355,16 @@ struct J {
     std::u32string s;
     std::vector<J> a;
     std::vector<std::pair<std::string, J>> o;
+#ifndef _WIN32
+    // clang with libstdc++ destroys `o` only once J is complete when the destructor is defined after the class (as in
+    // launcher/native/json.h); Windows keeps the implicit members, so its object and this step's code id stay the same
+    J() = default;
+    J(const J &) = default;
+    J(J &&) noexcept = default;
+    J &operator=(const J &) = default;
+    J &operator=(J &&) noexcept = default;
+    ~J();
+#endif
 
     static J boolean(bool v) { J j; j.k = Bool; j.b = v; return j; }
     static J num(long long v) { J j; j.k = Int; j.i = v; return j; }
@@ -370,6 +380,9 @@ struct J {
     }
     std::string dump(int indent = 0) const;
 };
+#ifndef _WIN32
+J::~J() = default;
+#endif
 
 J J::utf8s(const std::string &v) {
     J j;

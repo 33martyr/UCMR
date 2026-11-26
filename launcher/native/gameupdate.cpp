@@ -22,6 +22,10 @@
 #include "port.h"
 #ifdef _WIN32
 #include <windows.h>
+#else
+#include <cerrno>
+#include <cwctype>
+#endif
 
 #include <algorithm>
 #include <map>
@@ -44,6 +48,7 @@ int give(const std::string &s, char *out, int cap) {
     std::memcpy(out, s.c_str(), s.size() + 1);
     return 0;
 }
+#ifdef _WIN32
 std::string utf8(const std::wstring &w) {
     if (w.empty()) return std::string();
     int n = WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(), nullptr, 0, nullptr, nullptr);
@@ -62,9 +67,19 @@ std::wstring lower(std::wstring s) {
     if (!s.empty()) CharLowerBuffW(&s[0], (DWORD)s.size());
     return s;
 }
+#else
+namespace fs = std::filesystem;
+std::string utf8(const std::wstring &w) { return port::utf8(w); }
+std::wstring widen(const std::string &s) { return port::wide(s); }
+std::wstring lower(std::wstring s) {
+    for (wchar_t &c : s) c = (wchar_t)std::towlower((wint_t)c);
+    return s;
+}
+#endif
 
 // ------------------------------------------------------------------------------------------------ path helpers (pathlib)
 
+#ifdef _WIN32
 // Same result as str(Path(p)) gives on Windows
 std::wstring path_str(std::wstring p) {
     std::replace(p.begin(), p.end(), L'/', L'\\');
@@ -77,9 +92,25 @@ std::wstring path_str(std::wstring p) {
     if (o.size() > 1 && o.back() == L'.' && o[o.size() - 2] == L'\\') o.resize(o.size() - 2);
     return o.empty() ? L"." : o;
 }
+#else
+// The same normal form with "/" (Linux): a backslash of our own joins and names becomes "/", doubled and trailing
+// separators and a trailing "/." go
+std::wstring path_str(std::wstring p) {
+    std::replace(p.begin(), p.end(), L'\\', L'/');
+    std::wstring o;
+    for (size_t i = 0; i < p.size(); ++i) {
+        if (p[i] == L'/' && !o.empty() && o.back() == L'/') continue;
+        o += p[i];
+    }
+    while (o.size() > 1 && o.back() == L'/') o.pop_back();
+    if (o.size() > 1 && o.back() == L'.' && o[o.size() - 2] == L'/') o.resize(o.size() > 2 ? o.size() - 2 : 1);
+    return o.empty() ? L"." : o;
+}
+#endif
 std::wstring join(const std::wstring &a, const std::wstring &b) {
     return path_str(a + L"\\" + b);
 }
+#ifdef _WIN32
 std::wstring parent(const std::wstring &p) {
     const std::wstring s = path_str(p);
     const size_t cut = s.find_last_of(L'\\');
@@ -92,7 +123,22 @@ std::wstring name_of(const std::wstring &p) {
     const size_t cut = s.find_last_of(L"\\:");
     return cut == std::wstring::npos ? s : s.substr(cut + 1);
 }
+#else
+std::wstring parent(const std::wstring &p) {
+    const std::wstring s = path_str(p);
+    const size_t cut = s.find_last_of(L'/');
+    if (cut == std::wstring::npos) return L".";
+    if (cut == 0) return L"/";
+    return s.substr(0, cut);
+}
+std::wstring name_of(const std::wstring &p) {
+    const std::wstring s = path_str(p);
+    const size_t cut = s.find_last_of(L'/');
+    return cut == std::wstring::npos ? s : s.substr(cut + 1);
+}
+#endif
 
+#ifdef _WIN32
 DWORD attrs(const std::wstring &p) { return GetFileAttributesW(p.c_str()); }
 bool exists(const std::wstring &p) {   // follows links to their target
     HANDLE h = CreateFileW(p.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
@@ -118,6 +164,22 @@ std::string win_error(DWORD code) {
     while (!t.empty() && (t.back() == L'\n' || t.back() == L'\r' || t.back() == L' ' || t.back() == L'.')) t.pop_back();
     return "[WinError " + std::to_string(code) + "] " + utf8(t);
 }
+#else
+bool exists(const std::wstring &p) {   // follows links to their target
+    std::error_code ec;
+    return fs::exists(port::path(p), ec);
+}
+bool is_dir(const std::wstring &p) {
+    std::error_code ec;
+    return fs::is_directory(port::path(p), ec);
+}
+bool is_file(const std::wstring &p) { return exists(p) && !is_dir(p); }
+long long file_size(const std::wstring &p) {
+    std::error_code ec;
+    const auto n = fs::file_size(port::path(p), ec);
+    return ec ? -1 : (long long)n;
+}
+#endif
 std::string shown(const std::wstring &p) {   // quoted and escaped like repr() of a Python path string
     std::string o;
     for (char c : utf8(p)) o += c == '\\' ? std::string("\\\\") : std::string(1, c);
@@ -125,6 +187,14 @@ std::string shown(const std::wstring &p) {   // quoted and escaped like repr() o
 }
 
 // Canonical, lower-cased form of a folder path (as Path.resolve would give), so two folders can be compared.
+#ifndef _WIN32
+// Linux: links resolved, case kept (two names that differ in case are two folders here)
+std::wstring resolved(const std::wstring &p) {
+    std::error_code ec;
+    const fs::path f = fs::weakly_canonical(fs::absolute(port::path(p), ec), ec);
+    return path_str(ec ? p : port::wide(f.string()));
+}
+#else
 std::wstring resolved(const std::wstring &p) {
     std::vector<wchar_t> buf(32768);
     DWORD n = GetFullPathNameW(p.c_str(), 32768, buf.data(), nullptr);
@@ -141,6 +211,7 @@ std::wstring resolved(const std::wstring &p) {
     }
     return lower(path_str(f));
 }
+#endif
 
 // ------------------------------------------------------------------------------------------------ progress
 
@@ -158,6 +229,7 @@ std::string str_of(const Value *v) {   // a param.sfo value as text (as str() wo
 // the player gets told, through an UpdateError.
 Value sfo_values(const std::wstring &path) {
     std::string d;
+#ifdef _WIN32
     HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
     if (h == INVALID_HANDLE_VALUE) {   // worded with the errno text Python's open() would raise
         const DWORD e = GetLastError();
@@ -169,6 +241,18 @@ Value sfo_values(const std::wstring &path) {
     DWORD got = 0;
     while (ReadFile(h, buf, sizeof buf, &got, nullptr) && got) d.append(buf, got);
     CloseHandle(h);
+#else
+    std::FILE *h = std::fopen(port::path(path).c_str(), "rb");
+    if (!h) {   // worded as Python's open() raises it
+        const int e = errno;
+        throw UpdateError{"The update's param.sfo can't be read ([Errno " + std::to_string(e) + "] " + std::strerror(e) +
+                          ": " + shown(path) + ")."};
+    }
+    char buf[1 << 16];
+    size_t got = 0;
+    while ((got = std::fread(buf, 1, sizeof buf, h)) > 0) d.append(buf, got);
+    std::fclose(h);
+#endif
     auto damaged = [](const std::string &why) { return UpdateError{"The update's param.sfo can't be read (" + why + ")."}; };
     auto u32 = [&](size_t at) -> uint32_t {
         if (at + 4 > d.size()) throw damaged("unpack_from requires a buffer of at least " + std::to_string(at + 4) +
@@ -250,6 +334,7 @@ bool zlib_decompress(const std::string &in, std::string &out) {
 // the file can't be treated as a PSARC: a bad header, or a file size other than table of contents plus all stored
 // blocks (a truncated or padded archive).
 int psarc_has_shader_list(const std::wstring &path) {
+#ifdef _WIN32
     HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
     if (h == INVALID_HANDLE_VALUE) return -1;
     auto read = [&](size_t n) {
@@ -259,6 +344,16 @@ int psarc_has_shader_list(const std::wstring &path) {
         s.resize(got);
         return s;
     };
+#else
+    std::FILE *h = std::fopen(port::path(path).c_str(), "rb");
+    if (!h) return -1;
+    auto read = [&](size_t n) {
+        std::string s(n, '\0');
+        const size_t got = n ? std::fread(&s[0], 1, n, h) : 0;
+        s.resize(got);
+        return s;
+    };
+#endif
     int result = -1;
     do {
         const std::string head = read(32);
@@ -283,9 +378,13 @@ int psarc_has_shader_list(const std::wstring &path) {
         }
         const long long actual = file_size(path);
         if (actual < 0 || (unsigned long long)actual != toc_length + stored) break;
+#ifdef _WIN32
         LARGE_INTEGER to;
         to.QuadPart = (LONGLONG)offset;
         SetFilePointerEx(h, to, nullptr, FILE_BEGIN);
+#else
+        fseeko(h, (off_t)offset, SEEK_SET);
+#endif
         std::string manifest;
         bool ok = true;
         for (uint32_t block = first_block; manifest.size() < size; ++block) {
@@ -305,7 +404,11 @@ int psarc_has_shader_list(const std::wstring &path) {
         const std::string names = "\n" + utf8(widen(manifest)) + "\n";
         result = names.find("\nbin/shaders/src/files.json\n") != std::string::npos ? 1 : 0;
     } while (false);
+#ifdef _WIN32
     CloseHandle(h);
+#else
+    std::fclose(h);
+#endif
     return result;
 }
 
@@ -346,6 +449,15 @@ std::wstring title_folder(const std::wstring &game) {
 // Finds an update folder beside the game using the same name rules as the game starter; empty if there is none.
 std::wstring existing_update(const std::wstring &game) {
     const std::wstring title = title_folder(game), base = lower(name_of(title)), up = parent(title);
+#ifndef _WIN32
+    std::error_code ec;
+    for (fs::directory_iterator it(port::path(up), ec), end; !ec && it != end; it.increment(ec)) {
+        const std::wstring n = port::wide(it->path().filename().string()), l = lower(n);
+        for (const wchar_t *suffix : {L"-patch", L"-update", L"_patch", L"_update"})
+            if (l == base + suffix && is_dir(join(up, n))) return join(up, n);
+    }
+    return L"";
+#else
     WIN32_FIND_DATAW fd;
     HANDLE h = FindFirstFileW((up + L"\\*").c_str(), &fd);
     if (h == INVALID_HANDLE_VALUE) return L"";
@@ -358,6 +470,7 @@ std::wstring existing_update(const std::wstring &game) {
     } while (found.empty() && FindNextFileW(h, &fd));
     FindClose(h);
     return found;
+#endif
 }
 
 // Takes an update the player extracted on their own, wherever it is, and returns its uroot. The player may have picked
@@ -437,20 +550,3 @@ UN_API int un_game_update_step(char *out, int cap) {
 }
 
 }  // extern "C"
-
-#else   // Linux: the update folder checks come in phase 2 (docs/WINDOWS-DEPENDENCIES.md §13)
-
-#include <string>
-
-extern "C" {
-
-UN_API int un_game_update(const char *what, const un_path_char *root, const char *args_json, char *out, int cap) {
-    if (what && std::string(what) == "existing_update") return port::give("", out, cap);   // none found
-    return port::not_yet_answer("game update", 1, out, cap);
-}
-
-UN_API int un_game_update_step(char *out, int cap) { return port::give("", out, cap); }
-
-}  // extern "C"
-
-#endif

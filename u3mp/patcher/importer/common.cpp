@@ -3,8 +3,13 @@
 
 #include "inflate.h"   // launcher/native/inflate.h
 
+#ifdef _WIN32
 #include <windows.h>
 #include <bcrypt.h>
+#else
+#include "port.h"     // launcher/native/port.h: spawn, the program's path
+#include "sha256.h"   // launcher/native/sha256.h (Windows keeps bcrypt)
+#endif
 
 #include <chrono>
 #include <cstdarg>
@@ -18,7 +23,16 @@
 namespace u3imp {
 
 // ------------------------------------------------------------------------------------------------ text and paths
+#ifdef _WIN32
 fs::path P(const std::string &s) { return fs::path(std::u8string(s.begin(), s.end())); }
+#else
+fs::path P(const std::string &s) {   // a backslash (the Windows separator in joins and plan files) is a "/" here
+    std::u8string u(s.begin(), s.end());
+    for (char8_t &c : u)
+        if (c == u8'\\') c = u8'/';
+    return fs::path(u);
+}
+#endif
 std::string S(const fs::path &p) {
     const std::u8string u = p.u8string();
     return std::string(u.begin(), u.end());
@@ -54,7 +68,11 @@ std::vector<std::string> split(const std::string &s, char c) {
 std::string now_text() {
     const std::time_t t = std::time(nullptr);
     std::tm tm{};
+#ifdef _WIN32
     localtime_s(&tm, &t);
+#else
+    localtime_r(&t, &tm);
+#endif
     char b[32];
     std::strftime(b, sizeof b, "%Y-%m-%d %H:%M:%S", &tm);
     return b;
@@ -197,6 +215,7 @@ void write_bytes(const fs::path &p, const Bytes &b) {
 }
 void write_text(const fs::path &p, const std::string &t) { write_bytes(p, Bytes(t.begin(), t.end())); }
 
+#ifdef _WIN32
 Sha256::Sha256() {
     BCryptOpenAlgorithmProvider(reinterpret_cast<BCRYPT_ALG_HANDLE *>(&alg), BCRYPT_SHA256_ALGORITHM, nullptr, 0);
     BCryptCreateHash(static_cast<BCRYPT_ALG_HANDLE>(alg), reinterpret_cast<BCRYPT_HASH_HANDLE *>(&hash), nullptr, 0, nullptr, 0, 0);
@@ -219,6 +238,17 @@ Bytes Sha256::digest() {
     BCryptFinishHash(static_cast<BCRYPT_HASH_HANDLE>(hash), d.data(), 32, 0);
     return d;
 }
+#else
+// Linux: the shared implementation (launcher/native/sha256.h); `hash` holds it, `alg` stays unused
+Sha256::Sha256() { hash = new sha256::Hash(); }
+Sha256::~Sha256() { delete static_cast<sha256::Hash *>(hash); }
+void Sha256::update(const void *data, size_t n) { static_cast<sha256::Hash *>(hash)->update(data, n); }
+Bytes Sha256::digest() {
+    Bytes d(32);
+    static_cast<sha256::Hash *>(hash)->finish(d.data());
+    return d;
+}
+#endif
 std::string Sha256::hex() {
     static const char *H = "0123456789abcdef";
     std::string s;
@@ -280,7 +310,12 @@ uint64_t tree_size(const fs::path &folder) {
 void rmtree(const fs::path &p) {
     std::error_code ec;
     for (auto it = fs::recursive_directory_iterator(p, ec); !ec && it != fs::recursive_directory_iterator(); it.increment(ec))
+#ifdef _WIN32
         SetFileAttributesW(it->path().c_str(), FILE_ATTRIBUTE_NORMAL);
+#else
+        if (std::error_code e2; it->is_directory(e2) && !it->is_symlink(e2))   // a read-only folder keeps its files here
+            fs::permissions(it->path(), fs::perms::owner_all, fs::perm_options::add, e2);
+#endif
     fs::remove_all(p, ec);
 }
 bool rmtree_retry(const fs::path &p, double seconds) {
@@ -305,6 +340,7 @@ std::string zlib_inflate(const std::string &z) {
 }
 
 // ------------------------------------------------------------------------------------------------ processes
+#ifdef _WIN32
 namespace {
 std::wstring wide(const std::string &s) {
     if (s.empty()) return L"";
@@ -501,5 +537,86 @@ std::string find_program(const std::vector<fs::path> &dirs, const std::string &n
         if (fs::is_regular_file(P(e), ec)) return e;
     return "";
 }
+#else
+// Linux: port::spawn with an argv vector (no command line to quote)
+namespace {
+// this process's environment with the extra variables (replacing same-named ones; names are case-sensitive here)
+port::Spawn spawn_of(const std::vector<std::string> &argv, const fs::path &cwd, const std::vector<std::pair<std::string, std::string>> &env) {
+    std::map<std::string, std::string> vars;
+    for (char **p = environ; p && *p; ++p) {
+        const std::string kv = *p;
+        const size_t eq = kv.find('=', 1);
+        if (eq != std::string::npos) vars[kv.substr(0, eq)] = kv.substr(eq + 1);
+    }
+    for (const auto &[k, v] : env) vars[k] = v;
+    port::Spawn s;
+    s.argv = argv;
+    s.cwd = S(cwd);
+    s.set_env = true;
+    for (const auto &[k, v] : vars) s.env.push_back(k + "=" + v);
+    return s;   // stdin: /dev/null
+}
+void drain(int fd, std::string *s) {
+    char buf[65536];
+    for (long n; (n = port::read_some(fd, buf, sizeof buf, -1)) > 0;) s->append(buf, size_t(n));
+}
+}  // namespace
+
+int run_split(const std::vector<std::string> &argv, const fs::path &cwd, const std::vector<std::pair<std::string, std::string>> &env, std::string &out,
+              std::string &err) {
+    port::Spawn s = spawn_of(argv, cwd, env);
+    s.out = port::Spawn::pipe;
+    s.err = port::Spawn::err_pipe;
+    port::Child c;
+    std::string why;
+    if (!port::spawn(s, c, why)) throw u3::Stop(why);
+    std::thread t(drain, c.err, &err);
+    drain(c.out, &out);
+    t.join();
+    port::close(c);
+    return port::wait(c);
+}
+
+int run(const std::vector<std::string> &argv, const fs::path &cwd, const std::vector<std::pair<std::string, std::string>> &env,
+        const std::function<void(const std::string &)> &on_line) {
+    port::Spawn s = spawn_of(argv, cwd, env);
+    s.out = port::Spawn::pipe;   // stderr too
+    port::Child c;
+    std::string why;
+    if (!port::spawn(s, c, why)) throw u3::Stop(why);
+    std::string pending;
+    char buf[65536];
+    for (long got; (got = port::read_some(c.out, buf, sizeof buf, -1)) > 0;) {
+        pending.append(buf, size_t(got));
+        size_t nl;
+        while ((nl = pending.find('\n')) != std::string::npos) {
+            std::string line = pending.substr(0, nl);
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            on_line(line);
+            pending.erase(0, nl + 1);
+        }
+    }
+    if (!pending.empty()) {
+        if (pending.back() == '\r') pending.pop_back();
+        on_line(pending);
+    }
+    port::close(c);
+    return port::wait(c);
+}
+
+fs::path exe_dir() { return port::executable_path().parent_path(); }
+
+// the program next to us (dirs), else on PATH, else one of `extra`; "" when there is none
+std::string find_program(const std::vector<fs::path> &dirs, const std::string &name, const std::vector<std::string> &extra) {
+    std::error_code ec;
+    for (const fs::path &d : dirs)
+        if (fs::is_regular_file(d / P(name), ec)) return S(d / P(name));
+    const std::string found = port::find_program(name);
+    if (found.find('/') != std::string::npos) return found;
+    for (const std::string &e : extra)
+        if (fs::is_regular_file(P(e), ec)) return e;
+    return "";
+}
+#endif
 
 }  // namespace u3imp

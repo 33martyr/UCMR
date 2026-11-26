@@ -14,6 +14,9 @@
 #include "port.h"
 #ifdef _WIN32
 #include <windows.h>
+#else
+#include <ctime>
+#endif
 
 #include <algorithm>
 #include <deque>
@@ -37,6 +40,7 @@ int give(const std::string &s, char *out, int cap) {
     std::memcpy(out, s.c_str(), s.size() + 1);
     return 0;
 }
+#ifdef _WIN32
 std::string utf8(const std::wstring &w) {
     if (w.empty()) return std::string();
     int n = WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(), nullptr, 0, nullptr, nullptr);
@@ -51,6 +55,10 @@ std::wstring widen(const std::string &s) {   // invalid UTF-8 becomes U+FFFD (Py
     MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), &w[0], n);
     return w;
 }
+#else
+std::string utf8(const std::wstring &w) { return port::utf8(w); }
+std::wstring widen(const std::string &s) { return port::wide(s); }   // invalid UTF-8 becomes U+FFFD
+#endif
 
 // a settings value printed the way Python's str() prints it, plus a truth test with a default for missing keys
 std::string str_of(const Value *v, const std::string &missing) {
@@ -135,7 +143,7 @@ Value play_env(const Value &config, const std::wstring &user_dir) {
         std::vector<char> buf(1 << 15);
         std::string upscaler, fsr1 = "0";
         bool have_upscaler = false;
-        if (un_ini_read(user_dir.c_str(), key, buf.data(), (int)buf.size()) == 0) {
+        if (un_ini_read(port::arg(user_dir).c_str(), key, buf.data(), (int)buf.size()) == 0) {
             const std::string text = buf.data();
             for (size_t a = 0; a < text.size();) {
                 size_t b = text.find('\n', a);
@@ -179,6 +187,7 @@ Value play_env(const Value &config, const std::wstring &user_dir) {
 
 // ------------------------------------------------------------------------------------------------ the running game
 
+#ifdef _WIN32
 struct Session {
     std::mutex lock;
     HANDLE process = nullptr;
@@ -188,8 +197,20 @@ struct Session {
     bool ended = false;
     DWORD exit_code = 0;
 };
+#else
+struct Session {
+    std::mutex lock;
+    port::Child *process = nullptr;
+    long long pid = 0;
+    std::deque<std::string> lines;   // the output lines not yet handed over (trailing whitespace removed)
+    bool reading = false;            // the reader thread is still at work
+    bool ended = false;
+    int exit_code = 0;
+};
+#endif
 Session g_session;
 
+#ifdef _WIN32
 // subprocess.list2cmdline
 std::wstring command_line(const std::vector<std::wstring> &args) {
     std::wstring result;
@@ -229,6 +250,7 @@ std::string os_error(DWORD code) {
     while (!t.empty() && (t.back() == L'\n' || t.back() == L'\r' || t.back() == L' ' || t.back() == L'.')) t.pop_back();
     return "[WinError " + std::to_string(code) + "] " + utf8(t);
 }
+#endif
 
 // str.rstrip(): without trailing whitespace (Python's whitespace)
 std::wstring rstrip(std::wstring s) {
@@ -236,6 +258,7 @@ std::wstring rstrip(std::wstring s) {
     return s;
 }
 
+#ifdef _WIN32
 // Reader thread for the starter's pipe. Bytes are decoded as UTF-8 with bad sequences replaced, and a line ends at
 // \r\n, a lone \r or \n (the same rule as Python text mode). Every line is written to the run log ending in \r\n and
 // queued for the launcher.
@@ -386,6 +409,107 @@ std::string play_start(const Value &request, DWORD &pid) {
     pid = pi.dwProcessId;
     return "";
 }
+#else
+// Reader thread for the starter's pipe: the same line rule and run log as the Windows body
+void read_output(port::Child *child, std::FILE *log) {
+    std::string pending;
+    bool cr = false;
+    auto emit = [&](const std::string &bytes, bool newline) {
+        const std::wstring line = widen(bytes);
+        if (log) {
+            const std::string text = utf8(line) + (newline ? "\r\n" : "");
+            if (std::fwrite(text.data(), 1, text.size(), log) != text.size() || std::fflush(log) != 0) {
+                std::fclose(log);
+                log = nullptr;
+            }
+        }
+        std::lock_guard<std::mutex> guard(g_session.lock);
+        g_session.lines.push_back(utf8(rstrip(line)));
+    };
+    char buf[4096];
+    long got;
+    while ((got = port::read_some(child->out, buf, sizeof buf, -1)) > 0) {
+        for (long i = 0; i < got; ++i) {
+            const char c = buf[i];
+            if (cr && c == '\n') { cr = false; continue; }
+            cr = false;
+            if (c == '\n' || c == '\r') {
+                emit(pending, true);
+                pending.clear();
+                cr = c == '\r';
+            } else {
+                pending += c;
+            }
+        }
+    }
+    if (!pending.empty()) emit(pending, false);
+    port::close(*child);
+    const int code = port::wait(*child);
+    if (log) {
+        const std::string text = "exit code " + std::to_string(code) + "\r\n";
+        std::fwrite(text.data(), 1, text.size(), log);
+        std::fclose(log);
+    }
+    std::lock_guard<std::mutex> guard(g_session.lock);
+    g_session.exit_code = code;
+    g_session.reading = false;
+}
+
+// Launches the game starter (the request as in the Windows body); its stdout and stderr come back through a pipe
+std::string play_start(const Value &request, long long &pid) {
+    {
+        std::lock_guard<std::mutex> guard(g_session.lock);
+        if (g_session.process && (g_session.reading || !g_session.ended)) throw std::string("a game is already running");
+    }
+    port::Spawn s;
+    if (const Value *c = request.get("command")) for (auto &a : c->items) s.argv.push_back(a.s);
+    if (s.argv.empty()) throw std::string("no command");
+    std::vector<std::pair<std::string, std::string>> vars;   // names are case-sensitive here
+    if (const Value *e = request.get("env"))
+        for (auto &p : e->items) if (p.items.size() == 2) vars.push_back({p.items[0].s, p.items[1].s});
+    std::stable_sort(vars.begin(), vars.end(), [](auto &a, auto &b) { return a.first < b.first; });
+    s.set_env = true;
+    for (auto &kv : vars) s.env.push_back(kv.first + "=" + kv.second);
+    if (const Value *c = request.get("cwd")) s.cwd = port::path_utf8(c->s).string();
+    s.out = port::Spawn::pipe;
+    auto *child = new port::Child;
+    std::string error;
+    if (!port::spawn(s, *child, error)) {
+        delete child;
+        throw error;
+    }
+    // Run log, for bug reports where the game never comes up: a timestamp and the command line, then the output.
+    std::FILE *log = nullptr;
+    if (const Value *l = request.get("log")) {
+        log = std::fopen(port::path_utf8(l->s).c_str(), "wb");
+        if (log) {
+            const std::time_t now = std::time(nullptr);
+            std::tm t{};
+            localtime_r(&now, &t);
+            char stamp[32];
+            std::strftime(stamp, sizeof stamp, "%Y-%m-%d %H:%M:%S", &t);
+            std::string joined;
+            for (size_t k = 0; k < s.argv.size(); ++k) joined += (k ? " " : "") + s.argv[k];
+            const std::string header = std::string(stamp) + " " + joined + "\r\n";
+            std::fwrite(header.data(), 1, header.size(), log);
+            std::fflush(log);
+        }
+    }
+    {
+        std::lock_guard<std::mutex> guard(g_session.lock);
+        delete g_session.process;   // the previous run's, already ended
+        g_session.process = child;
+        g_session.pid = child->pid;
+        g_session.lines.clear();
+        g_session.reading = true;
+        g_session.ended = false;
+        g_session.exit_code = 0;
+    }
+    std::thread(read_output, child, log).detach();
+    pid = child->pid;
+    return "";
+}
+#endif
 
 // ------------------------------------------------------------------------------------------------ why a game stopped
 
@@ -415,6 +539,7 @@ std::vector<std::wstring> splitlines(const std::wstring &t) {
     return lines;
 }
 
+#ifdef _WIN32
 double mtime_of(const std::wstring &path, bool &ok) {
     WIN32_FILE_ATTRIBUTE_DATA a;
     ok = GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &a) != 0 && !(a.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY);
@@ -422,6 +547,14 @@ double mtime_of(const std::wstring &path, bool &ok) {
     const unsigned long long t = ((unsigned long long)a.ftLastWriteTime.dwHighDateTime << 32) | a.ftLastWriteTime.dwLowDateTime;
     return (double)(long long)(t - 116444736000000000ull) / 1e7;
 }
+#else
+double mtime_of(const std::wstring &path, bool &ok) {   // Unix seconds of the last write
+    struct stat st;
+    ok = ::stat(port::path(path).c_str(), &st) == 0 && !S_ISDIR(st.st_mode);
+    if (!ok) return 0;
+    return (double)st.st_mtim.tv_sec + (double)(st.st_mtim.tv_nsec / 100) / 1e7;   // 100 ns steps, as FILETIME
+}
+#endif
 
 // Most recently written boot.log among the three games' folders, or an empty path.
 std::wstring latest_log(const std::wstring &root) {
@@ -447,6 +580,7 @@ std::string crash_reason(const std::wstring &root, double started_at, bool &foun
     bool ok = false;
     if (log.empty() || mtime_of(log, ok) < started_at) return "";
     std::string data;
+#ifdef _WIN32
     {
         HANDLE h = CreateFileW(log.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
                                OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -456,6 +590,16 @@ std::string crash_reason(const std::wstring &root, double started_at, bool &foun
         while (ReadFile(h, buf, sizeof buf, &got, nullptr) && got) data.append(buf, got);
         CloseHandle(h);
     }
+#else
+    {   // read as a stream: the runtime may still be writing it
+        std::FILE *f = std::fopen(port::path(log).c_str(), "rb");
+        if (!f) return "";
+        char buf[1 << 16];
+        size_t got;
+        while ((got = std::fread(buf, 1, sizeof buf, f)) > 0) data.append(buf, got);
+        std::fclose(f);
+    }
+#endif
     std::vector<std::wstring> lines = splitlines(widen(data));
     std::vector<std::wstring> tail(lines.size() > 80 ? lines.end() - 80 : lines.begin(), lines.end());
     for (size_t k = tail.size(); k-- > 0;) {
@@ -529,7 +673,11 @@ UN_API int un_play_start(const char *request_json, char *out, int cap) {
     Value request;
     if (!json::parse(request_json ? request_json : "{}", request)) return give("invalid request", out, cap) < 0 ? -1 : 1;
     try {
+#ifdef _WIN32
         DWORD pid = 0;
+#else
+        long long pid = 0;
+#endif
         play_start(request, pid);
         return give(std::to_string(pid), out, cap);
     } catch (const std::string &error) {
@@ -553,7 +701,11 @@ UN_API int un_play_poll(char *out, int cap) {
     if ((int)text.size() + 1 > cap) return -(int)(text.size() + 1);
     g_session.lines.clear();
     if (done) {
+#ifdef _WIN32
         CloseHandle(g_session.process);
+#else
+        delete g_session.process;   // reaped and closed by its reader
+#endif
         g_session.process = nullptr;
         g_session.ended = true;
     }
@@ -561,6 +713,19 @@ UN_API int un_play_poll(char *out, int cap) {
 }
 
 // The STOP button: kills the starter's whole process tree with taskkill /T /F, the same command the Python used.
+// Linux: port::kill_tree, its counterpart.
+#ifndef _WIN32
+UN_API int un_play_stop(void) {
+    long long pid;
+    {
+        std::lock_guard<std::mutex> guard(g_session.lock);
+        if (!g_session.process) return 1;
+        pid = g_session.pid;
+    }
+    port::kill_tree(pid);
+    return 0;
+}
+#else
 UN_API int un_play_stop(void) {
     DWORD pid;
     {
@@ -587,6 +752,7 @@ UN_API int un_play_stop(void) {
     if (null_io != INVALID_HANDLE_VALUE) CloseHandle(null_io);
     return 0;
 }
+#endif
 
 // root is the launcher folder, started_at the PLAY time in Unix seconds. Returns 0 with an explanation in out, or 2
 // if the newest boot.log gives no reason.
@@ -607,7 +773,7 @@ namespace {
 
 // a system.cpp answer ("" for none)
 std::string system_answer(const char *what, const std::string &arg) {
-    const std::wstring a = widen(arg);
+    const port::arg_string a = port::arg(arg);
     std::string out(1 << 12, '\0');
     int status = un_system(what, a.c_str(), &out[0], (int)out.size());
     if (status < 0) {
@@ -649,7 +815,7 @@ std::string lower_ascii(std::string s) {
 
 // What the update folder lacks (gameupdate.cpp check_update): its lines, none when the check itself fails.
 std::vector<std::string> update_problems(const std::string &root, const std::string &update) {
-    const std::wstring r = widen(root);
+    const port::arg_string r = port::arg(root);
     json::Value args;
     args.kind = json::Value::Array;
     args.items.push_back(json::Value::text(update));
@@ -800,34 +966,3 @@ UN_API int un_play_end(const char *state_json, char *out, int cap) {
 }
 
 }  // extern "C"
-
-#else   // Linux: PLAY starts and watches the game through port::spawn (docs/WINDOWS-DEPENDENCIES.md §13 phase 2)
-
-extern "C" {
-
-UN_API int un_play_env(const char *config_json, const un_path_char *user_dir, char *out, int cap) {
-    return port::not_yet_answer("PLAY", 1, out, cap);
-}
-
-UN_API int un_play_start(const char *request_json, char *out, int cap) {
-    return port::not_yet_answer("PLAY", 1, out, cap);
-}
-
-UN_API int un_play_poll(char *out, int cap) { return port::give("{\"lines\":[],\"exit\":1}", out, cap); }
-
-UN_API int un_play_stop(void) { return 1; }   // nothing runs
-
-UN_API int un_play_crash_reason(const un_path_char *root, double started_at, char *out, int cap) {
-    return port::give("", out, cap) < 0 ? -1 : 2;   // no reason found
-}
-
-UN_API int un_play_questions(const char *state_json, char *out, int cap) { return port::give("[]", out, cap); }
-
-UN_API int un_play_end(const char *state_json, char *out, int cap) {
-    const std::string detail = std::string("PLAY: ") + port::not_yet("PLAY");
-    return port::give("{\"status\":\"" + detail + "\",\"detail\":\"\",\"ask\":\"\"}", out, cap);
-}
-
-}  // extern "C"
-
-#endif

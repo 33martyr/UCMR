@@ -15,10 +15,12 @@
 #include "port.h"
 #ifdef _WIN32
 #include <windows.h>
+#endif
 
 #include <algorithm>
 #include <map>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -31,6 +33,7 @@ int give(const std::string &s, char *out, int cap) {
     return 0;
 }
 
+#ifdef _WIN32
 std::wstring widen(const std::string &s) {
     if (s.empty()) return std::wstring();
     int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), nullptr, 0);
@@ -38,6 +41,9 @@ std::wstring widen(const std::string &s) {
     MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), w.data(), n);
     return w;
 }
+#else
+namespace fs = std::filesystem;
+#endif
 
 std::string strip(const std::string &s) {
     const char *ws = " \t\r\n\v\f";
@@ -61,6 +67,19 @@ bool digits_only(const std::string &s) {
     return true;
 }
 
+#ifndef _WIN32
+// Linux: the same normal form with "/" (a backslash of our own joins becomes "/"), as str(Path(p)) gives on Linux
+std::string norm(std::string p) {
+    std::replace(p.begin(), p.end(), '\\', '/');
+    std::string out;
+    for (size_t i = 0; i < p.size(); ++i) {
+        if (p[i] == '/' && !out.empty() && out.back() == '/') continue;
+        out += p[i];
+    }
+    while (out.size() > 1 && out.back() == '/') out.pop_back();
+    return out;
+}
+#else
 // Normalises a Windows path the way Python's str(Path(p)) does: forward slashes turn into backslashes, runs of
 // separators collapse to one, and a trailing separator is dropped unless the path is a bare drive root.
 std::string norm(std::string p) {
@@ -75,9 +94,35 @@ std::string norm(std::string p) {
     if (out == ".") return out;
     return out;
 }
+#endif
 
 std::string join(const std::string &a, const std::string &b) { return norm(a + "\\" + b); }
 
+#ifndef _WIN32
+bool exists(const std::string &p) {
+    std::error_code ec;
+    return fs::exists(port::path_utf8(p), ec);
+}
+bool is_dir(const std::string &p) {
+    std::error_code ec;
+    return fs::is_directory(port::path_utf8(p), ec);
+}
+bool read_file(const std::string &path, std::string &data) {
+    std::FILE *f = std::fopen(port::path_utf8(path).c_str(), "rb");
+    if (!f) return false;
+    data.clear();
+    char buf[1 << 16];
+    size_t got = 0;
+    while ((got = std::fread(buf, 1, sizeof buf, f)) > 0) data.append(buf, got);
+    const bool ok = !std::ferror(f);
+    std::fclose(f);
+    return ok;
+}
+bool write_file(const std::string &path, const std::string &data) {
+    return port::write(port::path_utf8(path), data.data(), data.size());
+}
+bool make_dirs(const std::string &p) { return port::ensure_dir(port::path_utf8(p)); }
+#else
 bool exists(const std::string &p) { return GetFileAttributesW(widen(p).c_str()) != INVALID_FILE_ATTRIBUTES; }
 bool is_dir(const std::string &p) {
     DWORD a = GetFileAttributesW(widen(p).c_str());
@@ -112,6 +157,19 @@ bool make_dirs(const std::string &p) {
     if (cut != std::string::npos && cut > 2) make_dirs(p.substr(0, cut));
     return CreateDirectoryW(widen(p).c_str(), nullptr) || GetLastError() == ERROR_ALREADY_EXISTS;
 }
+#endif
+
+#ifndef _WIN32
+// what MultiByteToWideChar(MB_ERR_INVALID_CHARS) rejects in a well-formed multi-byte sequence: an overlong form, a
+// surrogate or a code point above U+10FFFF
+bool valid_sequence(const char *s, int n) {
+    const unsigned char *u = (const unsigned char *)s;
+    uint32_t cp = n == 2 ? u[0] & 0x1f : n == 3 ? u[0] & 0x0f : u[0] & 0x07;
+    for (int k = 1; k < n; ++k) cp = cp << 6 | (u[k] & 0x3f);
+    const uint32_t least = n == 2 ? 0x80 : n == 3 ? 0x800 : 0x10000;
+    return cp >= least && cp <= 0x10ffff && !(cp >= 0xd800 && cp <= 0xdfff);
+}
+#endif
 
 // Returns the text as valid UTF-8, swapping every byte that cannot start a valid sequence for U+FFFD (matching how
 // Python's errors="replace" handles single bad bytes).
@@ -122,7 +180,11 @@ std::string utf8_replace(const std::string &t) {
         int n = c < 0x80 ? 1 : (c >> 5) == 6 ? 2 : (c >> 4) == 14 ? 3 : (c >> 3) == 30 ? 4 : 0;
         bool ok = n > 0 && i + n <= t.size();
         for (int k = 1; ok && k < n; ++k) ok = ((unsigned char)t[i + k] >> 6) == 2;
+#ifdef _WIN32
         if (ok && n > 1 && MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, t.data() + i, n, nullptr, 0) == 0) ok = false;
+#else
+        if (ok && n > 1 && !valid_sequence(t.data() + i, n)) ok = false;
+#endif
         if (ok) { out.append(t, i, n); i += n; }
         else { out += "\xEF\xBF\xBD"; ++i; }
     }
@@ -245,6 +307,52 @@ struct Env {
 
 struct Failure { std::string message; };
 
+#ifndef _WIN32
+uint64_t time_ns() {
+    using namespace std::chrono;
+    return (uint64_t)duration_cast<nanoseconds>(system_clock::now().time_since_epoch()).count();
+}
+
+// Writes one line straight to the starter's stdout with no buffering, since the cleanup thread below calls it too.
+void say(const std::string &line) {
+    const std::string text = line + "\n";
+    port::write_all(1, text.data(), text.size());
+}
+
+// Since 24 Oct 2026 pipeline binaries are not used any more, but older versions left them in
+// <cache>/<game>*/pipeline-binaries. A thread clears them out in the background while the game is running.
+void remove_pipeline_binaries(const std::string &cache) {
+    std::vector<fs::path> folders;
+    std::error_code ec;
+    for (fs::directory_iterator it(port::path_utf8(cache), ec), end; !ec && it != end; it.increment(ec)) {
+        std::error_code e2;
+        if (!it->is_directory(e2)) continue;
+        const fs::path p = it->path() / "pipeline-binaries";
+        if (fs::is_directory(p, e2)) folders.push_back(p);
+    }
+    if (folders.empty()) return;
+    std::thread([folders]() {
+        long long files = 0;
+        unsigned long long size = 0;
+        for (const fs::path &folder : folders) {
+            std::error_code e;
+            for (fs::directory_iterator it(folder, e), end; !e && it != end; it.increment(e)) {
+                std::error_code e2;
+                const auto n = it->is_regular_file(e2) ? it->file_size(e2) : 0;
+                if (fs::remove(it->path(), e2)) {
+                    size += e2 ? 0 : n;
+                    ++files;
+                }
+            }
+            fs::remove(folder, e);
+        }
+        char line[160];
+        std::snprintf(line, sizeof line, "Pipeline binaries: cleared %lld leftover files (%.1f GB) that are no longer needed",
+                      files, size / 1073741824.0);
+        say(line);
+    }).detach();
+}
+#else
 uint64_t time_ns() {
     FILETIME ft;
     GetSystemTimePreciseAsFileTime(&ft);
@@ -312,6 +420,7 @@ void remove_pipeline_binaries(const std::string &cache) {
     if (t) CloseHandle(t);
     else delete folders;
 }
+#endif
 
 struct Inputs {
     Env original;          // environment the starter process itself was given
@@ -328,7 +437,11 @@ std::string orig(const Inputs &in, const std::string &k, const std::string &fall
 // Game version as system.cpp's starter_version reports it; empty if it can't be determined.
 std::string game_version(const std::string &game) {
     char buf[256];
+#ifdef _WIN32
     return un_system("starter_version", widen(game).c_str(), buf, sizeof buf) == 0 ? buf : "";
+#else
+    return un_system("starter_version", game.c_str(), buf, sizeof buf) == 0 ? buf : "";
+#endif
 }
 
 // Produces the full environment for the runtime process. Lines meant for the starter's log are appended to `prints`.
@@ -421,13 +534,22 @@ Env build(const Inputs &in, std::vector<std::string> &prints, std::string &captu
     // and the trigger files that can be poked while the game runs (capture, readback, DMA). Enabled by default; only
     // UNCHARTED_DIAGNOSTICS=0 from the launcher disables it.
     const bool diagnostics = env.get("UNCHARTED_DIAGNOSTICS", "1") != "0";
+#ifdef _WIN32   // the MSYS2 CLANG64 runtime DLLs of a development build (Linux finds its libraries without this)
     env.set("PATH", join(norm(env.get("MSYS2_ROOT", "C:/msys64")), "clang64\\bin") + ";" + env.get("PATH", ""));
+#endif
     // UNCHARTED_TEST_GPU_USER_DIR moves the GPU caches elsewhere, so a test can begin with no shader cache at all.
     std::string gpu_dir = env.get("UNCHARTED_TEST_GPU_USER_DIR");
     env.set("GOW3_GPU_USER_DIR", gpu_dir.empty() ? in.user : gpu_dir);
     std::string settings = join(in.user, "probe-" + in.game_key + ".ini");
     if (!exists(settings) && exists(join(in.user, "probe.ini")))   // one probe.ini used to serve all three games
+#ifdef _WIN32
         CopyFileW(widen(join(in.user, "probe.ini")).c_str(), widen(settings).c_str(), FALSE);
+#else
+    {
+        std::error_code ec;
+        fs::copy_file(port::path_utf8(join(in.user, "probe.ini")), port::path_utf8(settings), fs::copy_options::overwrite_existing, ec);
+    }
+#endif
     // UNCHARTED_CONFIG_FILE points the runtime at a different settings file, for tests that must leave the player's
     // own file untouched.
     std::string config_file = orig(in, "UNCHARTED_CONFIG_FILE");
@@ -601,8 +723,12 @@ Env build(const Inputs &in, std::vector<std::string> &prints, std::string &captu
     if (exists(test_env)) {
         std::string data;
         if (!read_file(test_env, data)) throw Failure{"cannot read " + test_env};
+#ifdef _WIN32
         if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, data.data(), (int)data.size(), nullptr, 0) == 0 && !data.empty())
             throw Failure{"test-env.txt is not UTF-8"};
+#else
+        if (utf8_replace(data) != data) throw Failure{"test-env.txt is not UTF-8"};   // a bad byte would have been replaced
+#endif
         for (std::string line : lines_of(universal(data))) {
             line = strip(line);
             if (line.empty() || line[0] == '#' || line.find('=') == std::string::npos) continue;
@@ -733,15 +859,3 @@ UN_API int un_runtime_env(const char *inputs_json, char *out, int cap) {
 }
 
 }  // extern "C"
-
-#else   // Linux: the runtime's environment comes with the game start (docs/WINDOWS-DEPENDENCIES.md §13 phase 2)
-
-extern "C" {
-
-UN_API int un_runtime_env(const char *inputs_json, char *out, int cap) {
-    return port::not_yet_answer("runtime environment", 1, out, cap);
-}
-
-}  // extern "C"
-
-#endif

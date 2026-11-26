@@ -26,6 +26,7 @@
 #include "u3fix.hpp"
 
 #include <cstdio>
+#ifdef _WIN32
 #include <windows.h>
 #include <tlhelp32.h>
 
@@ -42,6 +43,15 @@ int wmain(int argc, wchar_t **argv) {
     std::vector<std::string> a;
     for (int i = 2; i < argc; i++) a.push_back(narrow(argv[i]));
     std::string step = argc > 1 ? narrow(argv[1]) : "";
+#else
+#include <csignal>
+
+int main(int argc, char **argv) {   // Linux: the arguments are UTF-8 already
+    std::signal(SIGPIPE, SIG_IGN);    // a child that ends early fails the write, as on Windows, instead of ending us
+    std::vector<std::string> a;
+    for (int i = 2; i < argc; i++) a.push_back(argv[i]);
+    std::string step = argc > 1 ? argv[1] : "";
+#endif
     try {
         if (step == "remove-lab") return u3::remove_lab(a);
         if (step == "remove-rpcn-page") return u3::remove_rpcn_page(a);

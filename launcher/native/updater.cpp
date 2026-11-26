@@ -28,6 +28,14 @@
 #include <windows.h>
 #include <bcrypt.h>
 #include <winhttp.h>
+#else
+// Linux: HTTPS through libcurl, SHA-256 from sha256.h; staging the tarball and the swap come in phase 7
+// (docs/WINDOWS-DEPENDENCIES.md §7.6, §13)
+#include "sha256.h"
+#include <cerrno>
+#include <curl/curl.h>
+#include <mutex>
+#endif
 
 #include <algorithm>
 #include <string>
@@ -39,12 +47,17 @@ using json::Value;
 
 const char *const REPOSITORY = "UC-Resurrected/UCMR";   // the project's home (releases page)
 const char *const REPOSITORIES[] = {"UC-Resurrected/UCMR", "fidalgojoao/UCMR"};   // where releases are looked for
+#ifdef _WIN32
 const char *const ASSET = "UCMR_windows.zip";
 const char *const OLD_ASSET = "Uncharted-windows.zip";   // releases before 0.10.156 only have this name
 // Files a downloaded package needs before it may replace this install: the launcher exe, its native DLL, the runtime
 // and the package's own update installer. None of these is Python, so packages that no longer ship Python qualify.
 const char *const REQUIRED[] = {"UCMR_Launcher.exe", "VERSION", "launcher/native/uncharted_native.dll",
                                 "tools/apply_update.exe", "gow3_pc/out/gow3-probe.exe"};
+#else
+const char *const ASSET = "UCMR_linux.tar.gz";   // the Linux package (§7.7); it never had another name
+const char *const OLD_ASSET = ASSET;
+#endif
 
 struct UpdateError { std::string message; };
 
@@ -53,6 +66,7 @@ int give(const std::string &s, char *out, int cap) {
     std::memcpy(out, s.c_str(), s.size() + 1);
     return 0;
 }
+#ifdef _WIN32
 std::string utf8(const std::wstring &w) {
     if (w.empty()) return std::string();
     int n = WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(), nullptr, 0, nullptr, nullptr);
@@ -88,6 +102,21 @@ std::string win_error(DWORD code) {
     while (!t.empty() && (t.back() == L'\n' || t.back() == L'\r' || t.back() == L' ' || t.back() == L'.')) t.pop_back();
     return "[WinError " + std::to_string(code) + "] " + utf8(t);
 }
+#else
+using DWORD = unsigned long;   // the byte count type of the HTTP reads, which the shared code below names
+
+std::string utf8(const std::wstring &w) { return port::utf8(w); }
+std::wstring widen(const std::string &s) { return port::wide(s); }
+std::wstring env(const wchar_t *name) {
+    std::string v;
+    return port::env(port::utf8(std::wstring(name)).c_str(), v) ? port::wide(v) : std::wstring();
+}
+std::wstring join(const std::wstring &a, const std::wstring &b) {
+    if (a.empty()) return b;
+    return (a.back() == L'\\' || a.back() == L'/') ? a + b : a + L"/" + b;
+}
+std::string os_error(int code) { return "[Errno " + std::to_string(code) + "] " + std::strerror(code); }
+#endif
 
 // ------------------------------------------------------------------------------------------------ version numbers
 
@@ -118,6 +147,7 @@ std::string version_text(const std::vector<long long> &v) {
 }
 
 // Version from the root's VERSION file; empty when the file is absent (a source checkout).
+#ifdef _WIN32
 std::vector<long long> installed_version(const std::wstring &root) {
     HANDLE h = CreateFileW(join(root, L"VERSION").c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
     if (h == INVALID_HANDLE_VALUE) return {};
@@ -127,9 +157,17 @@ std::vector<long long> installed_version(const std::wstring &root) {
     CloseHandle(h);
     return parse_version(std::string(buf, got));
 }
+#else
+std::vector<long long> installed_version(const std::wstring &root) {
+    std::vector<uint8_t> head;   // the first 255 bytes, as on Windows
+    if (!port::read_part(port::path(join(root, L"VERSION")), 0, 255, head)) return {};
+    return parse_version(std::string(head.begin(), head.end()));
+}
+#endif
 
 // ------------------------------------------------------------------------------------------------ HTTPS (WinHTTP)
 
+#ifdef _WIN32
 bool allowed_url(const std::wstring &url) {
     URL_COMPONENTS u{};
     u.dwStructSize = sizeof u;
@@ -203,6 +241,146 @@ struct Http {
         return got;
     }
 };
+#else
+// Linux: the same rules through libcurl. https always; plain http only for 127.0.0.1 while UNCHARTED_UPDATE_API is set.
+bool allowed_url(const std::wstring &url) {
+    const std::string u = utf8(url);
+    const size_t colon = u.find("://");
+    if (colon == std::string::npos) return false;
+    std::string scheme = u.substr(0, colon);
+    for (char &c : scheme) c = (char)tolower((unsigned char)c);
+    std::string host = u.substr(colon + 3);
+    host = host.substr(0, host.find_first_of("/?#"));
+    if (host.rfind('@') != std::string::npos) host = host.substr(host.rfind('@') + 1);
+    host = host.substr(0, host.find(':'));
+    if (host.empty()) return false;
+    if (scheme == "https") return true;
+    return scheme == "http" && host == "127.0.0.1" && !env(L"UNCHARTED_UPDATE_API").empty();
+}
+
+std::string http_error_text(CURLcode code, const char *detail) {   // the Windows body's texts, Linux's errno wording
+    if (code == CURLE_OPERATION_TIMEDOUT) return "No data arrived in time (timeout)";
+    if (code == CURLE_COULDNT_RESOLVE_HOST) return "<urlopen error [Errno -2] Name or service not known>";
+    if (code == CURLE_COULDNT_CONNECT) return "<urlopen error [Errno 111] Connection refused>";
+    return std::string("<urlopen error ") + (detail && *detail ? detail : curl_easy_strerror(code)) + ">";
+}
+
+// The Windows body's interface: open() sends the GET and leaves the final status in `status`, read() hands out the
+// body chunk by chunk (0 at its end); failures are thrown as text. libcurl's multi interface runs the transfer only
+// while read() waits for bytes, so a download never buffers more than one network chunk.
+struct Http {
+    CURL *easy = nullptr;
+    CURLM *multi = nullptr;
+    curl_slist *headers = nullptr;
+    DWORD status = 0;
+    std::string body, reason;   // received and not yet read; the last status line's reason phrase
+    size_t body_at = 0;
+    bool done = false;
+    CURLcode result = CURLE_OK;
+    char error[CURL_ERROR_SIZE] = "";
+    ~Http() {
+        if (multi && easy) curl_multi_remove_handle(multi, easy);
+        if (easy) curl_easy_cleanup(easy);
+        if (multi) curl_multi_cleanup(multi);
+        if (headers) curl_slist_free_all(headers);
+    }
+    static size_t on_body(char *p, size_t size, size_t n, void *self) {
+        ((Http *)self)->body.append(p, size * n);
+        return size * n;
+    }
+    static size_t on_header(char *p, size_t size, size_t n, void *self) {   // "HTTP/1.1 404 Not Found"
+        const std::string line(p, size * n);
+        if (line.compare(0, 5, "HTTP/") == 0) {
+            const size_t a = line.find(' '), b = a == std::string::npos ? a : line.find(' ', a + 1);
+            std::string r = b == std::string::npos ? "" : line.substr(b + 1);
+            while (!r.empty() && (r.back() == '\r' || r.back() == '\n' || r.back() == ' ')) r.pop_back();
+            ((Http *)self)->reason = r;
+        }
+        return size * n;
+    }
+    // runs the transfer until unread body bytes are there or it has ended
+    void pump() {
+        while (!done && body_at >= body.size()) {
+            int running = 0;
+            if (curl_multi_perform(multi, &running) != CURLM_OK) {
+                result = CURLE_RECV_ERROR;
+                done = true;
+                break;
+            }
+            if (!running) {
+                int left = 0;
+                while (CURLMsg *m = curl_multi_info_read(multi, &left))
+                    if (m->msg == CURLMSG_DONE) result = m->data.result;
+                done = true;
+                break;
+            }
+            if (body_at < body.size()) break;
+            curl_multi_poll(multi, nullptr, 0, 1000, nullptr);
+        }
+    }
+    void open(const std::wstring &url, const std::wstring &extra, int timeout_s) {
+        static std::once_flag once;
+        std::call_once(once, []() { curl_global_init(CURL_GLOBAL_DEFAULT); });
+        easy = curl_easy_init();
+        multi = curl_multi_init();
+        if (!easy || !multi) throw std::string("<urlopen error no HTTP connection could be set up>");
+        const std::string u = utf8(url);
+        curl_easy_setopt(easy, CURLOPT_URL, u.c_str());   // libcurl keeps its own copy of every string
+        curl_easy_setopt(easy, CURLOPT_USERAGENT, "Uncharted-Launcher");
+        curl_easy_setopt(easy, CURLOPT_NOSIGNAL, 1L);
+        curl_easy_setopt(easy, CURLOPT_ERRORBUFFER, error);
+        // redirects are followed like WinHTTP does: up to 10, and never from https down to plain http
+        curl_easy_setopt(easy, CURLOPT_FOLLOWLOCATION, 1L);
+        curl_easy_setopt(easy, CURLOPT_MAXREDIRS, 10L);
+        if (u.compare(0, 8, "https://") == 0 || u.compare(0, 8, "HTTPS://") == 0) {
+#if LIBCURL_VERSION_NUM >= 0x075500
+            curl_easy_setopt(easy, CURLOPT_REDIR_PROTOCOLS_STR, "https");
+#else
+            curl_easy_setopt(easy, CURLOPT_REDIR_PROTOCOLS, (long)CURLPROTO_HTTPS);
+#endif
+        }
+        // WinHttpSetTimeouts(ms, ms, ms, ms): name lookup and connection within the time, then no gap without data
+        // longer than it
+        curl_easy_setopt(easy, CURLOPT_CONNECTTIMEOUT_MS, (long)timeout_s * 1000);
+        curl_easy_setopt(easy, CURLOPT_LOW_SPEED_LIMIT, 1L);
+        curl_easy_setopt(easy, CURLOPT_LOW_SPEED_TIME, (long)timeout_s);
+        const std::string lines = utf8(extra);
+        for (size_t at = 0; at < lines.size();) {
+            size_t end = lines.find("\r\n", at);
+            if (end == std::string::npos) end = lines.size();
+            if (end > at) headers = curl_slist_append(headers, lines.substr(at, end - at).c_str());
+            at = end + 2;
+        }
+        if (headers) curl_easy_setopt(easy, CURLOPT_HTTPHEADER, headers);
+        curl_easy_setopt(easy, CURLOPT_WRITEFUNCTION, &Http::on_body);
+        curl_easy_setopt(easy, CURLOPT_WRITEDATA, this);
+        curl_easy_setopt(easy, CURLOPT_HEADERFUNCTION, &Http::on_header);
+        curl_easy_setopt(easy, CURLOPT_HEADERDATA, this);
+        curl_multi_add_handle(multi, easy);
+        pump();   // up to the first body bytes (or the end): the final status is known then
+        long code = 0;
+        curl_easy_getinfo(easy, CURLINFO_RESPONSE_CODE, &code);
+        status = (DWORD)code;
+        if (!code && result != CURLE_OK) throw http_error_text(result, error);
+        if (status >= 400) throw "HTTP Error " + std::to_string(status) + ": " + reason;
+    }
+    DWORD read(char *buf, DWORD cap) {
+        pump();
+        if (body_at < body.size()) {
+            const size_t n = std::min<size_t>(cap, body.size() - body_at);
+            std::memcpy(buf, body.data() + body_at, n);
+            body_at += n;
+            if (body_at == body.size()) {
+                body.clear();
+                body_at = 0;
+            }
+            return (DWORD)n;
+        }
+        if (result != CURLE_OK) throw http_error_text(result, error);
+        return 0;
+    }
+};
+#endif
 
 // Where releases are looked for: the project's organisation first, then the old personal repository (the project moves
 // to the organisation; launchers that know both find the releases wherever they are published).
@@ -292,6 +470,7 @@ Value latest_release(const std::vector<long long> &current, int timeout) {
 
 std::atomic<long long> g_done{0}, g_total{0};
 
+#ifdef _WIN32
 struct Sha256 {
     BCRYPT_ALG_HANDLE alg = nullptr;
     BCRYPT_HASH_HANDLE hash = nullptr;
@@ -318,6 +497,14 @@ struct Sha256 {
         return o;
     }
 };
+#else
+struct Sha256 {   // the shared implementation (sha256.h)
+    sha256::Hash hash;
+    void reset() { hash.reset(); }
+    void update(const char *data, size_t size) { hash.update(data, size); }
+    std::string hex() { return hash.hex(); }
+};
+#endif
 
 // Saves the release's zip in update\ and verifies its size and SHA-256. If the connection hangs or drops, a new one is
 // made and the transfer resumes at the byte where it stopped (HTTP Range). It gives up after `attempts` consecutive
@@ -327,15 +514,26 @@ std::wstring download(const Value &release, const std::wstring &root, int attemp
     const std::wstring url = widen(url_v && url_v->kind == Value::String ? url_v->s : "");
     if (!allowed_url(url)) throw UpdateError{"Not an HTTPS download, so it was refused: " + utf8(url)};
     const std::wstring folder = join(root, L"update");
+#ifdef _WIN32
     if (!CreateDirectoryW(folder.c_str(), nullptr) && GetLastError() != ERROR_ALREADY_EXISTS)
         throw UpdateError{win_error(GetLastError()) + ": '" + utf8(folder) + "'"};
+#else
+    std::error_code made;
+    std::filesystem::create_directory(port::path(folder), made);
+    if (made) throw UpdateError{os_error(made.value()) + ": '" + utf8(folder) + "'"};
+#endif
     const std::wstring target = join(folder, widen(ASSET)), partial = target + L".part";
     const Value *size_v = release.get("size");
     const long long size = size_v && size_v->kind == Value::Int ? size_v->i : 0;
     const Value *sha_v = release.get("sha256");
     const std::string want = sha_v && sha_v->kind == Value::String ? sha_v->s : "";
+#ifdef _WIN32
     HANDLE out = CreateFileW(partial.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (out == INVALID_HANDLE_VALUE) throw UpdateError{win_error(GetLastError()) + ": '" + utf8(partial) + "'"};
+#else
+    std::FILE *out = std::fopen(port::path(partial).c_str(), "wb");
+    if (!out) throw UpdateError{os_error(errno) + ": '" + utf8(partial) + "'"};
+#endif
     Sha256 digest;
     long long done = 0;
     int failures = 0;
@@ -353,15 +551,25 @@ std::wstring download(const Value &release, const std::wstring &root, int attemp
                 Http http;
                 http.open(url, headers, timeout);
                 if (done && http.status != 206) {   // server sent the whole file instead of the range: start over
+#ifdef _WIN32
                     SetFilePointer(out, 0, nullptr, FILE_BEGIN);
                     SetEndOfFile(out);
+#else
+                    if (std::fflush(out) != 0 || ::ftruncate(fileno(out), 0) != 0 || std::fseek(out, 0, SEEK_SET) != 0)
+                        throw UpdateError{os_error(errno) + ": '" + utf8(partial) + "'"};
+#endif
                     digest.reset();
                     done = 0;
                 }
                 while (DWORD got = http.read(buf.data(), (DWORD)buf.size())) {
+#ifdef _WIN32
                     DWORD put = 0;
                     if (!WriteFile(out, buf.data(), got, &put, nullptr) || put != got)
                         throw UpdateError{win_error(GetLastError()) + ": '" + utf8(partial) + "'"};
+#else
+                    if (std::fwrite(buf.data(), 1, got, out) != got)
+                        throw UpdateError{os_error(errno) + ": '" + utf8(partial) + "'"};
+#endif
                     digest.update(buf.data(), got);
                     done += got;
                     g_done = done;
@@ -373,16 +581,29 @@ std::wstring download(const Value &release, const std::wstring &root, int attemp
             } catch (const std::string &error) {   // time-outs, dropped connections and HTTP error statuses land here
                 failures = done - start >= (1 << 20) ? 0 : failures + 1;
                 if (failures >= attempts)
+#ifdef _WIN32
                     throw UpdateError{"The download from GitHub keeps breaking off (" + error + ").\n\nPress UPDATE again "
                                       "later, or get UCMR_windows.zip from the releases page yourself and unpack it "
                                       "over this folder (the saves and settings in analysis\\ stay)."};
                 Sleep((DWORD)(std::min(pause * std::max(failures, 1), 15.0) * 1000));
+#else
+                    throw UpdateError{"The download from GitHub keeps breaking off (" + error + ").\n\nPress UPDATE again "
+                                      "later, or get UCMR_linux.tar.gz from the releases page yourself and unpack it "
+                                      "over this folder (the saves and settings in analysis/ stay)."};
+                std::this_thread::sleep_for(
+                    std::chrono::milliseconds((long long)(std::min(pause * std::max(failures, 1), 15.0) * 1000)));
+#endif
             }
         }
     } catch (...) {
+#ifdef _WIN32
         CloseHandle(out);
+#else
+        std::fclose(out);
+#endif
         throw;
     }
+#ifdef _WIN32
     CloseHandle(out);
     if (size && done != size) {
         DeleteFileW(partial.c_str());
@@ -394,10 +615,30 @@ std::wstring download(const Value &release, const std::wstring &root, int attemp
     }
     if (!MoveFileExW(partial.c_str(), target.c_str(), MOVEFILE_REPLACE_EXISTING))
         throw UpdateError{win_error(GetLastError()) + ": '" + utf8(partial) + "' -> '" + utf8(target) + "'"};
+#else
+    std::error_code gone;
+    if (std::fclose(out) != 0) {   // a write error may show only now
+        const int why = errno;
+        std::filesystem::remove(port::path(partial), gone);
+        throw UpdateError{os_error(why) + ": '" + utf8(partial) + "'"};
+    }
+    if (size && done != size) {
+        std::filesystem::remove(port::path(partial), gone);
+        throw UpdateError{"Only part of the download arrived (" + std::to_string(done) + " of " + std::to_string(size) + " bytes)."};
+    }
+    if (digest.hex() != want) {
+        std::filesystem::remove(port::path(partial), gone);
+        throw UpdateError{"The downloaded file's SHA-256 differs from the release's, so it was not installed."};
+    }
+    if (!port::replace(port::path(partial), port::path(target)))
+        throw UpdateError{os_error(errno) + ": '" + utf8(partial) + "' -> '" + utf8(target) + "'"};
+#endif
     return target;
 }
 
 // ------------------------------------------------------------------------------------------------ zip reading (inflate)
+
+#ifdef _WIN32   // staging and applying a package: Linux in phase 7 (the tarball), see un_update_stage below
 
 using inflate::crc32;
 using inflate::Inflater;
@@ -654,6 +895,12 @@ void cleanup(const std::wstring &root) {
     // the whole folder (old, staged, the zip and its .part, and anything an older launcher left there)
     remove_tree(folder);
 }
+#else
+void cleanup(const std::wstring &root) {   // links go, their targets are not entered (std::filesystem::remove_all)
+    std::error_code ignored;
+    std::filesystem::remove_all(port::path(join(root, L"update")), ignored);
+}
+#endif
 
 std::vector<long long> version_of(const char *text) { return parse_version(text ? text : ""); }
 
@@ -705,6 +952,7 @@ UN_API void un_update_progress(long long *done, long long *total) {
 // Extracts the downloaded zip into root\update\staged, checks it against `version` (e.g. "0.10.63") and writes the
 // folder to out. Returns 1 with the reason in out when the package is unusable.
 UN_API int un_update_stage(const un_path_char *archive, const un_path_char *root, const char *version, char *out, int cap) {
+#ifdef _WIN32
     try {
         return give(utf8(stage(port::wtext(archive, L""), port::wtext(root, L"."), version_of(version))), out, cap);
     } catch (const UpdateError &e) {
@@ -714,11 +962,15 @@ UN_API int un_update_stage(const un_path_char *archive, const un_path_char *root
         int status = give("out of memory", out, cap);
         return status < 0 ? status : 1;
     }
+#else   // unpacking UCMR_linux.tar.gz and swapping the folders: phase 7 (docs/WINDOWS-DEPENDENCIES.md §7.6, §13)
+    return port::not_yet_answer("launcher update (unpacking)", 1, out, cap);
+#endif
 }
 
 // Launches the staged version's installer, which then waits for this process to end. Returns 1 with the reason in
 // out if it would not start.
 UN_API int un_update_start_apply(const un_path_char *root, const un_path_char *staged, char *out, int cap) {
+#ifdef _WIN32
     try {
         start_apply(port::wtext(root, L"."), port::wtext(staged, L"."));
         return give("", out, cap);
@@ -726,45 +978,12 @@ UN_API int un_update_start_apply(const un_path_char *root, const un_path_char *s
         int status = give(e.message, out, cap);
         return status < 0 ? status : 1;
     }
+#else   // phase 7, as above
+    return port::not_yet_answer("launcher update (installing)", 1, out, cap);
+#endif
 }
 
 // Clears out update\ after an update finished or was given up.
 UN_API void un_update_cleanup(const un_path_char *root) { cleanup(port::wtext(root, L".")); }
 
 }  // extern "C"
-
-#else   // Linux: HTTP, the tarball asset and the swap come in phases 2 and 7 (docs/WINDOWS-DEPENDENCIES.md §13)
-
-extern "C" {
-
-UN_API int un_update_installed(const un_path_char *root, char *out, int cap) {
-    port::not_yet("launcher update");
-    return port::give("", out, cap) < 0 ? -1 : 2;   // no VERSION: treated like a source checkout
-}
-
-UN_API int un_update_latest(const char *current, int timeout, char *out, int cap) {
-    return port::give("null", out, cap);   // nothing newer
-}
-
-UN_API int un_update_download(const char *release_json, const un_path_char *root, char *out, int cap) {
-    return port::not_yet_answer("launcher update", 1, out, cap);
-}
-
-UN_API void un_update_progress(long long *done, long long *total) {
-    if (done) *done = 0;
-    if (total) *total = 0;
-}
-
-UN_API int un_update_stage(const un_path_char *archive, const un_path_char *root, const char *version, char *out, int cap) {
-    return port::not_yet_answer("launcher update", 1, out, cap);
-}
-
-UN_API int un_update_start_apply(const un_path_char *root, const un_path_char *staged, char *out, int cap) {
-    return port::not_yet_answer("launcher update", 1, out, cap);
-}
-
-UN_API void un_update_cleanup(const un_path_char *root) {}
-
-}  // extern "C"
-
-#endif

@@ -29,8 +29,14 @@
 #include "ps3keep.hpp"
 #include "recipe.hpp"
 
+#ifdef _WIN32
 #include <windows.h>
 #include <winioctl.h>
+#else
+#include "port.h"   // launcher/native/port.h: links, replace, program names
+#include <csignal>
+#include <sys/stat.h>
+#endif
 
 #include <chrono>
 #include <cstdio>
@@ -117,7 +123,11 @@ std::string find_ps3_elf(const std::vector<std::string> &folders, const std::str
                     }
                     const std::string n = S(e.path().filename());
                     if (!ends(lower(n), ".elf") || !e.is_regular_file(e2)) continue;
+#ifdef _WIN32
                     FILE *f = _wfopen(e.path().c_str(), L"rb");
+#else
+                    FILE *f = std::fopen(e.path().c_str(), "rb");
+#endif
                     if (!f) continue;
                     char m[4] = {};
                     const size_t got = std::fread(m, 1, 4, f);
@@ -171,7 +181,11 @@ fs::path usable_data2(const std::vector<std::string> &folders) {
 // addresses: the program prints none, and the DNS value is not logged).
 std::string fetch_data2(const std::string &dns, const std::string &ps3_elf, const fs::path &target, const fs::path &same_as = {},
                         bool *same = nullptr) {
+#ifdef _WIN32
     const fs::path exe = patcher_dir() / "online" / "uncharted_online.exe";
+#else
+    const fs::path exe = patcher_dir() / "online" / port::exe_name("uncharted_online");
+#endif
     if (!is_file(exe)) return "the online program is missing (" + S(exe) + ")";
     std::vector<std::string> fails;
     long long files = 0, done = 0;
@@ -312,6 +326,21 @@ std::string ensure_data2(Args &a, const fs::path &data, const std::string &ps3_e
 }
 
 // ------------------------------------------------------------------------------------------------ staged updates
+#ifndef _WIN32
+// Linux: CopyFileW's counterpart, the file and its modification time
+bool copy_file_time(const fs::path &src, const fs::path &dst) {
+    std::error_code ec;
+    if (!fs::copy_file(src, dst, fs::copy_options::overwrite_existing, ec)) return false;
+    fs::last_write_time(dst, fs::last_write_time(src, ec), ec);
+    return true;
+}
+// MoveFileExW(from, to, 0) whose result nobody checks
+void rename_quietly(const fs::path &from, const fs::path &to) {
+    std::error_code ec;
+    fs::rename(from, to, ec);
+}
+#endif
+
 void copytree(const fs::path &src, const fs::path &dst) {   // shutil.copytree: files with their times
     fs::create_directories(dst);
     std::error_code ec;
@@ -319,7 +348,11 @@ void copytree(const fs::path &src, const fs::path &dst) {   // shutil.copytree: 
         const fs::path d = dst / e.path().filename();
         std::error_code e2;
         if (e.is_directory(e2)) copytree(e.path(), d);
+#ifdef _WIN32
         else if (!CopyFileW(e.path().c_str(), d.c_str(), FALSE)) throw u3::Stop("cannot copy " + S(e.path()));
+#else
+        else if (!copy_file_time(e.path(), d)) throw u3::Stop("cannot copy " + S(e.path()));
+#endif
     }
 }
 
@@ -365,6 +398,7 @@ bool try_swap(const fs::path &data) {
     const fs::path nxt = data / "recipe-next", cur = data / "recipe";
     if (!present(nxt / ".ready")) return false;
     const fs::path old = data / P(fmt("recipe-old-%lld", (long long)std::time(nullptr)));
+#ifdef _WIN32
     if (present(cur) && !MoveFileExW(cur.c_str(), old.c_str(), 0)) {
         log(fmt("update ready, waiting to swap it in (files in use: [WinError %lu])", GetLastError()));
         return false;
@@ -375,6 +409,21 @@ bool try_swap(const fs::path &data) {
         log(fmt("update ready, waiting to swap it in ([WinError %lu])", e));
         return false;
     }
+#else
+    std::error_code moved;   // Linux renames folders with open files, so this only fails on a real problem
+    if (present(cur)) fs::rename(cur, old, moved);
+    if (moved) {
+        log("update ready, waiting to swap it in (" + moved.message() + ")");
+        return false;
+    }
+    fs::rename(nxt, cur, moved);
+    if (moved) {
+        std::error_code back;
+        fs::rename(old, cur, back);   // put the playable import back
+        log("update ready, waiting to swap it in (" + moved.message() + ")");
+        return false;
+    }
+#endif
     std::error_code ec;
     fs::remove(cur / ".ready", ec);
     log("update swapped in: " + S(cur));
@@ -416,14 +465,21 @@ void discard_next(const fs::path &data) {
     // an update that is not applied: delete <data>/recipe-next (a full copy of the import), keeping its caches
     const fs::path nxt = data / "recipe-next", cur = data / "recipe";
     if (!is_dir(nxt)) return;
+#ifdef _WIN32
     if (is_dir(nxt / "scratch") && !present(cur / "scratch") && is_dir(cur)) MoveFileExW((nxt / "scratch").c_str(), (cur / "scratch").c_str(), 0);
+#else
+    if (is_dir(nxt / "scratch") && !present(cur / "scratch") && is_dir(cur)) rename_quietly(nxt / "scratch", cur / "scratch");
+#endif
     const uint64_t size = tree_size(nxt);
     if (rmtree_retry(nxt)) log(fmt("update not applied: its copy %s was deleted (%.1f GB)", S(nxt.filename()).c_str(), size / 1e9));
     else log("update not applied: " + S(nxt.filename()) + " could not be deleted yet (files in use); it is reused or removed later");
 }
 
 // ------------------------------------------------------------------------------------------------ the PS4 view
-// a junction at `link` to the folder `target` (the reparse data a mount point needs)
+// a junction at `link` to the folder `target` (the reparse data a mount point needs); Linux: a symlink
+#ifndef _WIN32
+bool make_junction(const fs::path &target, const fs::path &link) { return port::dir_link(fs::absolute(target), link); }
+#else
 bool make_junction(const fs::path &target, const fs::path &link) {
     std::wstring t = fs::absolute(target).wstring();
     if (!CreateDirectoryW(link.c_str(), nullptr)) return false;
@@ -451,22 +507,35 @@ bool make_junction(const fs::path &target, const fs::path &link) {
     if (!ok) RemoveDirectoryW(link.c_str());
     return ok != 0;
 }
+#endif
 
 void link_file(const fs::path &src, const fs::path &dst, uint64_t &copied, uint64_t budget) {
     // dst as a hard link to src (same drive), else a copy
+#ifdef _WIN32
     if (CreateHardLinkW(dst.c_str(), src.c_str(), nullptr)) return;
+#else
+    if (port::hard_link(src, dst)) return;
+#endif
     std::error_code ec;
     copied += fs::file_size(src, ec);
     if (copied > budget)
         throw u3::Stop(fmt("the game folder and its update are on another drive than the multiplayer data, and the files to combine exceed %llu MB",
                            (unsigned long long)(budget >> 20)));
+#ifdef _WIN32
     if (!CopyFileW(src.c_str(), dst.c_str(), FALSE)) throw u3::Stop("cannot copy " + S(src));
+#else
+    if (!copy_file_time(src, dst)) throw u3::Stop("cannot copy " + S(src));
+#endif
 }
 
 void merge(const std::optional<fs::path> &base, const std::optional<fs::path> &update, const fs::path &view, uint64_t &copied, uint64_t budget) {
     // view = base with update laid over it: folders only one side has are junctions to it, files hard links (or copies),
     // folders both sides have are merged one level further down
+#ifdef _WIN32
     if (!CreateDirectoryW(view.c_str(), nullptr)) throw u3::Stop("cannot create " + S(view));
+#else
+    if (std::error_code made; !fs::create_directory(view, made)) throw u3::Stop("cannot create " + S(view));
+#endif
     std::map<std::string, fs::path> names, over;
     std::error_code ec;
     if (base && is_dir(*base))
@@ -503,12 +572,19 @@ std::string ps4_view(const Args &a, const fs::path &data) {
         return a.ps4;
     }
     const fs::path base = P(a.ps4), update = P(a.ps4_update);
+#ifdef _WIN32
     auto mt = [](const fs::path &p) {
         WIN32_FILE_ATTRIBUTE_DATA d{};
         GetFileAttributesExW(p.c_str(), GetFileExInfoStandard, &d);
         const int64_t t = int64_t(uint64_t(d.ftLastWriteTime.dwHighDateTime) << 32 | d.ftLastWriteTime.dwLowDateTime);
         return (long long)((t - 116444736000000000LL) / 10000000);
     };
+#else
+    auto mt = [](const fs::path &p) {   // seconds since 1970 (as on Windows: before 1970 when it is missing)
+        struct stat st;
+        return ::stat(p.c_str(), &st) == 0 ? (long long)st.st_mtime : -11644473600LL;
+    };
+#endif
     const std::string stamp = S(base) + "|" + S(update) + "|" + std::to_string(mt(base)) + "|" + std::to_string(mt(update)) + "|v1";
     if (is_dir(view) && present(sf) && read_text(sf) == stamp) return S(view);
     if (present(view)) remove_view(view);
@@ -565,7 +641,11 @@ RecipeResult run_recipe(const Args &a, const fs::path &data, const fs::path &ps4
     else ra.allow_missing_u2 = true;   // no step reads Uncharted 2 (recipe/RECIPE.md): optional here
     std::vector<fs::path> bins = bin_dirs(a.port);
     std::string path;
+#ifdef _WIN32
     for (const auto &d : bins) path += S(d) + ";";
+#else
+    for (const auto &d : bins) path += S(d) + ":";
+#endif
     if (const char *p = std::getenv("PATH")) path += p;
     ra.env.push_back({"PATH", path});
     if (!ps4_elf.empty()) ra.env.push_back({"RECIPE_PS4_ELF", S(ps4_elf)});
@@ -573,7 +653,11 @@ RecipeResult run_recipe(const Args &a, const fs::path &data, const fs::path &ps4
         ra.env.push_back({"RECIPE_PS3_ELF", ps3_elf});
         ra.env.push_back({"U3_PS3_ELF", ps3_elf});
     }
+#ifdef _WIN32
     const std::string ffmpeg = find_program(bins, "ffmpeg", {"C:\\msys64\\clang64\\bin\\ffmpeg.exe", "C:\\msys64\\ucrt64\\bin\\ffmpeg.exe"});
+#else
+    const std::string ffmpeg = find_program(bins, "ffmpeg");   // the package's, else the system's
+#endif
     if (!ffmpeg.empty()) ra.env.push_back({"RECIPE_FFMPEG", ffmpeg});
     const std::string objdump = find_program(bins, "objdump");
     log("ffmpeg: " + (ffmpeg.empty() ? std::string("not found (EULA pages are written without it; banks with MP3 samples are skipped)") : ffmpeg));
@@ -766,7 +850,11 @@ int import_main(Args a) {
     }
     Value state = old;
     state.set("status", str("running"));
+#ifdef _WIN32
     state.set("pid", num((long long)GetCurrentProcessId()));
+#else
+    state.set("pid", num((long long)port::process_id()));
+#endif
     state.set("started", str(now_text()));
     state.set("inputs", obj({{"ps4", str(a.ps4)}, {"ps3_u3", strings(a.ps3_u3)}, {"ps3_u2", str(a.ps3_u2)}}));
     state.remove("error");
@@ -898,7 +986,11 @@ int import_main(Args a) {
             "; the current files stay playable until it is swapped in");
         fs::create_directories(nxt);
         if (is_dir(data / "recipe" / "scratch") && !present(nxt / "scratch"))
+#ifdef _WIN32
             MoveFileExW((data / "recipe" / "scratch").c_str(), (nxt / "scratch").c_str(), 0);   // caches: PS3 extracts, converter trees
+#else
+            rename_quietly(data / "recipe" / "scratch", nxt / "scratch");   // caches: PS3 extracts, converter trees
+#endif
         seed_next(data / "recipe", nxt);
         state.set("staging", str(recipe_id));   // the launcher lets the game run on the current files meanwhile
         save(state);
@@ -1012,10 +1104,16 @@ int import_main(Args a) {
 
 }  // namespace
 
+#ifdef _WIN32
 int wmain(int argc, wchar_t **argv) {
     SetConsoleOutputCP(CP_UTF8);
     std::vector<std::string> v;
     for (int i = 1; i < argc; i++) v.push_back(S(fs::path(argv[i])));
+#else
+int main(int argc, char **argv) {   // Linux: the arguments are UTF-8 already
+    std::signal(SIGPIPE, SIG_IGN);    // a child that ends early fails the write, as on Windows, instead of ending us
+    std::vector<std::string> v(argv + 1, argv + argc);
+#endif
     Args a;
     try {
         // the launcher: u3import --shipped-id (the installed recipe's fingerprint, compared with state.json recipe_id)

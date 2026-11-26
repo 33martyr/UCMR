@@ -12,7 +12,12 @@
 
 #include "recipe.hpp"
 
+#ifdef _WIN32
 #include <windows.h>
+#else
+#include "port.h"   // launcher/native/port.h: hard links
+#include <sys/stat.h>
+#endif
 
 #include <fstream>
 #include <set>
@@ -190,10 +195,16 @@ bool same_file(const fs::path &a, const fs::path &b) {
 
 int64_t mtime_ns(const fs::path &p) {
     // os.stat().st_mtime_ns: nanoseconds since 1970
+#ifdef _WIN32
     WIN32_FILE_ATTRIBUTE_DATA d{};
     if (!GetFileAttributesExW(p.c_str(), GetFileExInfoStandard, &d)) return 0;
     const int64_t t = int64_t(uint64_t(d.ftLastWriteTime.dwHighDateTime) << 32 | d.ftLastWriteTime.dwLowDateTime);
     return (t - 116444736000000000LL) * 100;
+#else
+    struct stat st;
+    if (::stat(p.c_str(), &st) != 0) return 0;
+    return int64_t(st.st_mtim.tv_sec) * 1000000000LL + st.st_mtim.tv_nsec;
+#endif
 }
 
 }  // namespace
@@ -274,7 +285,11 @@ Value ps3keep_keep(const fs::path &data, const std::vector<fs::path> &roots0, co
             fs::remove(dst, ec);
         }
         fs::create_directories(dst.parent_path());
+#ifdef _WIN32
         if (CreateHardLinkW(dst.c_str(), src.c_str(), nullptr)) {
+#else
+        if (port::hard_link(src, dst)) {
+#endif
             files.set(it.rel, obj({{"size", num((long long)size)}, {"how", str("link")}}));
             linked++;
         } else {

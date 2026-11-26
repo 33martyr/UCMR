@@ -28,6 +28,11 @@
 #include "port.h"
 #ifdef _WIN32
 #include <windows.h>
+#else
+#include <cerrno>
+#include <climits>
+#include <cwchar>
+#endif
 
 #include <algorithm>
 #include <map>
@@ -56,6 +61,7 @@ struct Stop {
     int code = 1;
 };
 
+#ifdef _WIN32
 std::string utf8(const std::wstring &w) {
     if (w.empty()) return std::string();
     int n = WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(), nullptr, 0, nullptr, nullptr);
@@ -110,9 +116,55 @@ std::wstring lower(const std::wstring &s) {
                                   nullptr, nullptr, 0);
     return o;
 }
+#else
+namespace fs = std::filesystem;
+std::string utf8(const std::wstring &w) { return port::utf8(w); }
+std::wstring widen(const std::string &s) { return port::wide(s); }
+
+// the stream numbers under the Windows names, so print() and the abort message are the same code on both systems
+enum : int { STD_OUTPUT_HANDLE = 1, STD_ERROR_HANDLE = 2 };
+// Writes text to stdout or stderr as it is (a text-mode Python stream on Linux writes \n)
+void write_std(int which, const std::string &text) { port::write_all(which, text.data(), text.size()); }
+void print(const std::string &line) { write_std(STD_OUTPUT_HANDLE, line + "\n"); }
+void print_text(const std::string &text) {
+    if (!text.empty()) write_std(STD_OUTPUT_HANDLE, text.back() == '\n' ? text : text + "\n");
+}
+
+std::wstring env(const wchar_t *name) {
+    const char *v = std::getenv(port::utf8(std::wstring(name)).c_str());
+    return v ? port::wide(v) : std::wstring();
+}
+bool has_env(const wchar_t *name) { return std::getenv(port::utf8(std::wstring(name)).c_str()) != nullptr; }
+
+std::wstring lower(const std::wstring &s) {
+    std::wstring o(s);
+    for (wchar_t &c : o) c = (wchar_t)std::towlower((wint_t)c);
+    return o;
+}
+#endif
 
 // ------------------------------------------------------------------------------------------------ paths (pathlib)
 
+#ifndef _WIN32
+// Linux: Python's str(Path(p)): "/" only (a backslash of our own joins and names becomes "/"), single separators, no
+// trailing separator and no "." components
+std::wstring path_str(std::wstring p) {
+    std::replace(p.begin(), p.end(), L'\\', L'/');
+    const bool rooted = !p.empty() && p[0] == L'/';
+    std::vector<std::wstring> parts;
+    for (size_t i = 0; i <= p.size();) {
+        size_t j = p.find(L'/', i);
+        if (j == std::wstring::npos) j = p.size();
+        std::wstring part = p.substr(i, j - i);
+        if (!part.empty() && part != L".") parts.push_back(part);
+        i = j + 1;
+    }
+    std::wstring o = rooted ? L"/" : L"";
+    for (size_t k = 0; k < parts.size(); ++k) o += (k ? L"/" : L"") + parts[k];
+    if (o.empty()) o = L".";
+    return o;
+}
+#else
 // Canonical spelling of a Windows path, equal to Python's str(Path(p)): backslashes only, single separators, no
 // trailing separator and no "." components.
 std::wstring path_str(std::wstring p) {
@@ -142,10 +194,84 @@ std::wstring path_str(std::wstring p) {
     if (o.empty()) o = L".";
     return o;
 }
+#endif
 std::wstring join(const std::wstring &a, const std::wstring &b) {
     if (a.empty()) return path_str(b);
     return path_str(a + L"\\" + b);
 }
+#ifndef _WIN32
+std::wstring parent(const std::wstring &p) {
+    const std::wstring s = path_str(p);
+    const size_t cut = s.find_last_of(L'/');
+    if (cut == std::wstring::npos) return L".";
+    if (cut == 0) return L"/";
+    return s.substr(0, cut);
+}
+std::wstring name_of(const std::wstring &p) {
+    const std::wstring s = path_str(p);
+    const size_t cut = s.find_last_of(L'/');
+    return cut == std::wstring::npos ? s : s.substr(cut + 1);
+}
+// Like Python's Path.resolve(): absolute path with links followed
+std::wstring resolved(const std::wstring &p) {
+    std::error_code ec;
+    const fs::path f = fs::weakly_canonical(fs::absolute(port::path(p), ec), ec);
+    return path_str(ec ? p : port::wide(f.string()));
+}
+bool is_file(const std::wstring &p) {
+    std::error_code ec;
+    return fs::exists(port::path(p), ec) && !fs::is_directory(port::path(p), ec);
+}
+bool is_dir(const std::wstring &p) {
+    std::error_code ec;
+    return fs::is_directory(port::path(p), ec);
+}
+bool exists(const std::wstring &p) {
+    std::error_code ec;
+    return fs::exists(port::path(p), ec);
+}
+void make_dirs(const std::wstring &p) { port::ensure_dir(port::path(p)); }
+
+// The exported functions take UTF-8 paths on Linux (native.h un_path_char). These overloads take the starter's wide
+// text, so the calls below are the same code on both systems.
+std::string A(const std::wstring &w) { return port::utf8(port::path(w)); }
+int un_system(const char *what, const wchar_t *arg, char *out, int cap) { return ::un_system(what, A(arg).c_str(), out, cap); }
+int un_prepare(const wchar_t *game, const wchar_t *out_dir, const char *executable, char *out, int cap) {
+    return ::un_prepare(A(game).c_str(), A(out_dir).c_str(), executable, out, cap);
+}
+int un_link_modules(const wchar_t *game, const wchar_t *out_dir, const char *executable, const char *modules, char *out, int cap) {
+    return ::un_link_modules(A(game).c_str(), A(out_dir).c_str(), executable, modules, out, cap);
+}
+int un_content_profile(const wchar_t *game, const wchar_t *out_dir, const char *sku, char *out, int cap) {
+    return ::un_content_profile(A(game).c_str(), A(out_dir).c_str(), sku, out, cap);
+}
+int un_apply_image_patches(const wchar_t *image, const char *executable, char *out, int cap) {
+    return ::un_apply_image_patches(A(image).c_str(), executable, out, cap);
+}
+int un_render_resolution(const wchar_t *image, const char *executable, int width, int height, int multiplayer, char *out,
+                         int cap) {
+    return ::un_render_resolution(A(image).c_str(), executable, width, height, multiplayer, out, cap);
+}
+int un_hang_watchdog(unsigned long pid, const wchar_t *log, const wchar_t *dumps, int seconds, const wchar_t *root) {
+    return ::un_hang_watchdog(pid, A(log).c_str(), A(dumps).c_str(), seconds, A(root).c_str());
+}
+int un_memory_monitor(unsigned long pid, const wchar_t *folder, double seconds, char *out, int cap) {
+    return ::un_memory_monitor(pid, A(folder).c_str(), seconds, out, cap);
+}
+
+// CopyFileW's counterpart: the contents and the write time; the error number when it fails
+int copy_over(const std::wstring &from, const std::wstring &to) {
+    std::error_code ec;
+    fs::copy_file(port::path(from), port::path(to), fs::copy_options::overwrite_existing, ec);
+    if (!ec) {
+        const auto t = fs::last_write_time(port::path(from), ec);
+        if (!ec) fs::last_write_time(port::path(to), t, ec);
+    }
+    return ec ? ec.value() : 0;
+}
+// Python's OSError text on Linux: "[Errno n] text"
+std::string errno_text(int code) { return "[Errno " + std::to_string(code) + "] " + std::strerror(code); }
+#else
 std::wstring parent(const std::wstring &p) {
     const std::wstring s = path_str(p);
     size_t cut = s.find_last_of(L'\\');
@@ -190,6 +316,7 @@ void make_dirs(const std::wstring &p) {
     if (up != p && !up.empty()) make_dirs(up);
     CreateDirectoryW(p.c_str(), nullptr);
 }
+#endif
 
 // ------------------------------------------------------------------------------------------------ the native steps
 
@@ -298,6 +425,7 @@ std::string game_version(const std::wstring &game) {
 
 // ------------------------------------------------------------------------------------------------ the runtime process
 
+#ifdef _WIN32
 // Quotes arguments into one command line using the MSVC rules (same result as Python's subprocess.list2cmdline).
 std::wstring command_line(const std::vector<std::wstring> &args) {
     std::wstring result;
@@ -477,6 +605,55 @@ void write_crlf(const std::wstring &path, const std::string &text, bool append =
     WriteFile(h, o.data(), (DWORD)o.size(), &put, nullptr);
     CloseHandle(h);
 }
+#else
+struct Process {
+    port::Child child;
+    unsigned long pid = 0;
+};
+
+// Launches the runtime with stdout and stderr both appended to the log file (it is created empty before). Linux has
+// no suspended start and no address-layout check: the runtime's own mmap of the PS4 reserve range is the check there,
+// so the multiplayer start differs only in getting /dev/null as stdin (as on Windows).
+Process start_process(const std::vector<std::wstring> &command, const std::wstring &cwd,
+                      const std::vector<std::pair<std::wstring, std::wstring>> &vars, const std::wstring &log, bool u3mp) {
+    if (u3mp && !is_file(command[0])) throw std::string("runtime executable missing");
+    port::Spawn s;
+    for (const std::wstring &c : command) s.argv.push_back(utf8(c));
+    s.cwd = A(cwd);
+    s.set_env = true;
+    for (auto &kv : vars) {
+        if (kv.first.empty() || kv.first.find(L'=', 1) != std::wstring::npos) throw Stop{"ValueError: illegal environment variable name"};
+        s.env.push_back(utf8(kv.first + L"=" + kv.second));
+    }
+    s.out = port::Spawn::file;
+    s.out_file = A(log);
+    s.append = true;
+    s.null_in = u3mp;
+    Process p;
+    std::string error;
+    if (!port::spawn(s, p.child, error)) throw error + (u3mp ? "" : ": '" + utf8(command[0]) + "'");
+    p.pid = (unsigned long)p.child.pid;
+    return p;
+}
+
+double monotonic() {
+    using namespace std::chrono;
+    return (double)duration_cast<nanoseconds>(steady_clock::now().time_since_epoch()).count() / 1e9;
+}
+
+unsigned long long time_ns() {
+    using namespace std::chrono;
+    return (unsigned long long)duration_cast<nanoseconds>(system_clock::now().time_since_epoch()).count();
+}
+
+// the text as it is (a text-mode Python file on Linux writes \n), the name kept for the shared code
+void write_crlf(const std::wstring &path, const std::string &text, bool append = false) {
+    std::FILE *f = std::fopen(A(path).c_str(), append ? "ab" : "wb");
+    if (!f) throw Stop{"OSError: " + errno_text(errno) + ": '" + utf8(path) + "'"};
+    std::fwrite(text.data(), 1, text.size(), f);
+    std::fclose(f);
+}
+#endif
 
 // ------------------------------------------------------------------------------------------------ the start sequence
 
@@ -501,6 +678,22 @@ std::string game_key_of(const std::string &executable) {
 
 // Snapshot of this process's environment, names upper-cased (as Python's os.environ shows them on Windows), in the
 // order Windows lists them.
+#ifndef _WIN32
+// Linux: names keep their case (as os.environ shows them there), in the order the environment lists them
+std::vector<std::pair<std::string, std::string>> process_environment() {
+    std::vector<std::pair<std::string, std::string>> vars;
+    for (char **p = environ; p && *p; ++p) {
+        const std::string entry = *p;
+        const size_t eq = entry.find('=', 1);
+        if (eq == std::string::npos) continue;
+        const std::string key = entry.substr(0, eq), value = entry.substr(eq + 1);
+        bool replaced = false;
+        for (auto &kv : vars) if (kv.first == key) { kv.second = value; replaced = true; }
+        if (!replaced) vars.push_back({key, value});
+    }
+    return vars;
+}
+#else
 std::vector<std::pair<std::string, std::string>> process_environment() {
     std::vector<std::pair<std::string, std::string>> vars;
     wchar_t *block = GetEnvironmentStringsW();
@@ -516,6 +709,7 @@ std::vector<std::pair<std::string, std::string>> process_environment() {
     if (block) FreeEnvironmentStringsW(block);
     return vars;
 }
+#endif
 
 int parse_int(const std::wstring &s, bool &ok) {   // decimal parse accepting what Python's int() accepts
     std::wstring t = s;
@@ -527,7 +721,12 @@ int parse_int(const std::wstring &s, bool &ok) {   // decimal parse accepting wh
     for (size_t k = i; k < t.size(); ++k) if (!iswdigit(t[k]) && t[k] != L'_') ok = false;
     std::wstring digits;
     for (wchar_t c : t) if (c != L'_') digits += c;
+#ifdef _WIN32
     return ok ? _wtoi(digits.c_str()) : 0;
+#else
+    const long v = ok ? std::wcstol(digits.c_str(), nullptr, 10) : 0;
+    return v > INT_MAX ? INT_MAX : v < INT_MIN ? INT_MIN : (int)v;
+#endif
 }
 
 Result run_game(const Args &args, const std::wstring &game, const std::string &executable,
@@ -566,8 +765,12 @@ Result run_game(const Args &args, const std::wstring &game, const std::string &e
         mp = true;
         const std::wstring mp_image = path_str(widen(info.get("image") ? info.get("image")->s : ""));
         if (const Value *o = info.get("overlays")) for (auto &p : o->items) mp_overlays.push_back(path_str(widen(p.s)));
+#ifdef _WIN32
         if (!CopyFileW(mp_image.c_str(), image.c_str(), FALSE))
             throw Stop{"OSError: " + win_error_text(GetLastError()) + ": '" + utf8(mp_image) + "'"};
+#else
+        if (const int e = copy_over(mp_image, image)) throw Stop{"OSError: " + errno_text(e) + ": '" + utf8(mp_image) + "'"};
+#endif
         const Value *version = info.get("version");
         print("Using Uncharted 3 multiplayer v" + (version ? (version->kind == Value::String ? version->s : std::to_string(version->i)) : "") +
               ": " + utf8(mp_image) + " with " + std::to_string(mp_overlays.size()) + " overlays");
@@ -725,7 +928,11 @@ Result run_game(const Args &args, const std::wstring &game, const std::string &e
         if (!is_dir(layer_dir)) layer_dir = parent(layer_dir);
         if (is_file(join(layer_dir, L"renderdoc.json"))) {
             std::wstring *existing = var(L"VK_ADD_LAYER_PATH");
+#ifdef _WIN32
             const std::wstring value = layer_dir + (existing && !existing->empty() ? L";" + *existing : L"");
+#else   // the Vulkan loader's list separator on Linux
+            const std::wstring value = layer_dir + (existing && !existing->empty() ? L":" + *existing : L"");
+#endif
             if (existing) *existing = value; else vars.push_back({L"VK_ADD_LAYER_PATH", value});
             for (auto kv : std::vector<std::pair<std::wstring, std::wstring>>{{L"VK_INSTANCE_LAYERS", L"VK_LAYER_RENDERDOC_Capture"},
                                                                              {L"ENABLE_VULKAN_RENDERDOC_CAPTURE", L"1"},
@@ -749,10 +956,15 @@ Result run_game(const Args &args, const std::wstring &game, const std::string &e
     if (args.capture) result.set("capture_directory", Value::text(capture_dir.empty() ? "None" : utf8(capture_dir)));
     const double start = monotonic();
     const std::wstring log_path = join(out, name + L".log");
+#ifdef _WIN32
     SECURITY_ATTRIBUTES sa{sizeof sa, nullptr, FALSE};
     HANDLE log = CreateFileW(log_path.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, CREATE_ALWAYS,
                              FILE_ATTRIBUTE_NORMAL, nullptr);
     if (log == INVALID_HANDLE_VALUE) throw Stop{"OSError: " + win_error_text(GetLastError()) + ": '" + utf8(log_path) + "'"};
+#else   // the log starts empty; the runtime appends to it (start_process)
+    write_crlf(log_path, "");
+    const std::wstring &log = log_path;
+#endif
     Process process;
     bool started = false;
     if (mp) {
@@ -770,7 +982,9 @@ Result run_game(const Args &args, const std::wstring &game, const std::string &e
         try {
             process = start_process(command, g_root, vars, log, false);
         } catch (const std::string &error) {
+#ifdef _WIN32
             CloseHandle(log);
+#endif
             throw Stop{"FileNotFoundError: " + error};
         }
     }
@@ -792,24 +1006,38 @@ Result run_game(const Args &args, const std::wstring &game, const std::string &e
     double memory_seconds = 10;
     if (has_env(L"UNCHARTED_MEMORY_SECONDS")) {
         const std::wstring v = env(L"UNCHARTED_MEMORY_SECONDS");
+#ifdef _WIN32
         memory_seconds = v.empty() ? 0 : _wtof(v.c_str());
+#else
+        memory_seconds = v.empty() ? 0 : std::wcstod(v.c_str(), nullptr);
+#endif
     }
     std::wstring memory_csv;
     if (args.boot && memory_seconds > 0) {
         char buf[1024];
         if (un_memory_monitor(process.pid, out.c_str(), memory_seconds, buf, sizeof buf) == 0) memory_csv = widen(buf);
     }
+#ifdef _WIN32
     DWORD code = 0;
+#else
+    unsigned long code = 0;
+#endif
     bool timed_out = false;
     auto wait_for = [&](double seconds) -> bool {   // returns true once the process has exited
+#ifdef _WIN32
         DWORD millis = seconds < 0 ? INFINITE : (DWORD)std::min<double>(0xfffffffe, std::max<double>(0, seconds * 1000));
         return WaitForSingleObject(process.handle, millis) == WAIT_OBJECT_0;
+#else
+        port::wait(process.child, seconds < 0 ? -1 : (int)std::min<double>(0x7ffffffe, std::max<double>(0, seconds * 1000)));
+        return process.child.done;
+#endif
     };
     if (args.capture) {
         while (!wait_for(0)) {
             const double remaining = args.seconds ? (double)args.seconds - (monotonic() - start) : 3;
             if (remaining <= 0) { timed_out = true; break; }
             if (!wait_for(std::min(3.0, remaining)) && !trigger.empty()) {
+#ifdef _WIN32
                 HANDLE t = CreateFileW(trigger.c_str(), FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
                                        OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
                 if (t != INVALID_HANDLE_VALUE) {
@@ -818,11 +1046,17 @@ Result run_game(const Args &args, const std::wstring &game, const std::string &e
                     SetFileTime(t, nullptr, &now, &now);
                     CloseHandle(t);
                 }
+#else   // touch: created when missing, its write time now
+                if (std::FILE *t = std::fopen(A(trigger).c_str(), "ab")) std::fclose(t);
+                std::error_code ec;
+                fs::last_write_time(port::path(trigger), fs::file_time_type::clock::now(), ec);
+#endif
             }
         }
     } else if (!wait_for(args.seconds ? (double)args.seconds : -1)) {
         timed_out = true;
     }
+#ifdef _WIN32
     if (timed_out) {
         TerminateProcess(process.handle, 1);
         WaitForSingleObject(process.handle, INFINITE);
@@ -830,6 +1064,12 @@ Result run_game(const Args &args, const std::wstring &game, const std::string &e
     GetExitCodeProcess(process.handle, &code);
     CloseHandle(process.handle);
     CloseHandle(log);
+#else
+    if (timed_out) port::kill(process.child);
+    // a stopped runtime reports 1, as TerminateProcess(handle, 1) makes it on Windows
+    code = timed_out || process.child.code < 0 ? 1 : (unsigned long)process.child.code;
+    port::close(process.child);
+#endif
     result.set("exit_code", Value::integer((long long)code));
     result.set("timed_out", Value::boolean(timed_out));
     Value elapsed;
@@ -857,6 +1097,7 @@ Result run_game(const Args &args, const std::wstring &game, const std::string &e
         std::string lines;
         for (auto &r : hang_reports) lines += "\nHang watchdog: the game froze; report " + utf8(r);
         lines += "\n";
+#ifdef _WIN32
         HANDLE h = CreateFileW(log_path.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS,
                                FILE_ATTRIBUTE_NORMAL, nullptr);
         if (h != INVALID_HANDLE_VALUE) {
@@ -864,16 +1105,30 @@ Result run_game(const Args &args, const std::wstring &game, const std::string &e
             WriteFile(h, lines.data(), (DWORD)lines.size(), &put, nullptr);
             CloseHandle(h);
         }
+#else
+        if (std::FILE *h = std::fopen(A(log_path).c_str(), "ab")) {
+            std::fwrite(lines.data(), 1, lines.size(), h);
+            std::fclose(h);
+        }
+#endif
     }
     const std::wstring attempt = join(join(out, L"attempts"), name + L"-" + std::to_wstring(time_ns()));
     make_dirs(attempt);
     prune_old_logs(join(out, L"attempts"), L"", L"");   // copies of runs older than LOG_DAYS days go
+#ifdef _WIN32
     CopyFileW(log_path.c_str(), join(attempt, name + L".log").c_str(), FALSE);
     CopyFileW(json_path.c_str(), join(attempt, name + L".json").c_str(), FALSE);
     if (args.boot)
         for (auto &r : hang_reports) CopyFileW(r.c_str(), join(attempt, name_of(r)).c_str(), FALSE);
     if (args.boot && !memory_csv.empty() && is_file(memory_csv))
         CopyFileW(memory_csv.c_str(), join(attempt, name_of(memory_csv)).c_str(), FALSE);
+#else
+    copy_over(log_path, join(attempt, name + L".log"));
+    copy_over(json_path, join(attempt, name + L".json"));
+    if (args.boot)
+        for (auto &r : hang_reports) copy_over(r, join(attempt, name_of(r)));
+    if (args.boot && !memory_csv.empty() && is_file(memory_csv)) copy_over(memory_csv, join(attempt, name_of(memory_csv)));
+#endif
     print(json::dump(result));
     print("Log written to: " + utf8(log_path));
     return {result, code, timed_out};
@@ -997,12 +1252,20 @@ long long start_game(const std::vector<std::string> &argv) {
     }
     Result result;
     while (true) {
+#ifdef _WIN32
         DeleteFileW(loadexec.c_str());
+#else
+        {
+            std::error_code ec;
+            fs::remove(port::path(loadexec), ec);
+        }
+#endif
         result = run_once(args, executable, guest_args, loadexec);
         if (!args.boot || result.timed_out || result.exit_code != LOADEXEC_EXIT || !exists(loadexec)) break;
         // A game switch inside the Collection: the menu opened Uncharted 2 or 3, or a game returned to the menu.
         std::string text;
         {
+#ifdef _WIN32
             HANDLE h = CreateFileW(loadexec.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
                                    FILE_ATTRIBUTE_NORMAL, nullptr);
             if (h != INVALID_HANDLE_VALUE) {
@@ -1011,6 +1274,14 @@ long long start_game(const std::vector<std::string> &argv) {
                 while (ReadFile(h, buf, sizeof buf, &got, nullptr) && got) text.append(buf, got);
                 CloseHandle(h);
             }
+#else
+            if (std::FILE *h = std::fopen(A(loadexec).c_str(), "rb")) {
+                char buf[4096];
+                size_t got = 0;
+                while ((got = std::fread(buf, 1, sizeof buf, h)) > 0) text.append(buf, got);
+                std::fclose(h);
+            }
+#endif
         }
         std::vector<std::string> lines;   // split on \r\n, \r or \n, like Python's str.splitlines()
         for (size_t a = 0; a < text.size();) {
@@ -1066,16 +1337,3 @@ UN_API long long un_start_game(const un_path_char *root, const char *args_json) 
 }
 
 }  // extern "C"
-
-#else   // Linux: starting the runtime needs port::spawn (docs/WINDOWS-DEPENDENCIES.md §13 phase 2)
-
-extern "C" {
-
-UN_API long long un_start_game(const un_path_char *root, const char *args_json) {
-    port::not_yet("game start");
-    return 1;
-}
-
-}  // extern "C"
-
-#endif

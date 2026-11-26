@@ -14,9 +14,11 @@
 #include "native.h"   // launcher/native: un_prepare (prepare.cpp)
 
 // launcher/native/link.cpp (not declared in native.h)
-extern "C" UN_API int un_link_modules(const wchar_t *game, const wchar_t *out_dir, const char *executable, const char *modules, char *out, int cap);
+extern "C" UN_API int un_link_modules(const un_path_char *game, const un_path_char *out_dir, const char *executable, const char *modules, char *out, int cap);
 
+#ifdef _WIN32
 #include <windows.h>
+#endif
 
 #include <algorithm>
 #include <cstring>
@@ -199,7 +201,11 @@ Bytes prepare_base(const fs::path &game, const fs::path &work, const BuildInfo &
         fs::copy_file(game / "sce_sys" / "param.sfo", view / "sce_sys" / "param.sfo", fs::copy_options::overwrite_existing);
     const fs::path out = work / "prepared";
     fs::create_directories(out);
+#ifdef _WIN32
     const std::wstring wv = view.wstring(), wo = out.wstring();
+#else
+    const std::string wv = view.string(), wo = out.string();   // the core's UTF-8 path arguments
+#endif
     auto [st1, msg1] = call_native([&](char *o, int cap) { return un_prepare(wv.c_str(), wo.c_str(), EXECUTABLE, o, cap); });
     log_tail(st1 ? "prepare failed: " + msg1 : msg1, 3, lg);
     if (st1) throw ImageError(fmt("the port's prepare step failed (exit %d)", st1));

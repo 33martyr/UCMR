@@ -488,11 +488,19 @@ std::string find_ffmpeg(const std::string &arg) {
         const std::string p = path;
         size_t a = 0;
         for (size_t k = 0; k <= p.size(); k++)
+#ifdef _WIN32
             if (k == p.size() || p[k] == ';') {
                 const std::string dir = p.substr(a, k - a);
                 a = k + 1;
                 if (!dir.empty() && fs::is_regular_file(upath(dir) / "ffmpeg.exe")) return utf8(upath(dir) / "ffmpeg.exe");
             }
+#else
+            if (k == p.size() || p[k] == ':') {   // Linux: ':' between the folders, no ".exe"
+                const std::string dir = p.substr(a, k - a);
+                a = k + 1;
+                if (!dir.empty() && fs::is_regular_file(upath(dir) / "ffmpeg")) return utf8(upath(dir) / "ffmpeg");
+            }
+#endif
     }
     return "";
 }

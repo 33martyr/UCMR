@@ -20,7 +20,11 @@
 #include "log_history.h"   // launcher/native/log_history.h
 #include "psarc.hpp"   // dctools
 
+#ifdef _WIN32
 #include <windows.h>
+#else
+#include "port.h"   // launcher/native/port.h: program names
+#endif
 #include <sys/stat.h>
 
 #include <array>
@@ -823,7 +827,11 @@ const CodeIds &u3fix_code_ids() {
     static std::optional<CodeIds> c;
     if (c) return *c;
     c.emplace();
+#ifdef _WIN32
     const fs::path p = exe_dir() / "u3fix.exe";
+#else
+    const fs::path p = exe_dir() / port::program_name("u3fix.exe");
+#endif
     if (!is_file(p)) return *c;
     const std::string b = read_text(p);
     c->exe = sha256_hex(b);
@@ -918,12 +926,21 @@ std::string data2_digest(const Inputs &inp, std::string *newest) {
     for (const auto &[rel, p] : files) {
         const std::string l = rel + "\t" + sha256_cached(p) + "\n";
         h.update(l.data(), l.size());
+#ifdef _WIN32
         struct _stat64 st{};
         if (_wstat64(p.c_str(), &st) == 0) latest = std::max(latest, std::time_t(st.st_mtime));
+#else
+        struct stat st{};
+        if (::stat(p.c_str(), &st) == 0) latest = std::max(latest, std::time_t(st.st_mtime));
+#endif
     }
     if (newest) {
         std::tm tm{};
+#ifdef _WIN32
         localtime_s(&tm, &latest);
+#else
+        localtime_r(&latest, &tm);
+#endif
         char b[32];
         std::strftime(b, sizeof b, "%Y-%m-%d %H:%M:%S", &tm);
         *newest = b;
@@ -1040,8 +1057,13 @@ fs::path render_job(const std::string &job, const fs::path &out, const std::vect
             }
             const std::string f = S(e.path().filename());
             if (render_text(f)) write_text(dd / P(f), fill(text_crlf_to_lf(read_text(e.path())), values, job + "/" + (rel.empty() ? "" : rel + "/") + f, lg));
+#ifdef _WIN32
             else if (!CopyFileW(e.path().c_str(), (dd / P(f)).c_str(), FALSE))
                 throw u3::Stop("cannot copy " + S(e.path()));
+#else
+            else if (std::error_code e5; !fs::copy_file(e.path(), dd / P(f), fs::copy_options::overwrite_existing, e5))
+                throw u3::Stop("cannot copy " + S(e.path()));
+#endif
         }
         for (const fs::path &d : dirs) walk(d);
     };
@@ -1277,8 +1299,16 @@ Value step_script(const Value &s, const Inputs &inp, const fs::path &out, const 
         }
         lg("        $ " + joined);
         // the step programs: u3fix.exe and u3import.exe itself, next to u3import.exe (the package's u3mp/bin), else on PATH
+#ifndef _WIN32
+        // Linux: the recipe names them as on Windows ("u3fix.exe"); the program here has no ".exe" (the step data, and
+        // so its fingerprint, stay as they are)
+        if (!argv.empty()) argv[0] = port::program_name(argv[0]);
+        if (!argv.empty() && (argv[0] == "u3fix" || argv[0] == "u3import") && is_file(exe_dir() / argv[0]))
+            argv[0] = S(exe_dir() / argv[0]);
+#else
         if (!argv.empty() && (argv[0] == "u3fix.exe" || argv[0] == "u3import.exe") && is_file(exe_dir() / argv[0]))
             argv[0] = S(exe_dir() / argv[0]);
+#endif
         fs::path cwd = jd;
         if (!val_s(s, "cwd").empty()) {
             std::string c = val_s(s, "cwd");

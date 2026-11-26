@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=UCMR Launcher
+GenericName=Game launcher
+Comment=Uncharted Collection Multiplayer Resurrected
+Exec=UCMR_Launcher %U
+Icon=ucmr-launcher
+Terminal=false
+Categories=Game;
+StartupWMClass=UCMRLauncher
