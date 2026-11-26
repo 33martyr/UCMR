@@ -431,11 +431,17 @@ the Windows job.
 **State (phase 0):** `.github/workflows/build-linux.yml`, its own workflow (push to `main`, every pull request), so it
 never holds up the Windows build or its release. Jobs: **Launcher core** (ubuntu-22.04, clang 15:
 `launcher/native/build.sh` builds `libuncharted_native.so` and `game_starter`, `core_smoke` calls the library, both
-files are kept as an artifact), **Importer core and build tools** (ubuntu-22.04: the Uncharted 2 importer's files and
-the converters it shares compile, `mkzip` and `code_ids` build and `mkzip` makes a zip `unzip` reads back), **GPU
-unit tests** (ubuntu-24.04 for C++23, SDL3 built from source and cached: the `gow3_pc/gpu` test targets outside
-`if (WIN32)` that need no Vulkan device and no `gow3gpu`). Still to come: `gow3gpu.so`, the runtime, the window, the
-package and the release job.
+files are kept as an artifact), **Importer core and build tools** (ubuntu-24.04, clang 18: the Uncharted 2 importer's
+files and the converters it shares compile, `mkzip` and `code_ids` build and `mkzip` makes a zip `unzip` reads back),
+**GPU unit tests** (ubuntu-24.04 for C++23, SDL3 built from source and cached, lavapipe as a software Vulkan device:
+21 `gow3_pc/gpu` test targets outside `if (WIN32)` that need no `gow3gpu`, built and run). Each failing file, package
+or test is named in the run's annotations. Still to come: `gow3gpu.so`, the runtime, the window, the package and the
+release job.
+
+Toolchain note: clang 15 with libstdc++ 12 (the newest in Ubuntu 22.04) rejects some of the importers' C++20
+(lambdas that capture structured bindings), so the importers' job uses Ubuntu 24.04. A Linux package built for the
+glibc 2.35 baseline (phase 3) needs a newer clang on 22.04 (apt.llvm.org) or an older-glibc container. `json.h`'s
+`Value` defines its destructor after the class so clang with libstdc++ accepts it in C++20.
 
 The plan:
 
