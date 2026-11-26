@@ -23,8 +23,10 @@ followed by `(`, Windows headers, types, wide-string constructs, `.exe`/MSYS2 na
 | U3 helper PC side | **One shared backend**: the runtime exports a small table of host functions (sockets, time, files, ...) and the helper's single PC backend calls them on both Windows and Linux, instead of a third, Linux-only backend. |
 | The earlier draft's code (`launcher/native/port.h`, `sha256.h` and edits in 9 files) | **Taken over** into this work and checked against this map, so nothing is done twice. |
 
-**Progress:** phases 0 and 1 of §13 are done: the Linux CI workflow (§7.4) and the launcher core building on Linux
-with the platform layer (§4.1, §12). Phase 2 (processes) is next.
+**Progress:** phases 0, 1 and 2 of §13 are done: the Linux CI workflow (§7.4), the launcher core building on Linux
+with the platform layer (§4.1, §12), and processes: the launcher starts the imports, the game starter and the runtime,
+checks for its own updates over libcurl, and `u2import`, `u3import` and `u3fix` build, link and run on Linux (§4.7,
+§4.8). Phase 3 (the Qt window and the Linux tarball) is next.
 
 ## How to help
 
@@ -167,20 +169,25 @@ core compiles and links on Linux (`libuncharted_native.so`, `-Wl,--no-undefined`
 calls it in CI. Inside, the files keep their wide (`std::wstring`) text for now: `port::wtext` / `port::arg` convert
 at the exported API, `port::path` at the file system (on Linux a backslash in our path text becomes `/`).
 
+**State (phase 2 done):** the process layer is in `port.h` (§12): on Linux `port::spawn` (fork + execve with a
+close-on-exec error pipe, so a missing program fails to start like `CreateProcessW`), `wait`, `running`, `kill`,
+`read_some`/`write_all`, `kill_tree`, `process_alive`, `list_processes`, `program_name`. Every Windows caller keeps its
+own `CreateProcessW` body unchanged beside the Linux one. `launcher/native/port_smoke.cpp` checks the layer in CI.
+
 | File | Lines | Sites | Windows APIs / constructs | Shared path or platform function | Effort |
 |---|---:|---:|---|---|---|
-| `core.cpp` | 2 565 | 96 | `CreateFileW`, `FindFirstFileW`, `MoveFileExW`, `SHCreateDirectoryExW`, `GetDiskFreeSpaceExW`; `CreatePipe`/`CreateProcessW`/`PeekNamedPipe`/`TerminateProcess` with `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`, `CREATE_NO_WINDOW`, `CREATE_UNICODE_ENVIRONMENT`; `GetEnvironmentStringsW`; `GetTickCount64`; `SecureZeroMemory`; `%APPDATA%`/`USERPROFILE` seed file | `std::filesystem`; `port::spawn`/`port::Pipe`; `port::env_block`; `std::chrono::steady_clock`; `port::secure_zero`; `port::user_dirs` | L — **phase 1 done**: file helpers, folders, free space, the settings file and the environment list are portable; starting the imports, the online program and `run` are stubs (phase 2) |
+| `core.cpp` | 2 565 | 96 | `CreateFileW`, `FindFirstFileW`, `MoveFileExW`, `SHCreateDirectoryExW`, `GetDiskFreeSpaceExW`; `CreatePipe`/`CreateProcessW`/`PeekNamedPipe`/`TerminateProcess` with `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`, `CREATE_NO_WINDOW`, `CREATE_UNICODE_ENVIRONMENT`; `GetEnvironmentStringsW`; `GetTickCount64`; `SecureZeroMemory`; `%APPDATA%`/`USERPROFILE` seed file | `std::filesystem`; `port::spawn`/`port::Pipe`; `port::env_block`; `std::chrono::steady_clock`; `port::secure_zero`; `port::user_dirs` | L — **done**: file helpers, folders, free space, the settings file and the environment list are portable (phase 1); `run`, the imports (log file, `/dev/null` input, nice 10 for `BELOW_NORMAL_PRIORITY_CLASS`), STOP (`port::kill_tree`) and the online program's pipes use `port::spawn` (phase 2); program names through `port::program_name`. The online program itself has no Linux build yet (phase 5), so the online section stays hidden there |
 | `apply.cpp` (`apply_update.exe`) | 722 | 90 | Standalone updater: Win32 progress window (`RegisterClassW`, `CreateWindowExW`, `PeekMessageW`, DPI), `MessageBoxW`, `wWinMain`, `CommandLineToArgvW`, `OpenProcess` (wait for the launcher), `CopyFileW`/`MoveFileExW`/`RemoveDirectoryW`, `CharLowerBuffW` sort | File logic shared (`std::filesystem`); `port::wait_process_exit`; UI: Windows window kept, Linux runs without a window (log + Qt message from the relaunched launcher). Not used inside an AppImage (§7.6) | L — not built on Linux yet (phase 2/7) |
-| `updater.cpp` | 733 | 82 | WinHTTP (GitHub API + download), BCrypt SHA-256, `CreateProcessW` (starts apply), asset name `UCMR_windows.zip` | `port::http_get` (WinHTTP / libcurl), the shared SHA-256 (§6), `port::spawn`; asset name per OS (§7.7) | M — Linux body is a stub ("not on Linux yet", phase 2/7): no installed version, nothing newer |
-| `start.cpp` | 1 067 | 79 | Runtime start: `CopyFileW`, `SetFileTime`, `GetFinalPathNameByHandleW`, `DuplicateHandle`, `CreateProcessW` + `ResumeThread`, `VirtualQueryEx`, `QueryPerformanceCounter`, `GetSystemTimePreciseAsFileTime`, `\\?\` paths | `std::filesystem` (`copy_file`, `last_write_time`, `weakly_canonical`), `port::spawn`; drop the suspended start on Linux | L — Linux body is a stub ("not on Linux yet", phase 2) |
+| `updater.cpp` | 733 | 82 | WinHTTP (GitHub API + download), BCrypt SHA-256, `CreateProcessW` (starts apply), asset name `UCMR_windows.zip` | `port::http_get` (WinHTTP / libcurl), the shared SHA-256 (§6), `port::spawn`; asset name per OS (§7.7) | M — **phase 2 done**: one `http_get`-style `Http` in the file (WinHTTP body unchanged, libcurl on Linux: same User-Agent, time-outs, redirects never down to http); the installed version, the release lookup, the download with resume and the SHA-256 check are shared; Linux picks the asset `UCMR_linux.tar.gz` by name (no release has it yet, so it finds nothing newer). Unpacking the tarball and the apply step are stubs ("not on Linux yet", phase 7) |
+| `start.cpp` | 1 067 | 79 | Runtime start: `CopyFileW`, `SetFileTime`, `GetFinalPathNameByHandleW`, `DuplicateHandle`, `CreateProcessW` + `ResumeThread`, `VirtualQueryEx`, `QueryPerformanceCounter`, `GetSystemTimePreciseAsFileTime`, `\\?\` paths | `std::filesystem` (`copy_file`, `last_write_time`, `weakly_canonical`), `port::spawn`; drop the suspended start on Linux | L — **done**: the start sequence is shared; the runtime starts through `port::spawn` (argv vector, whole environment, log, working folder); no suspended start, `VirtualQueryEx` reserve check or ASLR policy on Linux; `VK_ADD_LAYER_PATH` uses `:`. The runtime itself is phase 4 |
 | `hang.cpp` | 514 | 75 | Freeze watchdog: `dbghelp` (`MiniDumpWriteDump`, `StackWalk64`, `Sym*`), `SuspendThread`/`GetThreadContext`, `ReadProcessMemory`, toolhelp thread list, `psapi` | Windows body kept; Linux: `/proc/<pid>/task/*/stat` + `ptrace(PTRACE_SEIZE/INTERRUPT)` for registers, or a stub "no freeze report on Linux" first | L — Linux body is a stub ("not on Linux yet", phase 6) |
-| `starter_files.cpp` | 527 | 61 | Game-folder tree copy (`FindFirstFileW`, `CopyFileW`, `SetFileTime`), WIC (`IWICImagingFactory`) icon decode via COM, `CharLowerBuffW` | `std::filesystem`; icon: Windows only (Linux uses the `.desktop` icon) | M — Linux body is a stub ("not on Linux yet", phase 2) |
+| `starter_files.cpp` | 527 | 61 | Game-folder tree copy (`FindFirstFileW`, `CopyFileW`, `SetFileTime`), WIC (`IWICImagingFactory`) icon decode via COM, `CharLowerBuffW` | `std::filesystem`; icon: Windows only (Linux uses the `.desktop` icon) | M — **done**: user folder, game executable copy (`gow3-probe` → `Uncharted`), boot view and old-view cleanup on `std::filesystem`; the window icon's PNG decode (WIC) is a stub on Linux ("not on Linux yet": SDL's default icon) |
 | `system.cpp` | 631 | 53 | Wine detection (`wine_get_version`), Wine path mapping, `GetVolumeInformationW`/`GetDriveTypeW`/`DeviceIoControl` (slow-drive warning), `SHGetKnownFolderPath(FOLDERID_Desktop)`, `OpenProcess` liveness, `\\?\` | Wine code stays Windows-only (native Linux never runs under Wine); `port::drive_kind` (`/sys/block/*/queue/rotational`), `port::user_dirs` (XDG desktop), `port::process_alive` | M — **done**: `un_system`, `un_pid_alive` (`kill(pid, 0)`), folder listing with the same `*`/`?` patterns; Wine helpers answer "no"; slow-drive check is a stub (phase 6) |
 | `steam.cpp` | 993 | 52 | Steam path from registry (`RegGetValueW` HKCU `SteamPath` / HKLM `InstallPath`), `ProgramFiles`, process scan for `steam.exe` (toolhelp), `shortcuts.vdf` writer, WIC PNG encode (grid art), `_wcsicmp` | VDF writer is portable; `port::steam_root` (`~/.steam/steam`, `~/.local/share/Steam`, Flatpak `~/.var/app/com.valvesoftware.Steam/...`), `port::list_processes`; PNG: own encoder on zlib or Qt | M–L — Linux body is a stub ("not on Linux yet", phase 6); `un_version` is shared |
-| `play.cpp` | 801 | 41 | Game process + stdout pipe, `GetLocalTime`, `\r\n` logs | `port::spawn`, `<chrono>` | M — Linux body is a stub ("not on Linux yet", phase 2) |
+| `play.cpp` | 801 | 41 | Game process + stdout pipe, `GetLocalTime`, `\r\n` logs | `port::spawn`, `<chrono>` | M — **done**: the environment, crash reason, questions and end are shared; the starter runs through `port::spawn` with one output pipe, the same run log (`\r\n`), STOP = `port::kill_tree` |
 | `memstat.cpp` | 133 | 32 | toolhelp, `K32GetProcessMemoryInfo`, `GlobalMemoryStatusEx`, `CreateThread` | `port::process_memory` (`/proc/<pid>/status`), `/proc/meminfo`, `std::thread` | S–M — Linux body is a stub ("not on Linux yet", phase 6) |
-| `runtime_env.cpp` | 734 | 31 | Tree copy, `CreateThread`, `"C:/msys64"` dev fallback | `std::filesystem`, `std::thread`; MSYS2 fallback Windows-only | M — Linux body is a stub ("not on Linux yet", phase 2) |
-| `gameupdate.cpp` | 438 | 27 | Tree walk, `GetFinalPathNameByHandleW`, `CharLowerBuffW`, `\\?\` | `std::filesystem`; case rule §8.4 | M — Linux body is a stub ("not on Linux yet", phase 2); `existing_update` answers "none" |
+| `runtime_env.cpp` | 734 | 31 | Tree copy, `CreateThread`, `"C:/msys64"` dev fallback | `std::filesystem`, `std::thread`; MSYS2 fallback Windows-only | M — **done** (the `C:/msys64` PATH fallback stays Windows-only) |
+| `gameupdate.cpp` | 438 | 27 | Tree walk, `GetFinalPathNameByHandleW`, `CharLowerBuffW`, `\\?\` | `std::filesystem`; case rule §8.4 | M — **done**: name matches still fold case; `resolved()` keeps the case on Linux (two names that differ only in case are two folders there) |
 | `config.cpp` | 524 | 26 | JSON config, atomic `MoveFileExW`, `lstrcmpiW`, `wine_get_unix_file_name` | `port::replace_file`; Wine part Windows-only | S–M — **done** |
 | `starter.cpp` | 262 | 24 | BCrypt SHA-256, env, file read | shared SHA-256, `std::getenv`, `<fstream>` | S — **done** |
 | `session_value.cpp` | 278 | 24 | Whole-file/part reads, atomic write, `SecureZeroMemory` | `<fstream>`, `port::write_atomic`, `port::secure_zero` | S — **done** |
@@ -197,7 +204,7 @@ at the exported API, `port::path` at the file system (on Linux a backslash in ou
 | `patch_tables.cpp` | 923 | 4 | `GetEnvironmentVariableA`, `SetLastError` | `std::getenv` | S — **done** |
 | `native.h` | 123 | 1 | `__declspec(dllexport)`, `wchar_t` API | see above | S — **done**: `un_path_char` |
 | `link.cpp`, `controls.cpp`, `pages.cpp`, `json.h`, `inflate.h`, `log_history.h` | 2 400+ | 0–1 | `std::wstring` names only (`log_history.h`, `link.cpp`) | `fs::path` / UTF-8 strings | S — **done** |
-| `build.sh` | 35 | | MSYS2 `CLANG64` default `/c/msys64/clang64`, `-municode`, `-shared -static`, 11 system libs, winres | Branch on `uname`: Linux builds `libuncharted_native.so` (`-fPIC -shared`), no winres | S — **done**: `libuncharted_native.so` + `game_starter` (`CXX`, `CXXFLAGS` choose the compiler) |
+| `build.sh` | 35 | | MSYS2 `CLANG64` default `/c/msys64/clang64`, `-municode`, `-shared -static`, 11 system libs, winres | Branch on `uname`: Linux builds `libuncharted_native.so` (`-fPIC -shared`), no winres | S — **done**: `libuncharted_native.so` + `game_starter` (`CXX`, `CXXFLAGS` choose the compiler); links `-lcurl` on Linux (Ubuntu: `libcurl4-openssl-dev`) |
 
 ### 4.2 `launcher-qt`
 
@@ -290,15 +297,16 @@ pdh`) and `SHARED` elsewhere (links X11, `--allow-shlib-undefined`, runtime symb
 
 | File | Windows constructs | Shared path / platform function | Effort |
 |---|---|---|---|
-| `tools/fixes/dctools/proc.cpp` | Process runner for steps/ffmpeg/objdump: `CreatePipe` (8), `CreateProcessW` (5), `SetHandleInformation`, `WaitForSingleObject`, env block, `quote_arg` (Python `list2cmdline` emulation) | `port::spawn(argv vector)`; quoting only in the Windows body | M |
-| `importer/common.cpp` | Same runner + `GetModuleFileNameW`, BCrypt, env merge "case-insensitive like Windows" (line 419) | `port::spawn`, `port::executable_path`, shared SHA-256; env names case-sensitive on Linux | M |
-| `importer/u3import.cpp` | `wmain`, `SetConsoleOutputCP`, directory **junctions** via `DeviceIoControl(FSCTL_SET_REPARSE_POINT)`, `CreateHardLinkW`, `MoveFileExW`, `_wfopen`, ffmpeg fallback `C:\msys64\...\ffmpeg.exe` | `main` (UTF-8 argv on Linux), `port::dir_link` (junction / `symlink`), `port::hard_link` (`CreateHardLinkW` / `link`), `port::replace_file` | M |
-| `importer/ps3keep.cpp` | `CreateHardLinkW`, `GetFileAttributesExW`, `lower()` path compare with `"\\"`, `\r\n` | `port::hard_link`; case rule §8.4 | S–M |
-| `importer/recipe.cpp` | `_wstat64`, `CopyFileW`, fnmatch emulated "as on Windows" (case-insensitive, `/` → `\`), runs `u3fix.exe`/`u3import.exe` by name (line 1280) | `std::filesystem`; keep the matcher identical on both OS; `.exe` mapping (§10) | S |
-| `importer/mpimage.cpp` | includes `<windows.h>` only | drop the include | S |
-| `tools/fixes/dctools/fixlib.cpp` | `game_running()` via toolhelp; `win_path()` (`/` → `\`) | `port::list_processes`; see §8.2 for `win_path` | S |
-| `tools/fixes/dctools/u3fix.cpp` | `wmain`, `tlhelp32.h` | `main` | S |
-| `tools/fixes/pak23-levels/levels.cpp`, `actor33/build_actors.cpp` | `_wstat64` | `std::filesystem::file_size`/`status` | S |
+| `tools/fixes/dctools/proc.cpp` | Process runner for steps/ffmpeg/objdump: `CreatePipe` (8), `CreateProcessW` (5), `SetHandleInformation`, `WaitForSingleObject`, env block, `quote_arg` (Python `list2cmdline` emulation) | `port::spawn(argv vector)`; quoting only in the Windows body | M — **done**: `run`, `run_pipe`, `run_to_file`, `run_to_lines` and the worker pass the argv vector to `port::spawn` (stderr apart where the step reads it: `Spawn::err_pipe`) |
+| `importer/common.cpp` | Same runner + `GetModuleFileNameW`, BCrypt, env merge "case-insensitive like Windows" (line 419) | `port::spawn`, `port::executable_path`, shared SHA-256; env names case-sensitive on Linux | M — **done** |
+| `importer/u3import.cpp` | `wmain`, `SetConsoleOutputCP`, directory **junctions** via `DeviceIoControl(FSCTL_SET_REPARSE_POINT)`, `CreateHardLinkW`, `MoveFileExW`, `_wfopen`, ffmpeg fallback `C:\msys64\...\ffmpeg.exe` | `main` (UTF-8 argv on Linux), `port::dir_link` (junction / `symlink`), `port::hard_link` (`CreateHardLinkW` / `link`), `port::replace_file` | M — **done** (`main` on Linux, `wmain` kept; PATH joined with `:`; the MSYS2 ffmpeg fallback is Windows-only) |
+| `importer/ps3keep.cpp` | `CreateHardLinkW`, `GetFileAttributesExW`, `lower()` path compare with `"\\"`, `\r\n` | `port::hard_link`; case rule §8.4 | S–M — **done** |
+| `importer/recipe.cpp` | `_wstat64`, `CopyFileW`, fnmatch emulated "as on Windows" (case-insensitive, `/` → `\`), runs `u3fix.exe`/`u3import.exe` by name (line 1280) | `std::filesystem`; keep the matcher identical on both OS; `.exe` mapping (§10) | S — **done**: on Linux a step's program goes through `port::program_name` at run time; the JSON and the fingerprints are unchanged (`--recipe-fingerprint` gives the same value on both systems) |
+| `importer/mpimage.cpp` | includes `<windows.h>` only | drop the include | S — **done** |
+| `tools/fixes/dctools/fixlib.cpp` | `game_running()` via toolhelp; `win_path()` (`/` → `\`) | `port::list_processes`; see §8.2 for `win_path` | S — **done** (`win_path` leaves Linux paths as they are) |
+| `tools/fixes/dctools/u3fix.cpp` | `wmain`, `tlhelp32.h` | `main` | S — **done** |
+| `tools/fixes/pak23-levels/levels.cpp`, `actor33/build_actors.cpp` | `_wstat64` | `std::filesystem::file_size`/`status` | S — **done** (`stat`) |
+| `airport-igc3`, `registry/run_mkregistry`, `pak23-registry/apply_registry` | build some paths with `"\\"` | file access works through the `/` folding of `upath()`/`P()`; text handed to a child or written to a file may still hold `\` | S — not checked (needs game files) |
 | `tools/fixes/sound-banks/convert_banks.cpp` | `<windows.h>` include only | drop the include | S — **done** |
 | `recipe/recipe_tools.cpp` | `CommandLineToArgvW`, `GetFileInformationByHandle` | `main(argc, argv)` + `port::file_id` | S |
 
@@ -306,7 +314,7 @@ pdh`) and `SHARED` elsewhere (links X11, `--allow-shlib-undefined`, runtime symb
 
 | File | Windows constructs | Shared path | Effort |
 |---|---|---|---|
-| `u2import.cpp` | `wmain`, `SetConsoleOutputCP`, BCrypt SHA-256, `MoveFileExW`, `_wfopen`, `GetLocalTime` | `main`, shared SHA-256, `port::replace_file`, `<fstream>`, `<chrono>` | S — **done**: compiles on Linux; `u2import` links once `importer/common.cpp` and `dctools/proc.cpp`, `fixlib.cpp` are ported (phase 2) |
+| `u2import.cpp` | `wmain`, `SetConsoleOutputCP`, BCrypt SHA-256, `MoveFileExW`, `_wfopen`, `GetLocalTime` | `main`, shared SHA-256, `port::replace_file`, `<fstream>`, `<chrono>` | S — **done**: builds, links and runs on Linux (`tools/build_importers_linux.sh`, checked by `tools/importer_smoke.sh`) |
 | the other 20 files | none (std C++) | | none |
 
 ### 4.9 `tools/`
@@ -437,6 +445,14 @@ files and the converters it shares compile, `mkzip` and `code_ids` build and `mk
 21 `gow3_pc/gpu` test targets outside `if (WIN32)` that need no `gow3gpu`, built and run). Each failing file, package
 or test is named in the run's annotations. Still to come: `gow3gpu.so`, the runtime, the window, the package and the
 release job.
+
+**State (phase 2):** the launcher core job also installs `libcurl4-openssl-dev` and runs `port_smoke` (the process
+layer: start, pipes, folder, environment, time-outs, process list, `kill_tree`). The importers job builds `u2import`,
+`u3import` and `u3fix` with `tools/build_importers_linux.sh` (the source lists of `tools/package_windows.sh`, with
+u3fix's code ids) and runs `tools/importer_smoke.sh`: the checks that need no game files (usage and exit codes, the
+code ids, `--shipped-id`, `--recipe-fingerprint`, `--recipe --list`). The Windows workflow runs the same script on the
+package (`OUT=dist/UCMR_windows`). The repository has no importer fixture tests with small inputs yet; a test that
+runs one recipe step on a tiny made-up input would exercise the step runner on both systems.
 
 Toolchain note: clang 15 with libstdc++ 12 (the newest in Ubuntu 22.04) rejects some of the importers' C++20
 (lambdas that capture structured bindings), so the importers' job uses Ubuntu 24.04. A Linux package built for the
@@ -587,7 +603,8 @@ on it:
 - **Recipe step commands** name programs with `.exe`: 33 step files call `"u3fix.exe"`, one `"u3import.exe"`
   (`u3mp/patcher/recipe/steps/*.json`); `recipe.cpp:1280` resolves those two names next to `u3import.exe`, else on
   `PATH`. The recipe fingerprint includes the step data, so **do not rename them in the JSON** (every step would
-  rerun on update). Map `<name>.exe` → `<name>` once, at run time, in the Linux body of the resolver.
+  rerun on update). Map `<name>.exe` → `<name>` once, at run time, in the Linux body of the resolver. **Done**
+  (`port::program_name` in `recipe.cpp`'s Linux body; the fingerprint is the same on both systems).
 - Recipe notes mention `.exe` and Windows tools in prose only (no effect).
 - `.ps1`/`.bat`/`.cmd` in the repository: only `.claude/hooks/no-python.ps1` (a development hook, not part of the
   build). `pwsh` steps: two in `build-windows.yml` (git config, release) → bash in the release job.
@@ -629,16 +646,18 @@ side by side:
 | `port::executable_path()` | `GetModuleFileNameW` | `readlink("/proc/self/exe")` |
 | `port::user_dirs()` | `SHGetKnownFolderPath`, `%APPDATA%`, `%LOCALAPPDATA%` | XDG variables + `~` |
 | `port::env(name)`, `port::set_env`, `port::env_block` | `GetEnvironmentVariableW`, `_putenv_s`, `GetEnvironmentStringsW` | `getenv`, `setenv`, `environ` |
-| `port::spawn(argv, env, cwd, stdout)` → `Child` (`read`, `wait`, `kill`) | `CreateProcessW` + pipes + handle list + `CREATE_NO_WINDOW` | `posix_spawn` + `pipe2` + `waitpid` |
-| `port::kill_with_parent(child)` | job object | `PR_SET_PDEATHSIG` |
-| `port::process_alive(pid)`, `port::list_processes()`, `port::process_memory(pid)` | `OpenProcess`, toolhelp, `K32GetProcessMemoryInfo` | `kill(pid,0)`, `/proc` |
+| `port::spawn(Spawn, Child&, error)` → `Child` (`read_some`, `write_all`, `running`, `wait`, `kill`, `close`) | each caller's own `CreateProcessW` + pipes + handle list + `CREATE_NO_WINDOW`, unchanged | **done**: `fork` + `pipe2(O_CLOEXEC)` + `execve` (the child sets folder, priority, death signal and stdio before the program starts; a failed `execve` comes back through a close-on-exec pipe) + `waitpid`; PATH lookup in the parent |
+| `Spawn::die_with_parent` (kill_with_parent) | job object (`u2mp/online_link.cpp`) | **done**: `PR_SET_PDEATHSIG` in the child (it fires when the starting *thread* ends: start such a child from a thread that lives as long as it). No launcher caller needs it today |
+| `port::kill_tree(pid)` | `taskkill /PID <pid> /T /F` (kept in the callers) | **done**: the `/proc` descendants, stopped, then `SIGKILL` |
+| `port::process_alive(pid)`, `port::list_processes()`, `port::process_memory(pid)` | `OpenProcess`, toolhelp, `K32GetProcessMemoryInfo` | **done** except `process_memory` (phase 6): `kill(pid,0)`, `/proc/<pid>/stat` + the `exe` link's name |
+| `port::exe_name(base)`, `port::program_name(name)` | `+ ".exe"`, unchanged | as is, without `.exe` — **done** |
 | `port::load_library(name)`, `port::symbol` | `LoadLibraryExW`, `GetProcAddress` | `dlopen`, `dlsym` |
 | `port::open_path(path_or_url)` | `ShellExecuteW("open")` | `xdg-open` |
 | `port::safe_read`, `port::safe_write` (own process, unmapped = skipped) | `ReadProcessMemory`/`WriteProcessMemory` | `process_vm_readv`/`process_vm_writev` |
 | `port::random_bytes`, `port::secure_zero` | `BCryptGenRandom`, `SecureZeroMemory` | `getrandom`, volatile loop |
-| `port::http_get(url, sink)` | WinHTTP | libcurl |
+| `port::http_get(url, sink)` | WinHTTP | libcurl — **done** inside `updater.cpp` (its only user), so curl stays out of the importers' builds |
 | `port::drive_kind(path)` | `GetDriveTypeW` + seek penalty | `/sys/block/*/queue/rotational` |
-| `port::exe_name(base)`, `port::library_name(base)` | `+ ".exe"`, `+ ".dll"` | as is, `lib + ".so"` |
+| `port::library_name(base)` | `+ ".dll"` | `lib + ".so"` |
 | `sha256` (no OS code) | one shared implementation replacing BCrypt and the 4 copies | same |
 | `sha1.h` (no OS code) | bcrypt kept | the Linux builds' SHA-1 (PS4 NIDs, the U2 import's source check) |
 | `port::wtext(arg)`, `port::arg(text)`, `port::arg_string` | exported path argument ↔ the core's wide text (`wchar_t` as before) | UTF-8 `char` |
@@ -656,7 +675,7 @@ in both CI jobs.
 |---|---|---|
 | 0. CI skeleton | `build-linux.yml` (or a second job): build what is already portable (u2 importer core, importer/fix libraries, `gow3gpu.so`, the GPU unit tests outside `if (WIN32)`); release moves to its own job | Linux job green on a subset; Windows unchanged. **Done** (§7.4) except `gow3gpu.so` and the release job (it stays in `build-windows.yml` until phase 7) |
 | 1. Platform layer + leaf files | `port.h`, one shared SHA-256, `un_path_char` in `native.h`; port the S-files of §4.1 (`session_value`, `updates`, `gamepads`, `pages`, `patch_tables`, `starter`, `self_reader.h`, `prepare`, `gamefiles`, `patcher`, `config`, `actions`), `u2import.cpp`, `mkzip`, `code_ids` | launcher core compiles on Linux with stubs that say "not on Linux yet" for Steam, shortcuts, hang, display. **Done**: every §4.1 file builds on Linux; the stubs are marked in §4.1 |
-| 2. Processes | `port::spawn`; `core.cpp`, `play.cpp`, `start.cpp`, `updater.cpp`, `dctools/proc.cpp`, `importer/common.cpp`, `u3import.cpp` (links), recipe `.exe` mapping, `wmain`→`main` | `u3import`/`u3fix`/`u2import` run on both; an import test on a fixture runs in both jobs |
+| 2. Processes | `port::spawn`; `core.cpp`, `play.cpp`, `start.cpp`, `updater.cpp`, `dctools/proc.cpp`, `importer/common.cpp`, `u3import.cpp` (links), recipe `.exe` mapping, `wmain`→`main` | `u3import`/`u3fix`/`u2import` run on both; an import test on a fixture runs in both jobs. **Done**: both CI jobs run `tools/importer_smoke.sh` (no game files; no fixture test exists yet, §7.4) and Linux runs `port_smoke`. Still stubs on Linux: unpacking the update tarball and the apply step (phase 7), the window icon's PNG decode, the online program (phase 5), the runtime itself (phase 4) |
 | 3. Window + package | `launcher-qt` CMake/file names/`QStandardPaths`; `package_linux.sh` (tarball); Linux branch of `build_ffmpeg.sh`; README-Linux | Linux tarball artifact from every push |
 | 4. Runtime | one `gow3-probe` CMake target for both; tests out of `if (WIN32)`; fix unguarded `pokes.cpp`, `session.cpp`, `u2_online_abi.h`, `u3voice.h`; check every POSIX body in `probe.c`/`runtime_*.c` against current Windows features (exec watch, restart command, scheduling, native TSC); `gow3:` Windows additions in shadPS4 get Linux bodies; case-insensitive base mount | the game boots on Linux in CI smoke tests that need no game files (runtime tests, loader tests) |
 | 5. Online and helper | the runtime host-function table and one helper PC backend over it, used on both systems; online programs with BSD sockets and the `0600` token file on Linux (DPAPI stays on Windows) | U3 MP/LAN on Linux; Windows helper behaviour unchanged |
@@ -668,8 +687,10 @@ side, no behaviour change on Windows, the simplest form that does the full job.
 
 ## 14. Not checked / open questions
 
-- Nothing was compiled or run on Linux; the POSIX branches of the runtime were not re-verified against today's Windows
-  features.
+- The launcher core, the importers and the GPU unit tests build and run in the Linux CI (§7.4); the runtime was not
+  built on Linux yet, and its POSIX branches were not re-verified against today's Windows features.
+- The Linux bodies of the imports, PLAY and the game start were built and run with made-up folders and `sh`, never
+  with a real game or a whole import on Linux.
 - Counts are token-based (comments included); `helper-source` counts include BearSSL.
 - Submodules under `gow3_pc/gpu/third_party` (FSR-Vulkan, xbyak, ...) were not scanned (not tracked files).
 - How RecompLauncher chooses a release asset per OS (only its JSON schema was read).
