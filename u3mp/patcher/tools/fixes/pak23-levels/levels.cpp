@@ -34,7 +34,11 @@
 #include <mutex>
 #include <regex>
 #include <thread>
+#ifdef _WIN32
 #include <windows.h>
+#else
+#include <sys/stat.h>
+#endif
 
 namespace u3 {
 namespace {
@@ -107,8 +111,13 @@ fs::path res_dir() {
     std::vector<std::string> sig;
     std::error_code ec;
     for (const auto &e : fs::directory_iterator(paks, ec)) {
+#ifdef _WIN32
         struct _stat64 st;
         if (_wstat64(e.path().wstring().c_str(), &st)) continue;
+#else
+        struct stat st;
+        if (::stat(e.path().c_str(), &st)) continue;
+#endif
         sig.push_back(fmt("%s %lld %lld", utf8(e.path().filename()).c_str(), (long long)st.st_size, (long long)st.st_mtime));
     }
     std::sort(sig.begin(), sig.end());
@@ -136,8 +145,13 @@ void walk_sig(const fs::path &top, const fs::path &dp, std::vector<std::string> 
     std::sort(files.begin(), files.end());
     for (const std::string &n : files) {
         if (!(n.size() > 6 && n.compare(n.size() - 6, 6, ".psarc") == 0) && n != "net18.bin") continue;
+#ifdef _WIN32
         struct _stat64 st;
         if (_wstat64((dp / upath(n)).wstring().c_str(), &st)) continue;
+#else
+        struct stat st;
+        if (::stat((dp / upath(n)).c_str(), &st)) continue;
+#endif
         sig.push_back(fmt("%s %lld %lld", win_path(utf8(fs::relative(dp / upath(n), top))).c_str(), (long long)st.st_size, (long long)st.st_mtime));
     }
     std::string rel = utf8(fs::relative(dp, top));

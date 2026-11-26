@@ -3,12 +3,25 @@
 #include "u3fix.hpp"
 
 #include <cstdio>
+#ifdef _WIN32
 #include <windows.h>
 #include <tlhelp32.h>
+#else
+#include "port.h"   // launcher/native/port.h: the process list
+#endif
 
 namespace u3 {
 
+#ifdef _WIN32
 fs::path upath(const std::string &s) { return fs::path(std::u8string(s.begin(), s.end())); }
+#else
+fs::path upath(const std::string &s) {   // a backslash (the Windows separator some steps join with) is a "/" here
+    std::u8string u(s.begin(), s.end());
+    for (char8_t &c : u)
+        if (c == u8'\\') c = u8'/';
+    return fs::path(u);
+}
+#endif
 
 Args::Args(const std::vector<std::string> &argv, const std::set<std::string> &flags, const std::set<std::string> &values) {
     for (size_t i = 0; i < argv.size(); i++) {
@@ -82,6 +95,7 @@ void copy2(const fs::path &src, const fs::path &dst) {
     fs::last_write_time(dst, fs::last_write_time(src));
 }
 
+#ifdef _WIN32
 bool game_running(bool name_contains) {
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (snap == INVALID_HANDLE_VALUE) return false;   // as the scripts: no process list, not running
@@ -102,6 +116,19 @@ std::string win_path(std::string p) {
         if (c == '/') c = '\\';
     return p;
 }
+#else
+// Linux: the game is the runtime's "Uncharted" program here (its Windows build "Uncharted.exe" when run by Wine)
+bool game_running(bool name_contains) {
+    for (const port::ProcessInfo &p : port::list_processes()) {
+        std::string n = p.name;
+        for (char &c : n) c = (c >= 'A' && c <= 'Z') ? char(c - 'A' + 'a') : c;
+        if (n == "uncharted" || (name_contains ? n.find("uncharted.exe") != std::string::npos : n == "uncharted.exe")) return true;
+    }
+    return false;
+}
+
+std::string win_path(std::string p) { return p; }   // a path as os.path gives it here: "/" stays
+#endif
 
 std::string pyhex(uint64_t v) { return fmt("0x%llx", (unsigned long long)v); }
 

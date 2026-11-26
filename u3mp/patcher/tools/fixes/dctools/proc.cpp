@@ -3,10 +3,15 @@
 
 #include <algorithm>
 #include <thread>
+#ifdef _WIN32
 #include <windows.h>
+#else
+#include "port.h"   // launcher/native/port.h: spawn
+#endif
 
 namespace u3 {
 
+#ifdef _WIN32
 std::wstring wide(const std::string &s) {
     if (s.empty()) return L"";
     int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), int(s.size()), nullptr, 0);
@@ -14,8 +19,10 @@ std::wstring wide(const std::string &s) {
     MultiByteToWideChar(CP_UTF8, 0, s.data(), int(s.size()), w.data(), n);
     return w;
 }
+#endif
 std::string P(const fs::path &p) { return win_path(utf8(p)); }
 
+#ifdef _WIN32
 // subprocess.list2cmdline
 std::wstring quote_arg(const std::wstring &a) {
     if (!a.empty() && a.find_first_of(L" \t\"") == std::wstring::npos) return a;
@@ -237,6 +244,122 @@ int run_to_lines(const std::vector<std::string> &cmd, const std::function<void(c
     CloseHandle(out_r);
     return int(code);
 }
+#else
+// Linux: port::spawn with the argv vector itself (no command line to quote)
+namespace {
+// this process's environment with the overrides (an empty value removes the variable; names are case-sensitive here)
+port::Spawn spawn_of(const std::vector<std::string> &cmd, const Env &env, const std::string &cwd = "") {
+    std::map<std::string, std::string> vars;
+    for (char **p = environ; p && *p; ++p) {
+        const std::string kv = *p;
+        const size_t eq = kv.find('=', 1);
+        if (eq != std::string::npos) vars[kv.substr(0, eq)] = kv.substr(eq + 1);
+    }
+    for (const auto &[k, v] : env) vars[k] = v;
+    port::Spawn s;
+    s.argv = cmd;
+    s.cwd = cwd;
+    s.set_env = true;
+    for (const auto &[k, v] : vars)
+        if (!v.empty()) s.env.push_back(k + "=" + v);
+    s.null_in = false;   // stdin: ours, as on Windows
+    return s;
+}
+template <typename Out> void drain(int fd, Out *s) {
+    char buf[65536];
+    for (long n; (n = port::read_some(fd, buf, sizeof buf, -1)) > 0;) s->insert(s->end(), buf, buf + n);
+}
+port::Child start(const port::Spawn &s) {
+    port::Child c;
+    std::string why;
+    if (!port::spawn(s, c, why)) throw Stop("cannot start " + s.argv[0] + " (" + why + ")");
+    return c;
+}
+}  // namespace
+
+std::string run(const std::vector<std::string> &cmd, const Env &env, const std::string &cwd) {
+    port::Spawn s = spawn_of(cmd, env, cwd);
+    s.out = port::Spawn::pipe;
+    s.err = port::Spawn::err_pipe;
+    port::Child c = start(s);
+    std::string out, err;
+    std::thread te(drain<std::string>, c.err, &err);
+    drain(c.out, &out);
+    te.join();
+    port::close(c);
+    const int code = port::wait(c);
+    for (std::string *t : {&out, &err})   // text mode
+        for (size_t k; (k = t->find("\r\n")) != std::string::npos;) t->replace(k, 2, "\n");
+    if (code) {
+        const std::string script = cmd.size() > 1 ? cmd[1].substr(cmd[1].find_last_of("/\\") == std::string::npos ? 0 : cmd[1].find_last_of("/\\") + 1) : cmd[0];
+        throw Stop(fmt("%s failed (%lu): %s %s", script.c_str(), (unsigned long)code, out.substr(out.size() > 800 ? out.size() - 800 : 0).c_str(),
+                       err.substr(err.size() > 1500 ? err.size() - 1500 : 0).c_str()));
+    }
+    return out;
+}
+
+int run_pipe(const std::vector<std::string> &cmd, const Bytes &input, Bytes &out, std::string &err) {
+    port::Spawn s;
+    s.argv = cmd;
+    s.in_pipe = true;
+    s.out = port::Spawn::pipe;
+    s.err = port::Spawn::err_pipe;
+    port::Child c = start(s);
+    std::thread tw([&] {
+        port::write_all(c.in, input.data(), input.size());
+        port::close_fd(c.in);
+    });
+    std::string es;
+    std::thread te(drain<std::string>, c.err, &es);
+    out.clear();
+    drain(c.out, &out);
+    tw.join();
+    te.join();
+    port::close(c);
+    err = es;
+    return port::wait(c);
+}
+
+int run_to_file(const std::vector<std::string> &cmd, const fs::path &out) {
+    port::Spawn s;
+    s.argv = cmd;
+    s.null_in = false;
+    s.out = port::Spawn::file;
+    s.out_file = out.string();
+    s.err = port::Spawn::inherit_err;
+    port::Child c;
+    std::string why;
+    if (!port::spawn(s, c, why)) throw Stop(why.compare(0, 15, "could not open ") == 0 ? "cannot write " + utf8(out) : "cannot start " + cmd[0]);
+    return port::wait(c);
+}
+
+int run_to_lines(const std::vector<std::string> &cmd, const std::function<void(const std::string &)> &on_line) {
+    port::Spawn s;
+    s.argv = cmd;
+    s.null_in = false;
+    s.out = port::Spawn::pipe;
+    s.err = port::Spawn::inherit_err;
+    port::Child c = start(s);
+    std::string buf;
+    char tmp[65536];
+    for (long n; (n = port::read_some(c.out, tmp, sizeof tmp, -1)) > 0;) {
+        buf.append(tmp, size_t(n));
+        size_t a = 0;
+        for (size_t k; (k = buf.find('\n', a)) != std::string::npos; a = k + 1) {
+            size_t e = k;
+            if (e > a && buf[e - 1] == '\r') e--;
+            on_line(buf.substr(a, e - a));
+        }
+        buf.erase(0, a);
+    }
+    if (!buf.empty()) {
+        if (buf.back() == '\r') buf.pop_back();
+        on_line(buf);
+    }
+    port::close(c);
+    return port::wait(c);
+}
+#endif
 
 std::string text_file(const fs::path &p) {   // read in text mode
     const Bytes b = read_file(p);
@@ -286,6 +409,7 @@ std::string env_text(const json::Value &v) {   // an environment value from the 
     return o;
 }
 
+#ifdef _WIN32
 Worker::Worker(const std::vector<std::string> &cmd, const Env &env) {
     std::wstring line = command_line(cmd), block = env_block(env);
     SECURITY_ATTRIBUTES sa{sizeof sa, nullptr, TRUE};
@@ -341,5 +465,43 @@ bool Worker::request(const std::string &line, std::string &answer) {
         buf.append(tmp, n);
     }
 }
+#else
+// Linux: `proc` holds the port::Child (with both pipe ends); `in` / `out` stay unused
+Worker::Worker(const std::vector<std::string> &cmd, const Env &env) {
+    port::Spawn s = spawn_of(cmd, env);
+    s.in_pipe = true;
+    s.out = port::Spawn::pipe;
+    s.err = port::Spawn::inherit_err;   // as Popen without stderr=: the worker's tracebacks reach the log
+    proc = new port::Child(start(s));
+}
+
+Worker::~Worker() {
+    port::Child *c = static_cast<port::Child *>(proc);
+    if (!c) return;
+    port::close_fd(c->in);   // the worker's stdin ends: it exits
+    if (port::wait(*c, 10000) < 0 && !c->done) port::kill(*c);
+    port::close(*c);
+    delete c;
+}
+
+bool Worker::request(const std::string &line, std::string &answer) {
+    port::Child *c = static_cast<port::Child *>(proc);
+    const std::string l = line + "\n";
+    if (!port::write_all(c->in, l.data(), l.size())) return false;
+    for (;;) {
+        const size_t nl = buf.find('\n');
+        if (nl != std::string::npos) {
+            answer = buf.substr(0, nl);
+            if (!answer.empty() && answer.back() == '\r') answer.pop_back();
+            buf.erase(0, nl + 1);
+            return true;
+        }
+        char tmp[65536];
+        const long n = port::read_some(c->out, tmp, sizeof tmp, -1);
+        if (n <= 0) return false;
+        buf.append(tmp, size_t(n));
+    }
+}
+#endif
 
 }  // namespace u3

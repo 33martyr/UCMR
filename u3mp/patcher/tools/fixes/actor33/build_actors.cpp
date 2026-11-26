@@ -28,6 +28,9 @@
 #include <memory>
 #include <mutex>
 #include <thread>
+#ifndef _WIN32
+#include <sys/stat.h>
+#endif
 
 namespace u3 {
 namespace {
@@ -325,8 +328,13 @@ void sig_walk(const fs::path &top, const fs::path &dp, std::vector<std::string> 
     std::sort(files.begin(), files.end());
     for (const std::string &n : files) {
         if (!(n.size() > 6 && n.compare(n.size() - 6, 6, ".psarc") == 0) && n != "net18.bin") continue;
+#ifdef _WIN32
         struct _stat64 st;
         if (_wstat64((dp / upath(n)).wstring().c_str(), &st)) continue;
+#else
+        struct stat st;
+        if (::stat((dp / upath(n)).c_str(), &st)) continue;
+#endif
         sig.push_back(fmt("%s %lld %lld", win_path(utf8(fs::relative(dp / upath(n), top))).c_str(), (long long)st.st_size, (long long)st.st_mtime));
     }
     const std::string rel = utf8(fs::relative(dp, top));
