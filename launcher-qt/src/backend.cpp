@@ -2,6 +2,7 @@
 
 #include <QCoreApplication>
 #include <QDir>
+#include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QGuiApplication>
@@ -12,8 +13,27 @@
 #include <QWindow>
 
 #include <cstdlib>
+#include <string>
 
 namespace {
+
+// The launcher core's file (launcher/native/build.sh builds it for each system)
+#ifdef _WIN32
+const QString CoreFile = QStringLiteral("launcher/native/uncharted_native.dll");
+#else
+const QString CoreFile = QStringLiteral("launcher/native/libuncharted_native.so");
+#endif
+
+// A path as the core takes it (native.h, un_path_char): UTF-16 with backslashes on Windows, as it always was; the
+// file system's own bytes (UTF-8) on Linux.
+std::basic_string<un_path_char> corePath(const QString &path)
+{
+#ifdef _WIN32
+    return QDir::toNativeSeparators(path).toStdWString();
+#else
+    return QFile::encodeName(path).toStdString();
+#endif
+}
 
 // The launcher's folder: the first folder at or above this program's with the launcher's native code.
 QString launcherRoot()
@@ -23,7 +43,7 @@ QString launcherRoot()
         return override;
     QDir dir(QCoreApplication::applicationDirPath());
     for (int i = 0; i < 6; ++i) {
-        if (QFileInfo::exists(dir.filePath("launcher/native/uncharted_native.dll")))
+        if (QFileInfo::exists(dir.filePath(CoreFile)))
             return dir.absolutePath();
         if (!dir.cdUp())
             break;
@@ -61,7 +81,7 @@ void Backend::start()
 {
     const QString root = launcherRoot();
     if (root.isEmpty()) {
-        m_error = QStringLiteral("launcher/native/uncharted_native.dll was not found next to this program.");
+        m_error = CoreFile + QStringLiteral(" was not found next to this program.");
         emit readyChanged();
         return;
     }
@@ -72,7 +92,7 @@ void Backend::start()
     m_coreTick = reinterpret_cast<CoreTickFn>(m_dll.resolve("un_core_tick"));
     m_coreClose = reinterpret_cast<CoreCloseFn>(m_dll.resolve("un_core_close"));
     if (!m_coreOpen || !m_coreSend || !m_coreTick || !m_coreClose) {
-        m_error = QStringLiteral("launcher/native/uncharted_native.dll is missing or older than this window.");
+        m_error = CoreFile + QStringLiteral(" is missing or older than this window.");
         emit readyChanged();
         return;
     }
@@ -81,15 +101,17 @@ void Backend::start()
     // %LOCALAPPDATA%\Uncharted Launcher\Uncharted Launcher, and the cache earlier versions left there is removed (Qt
     // alone wrote that folder). The window's QML loads after this, so Qt picks the new place up.
     qputenv("QML_DISK_CACHE_PATH", QDir::toNativeSeparators(QDir(root).filePath("analysis/uncharted-user/qmlcache")).toUtf8());
+#ifdef _WIN32   // no Linux version ever wrote a cache outside its folder: nothing to remove there
     const QString local = qEnvironmentVariable("LOCALAPPDATA");
     if (!local.isEmpty()) {
         QDir(QDir(local).filePath("Uncharted Launcher/Uncharted Launcher")).removeRecursively();
         QDir(local).rmdir("Uncharted Launcher");   // only once nothing else is left in it
     }
+#endif
     QJsonObject args;
     args.insert("direct", m_direct.isEmpty() ? QJsonValue() : QJsonValue(m_direct));
     const QByteArray a = QJsonDocument(args).toJson(QJsonDocument::Compact);
-    const std::wstring r = QDir::toNativeSeparators(root).toStdWString();
+    const auto r = corePath(root);
     m_coreOpen(r.c_str(), a.constData());
     deliver(drain(m_coreSend, nullptr));
     m_tick.start();
@@ -237,7 +259,7 @@ void Backend::act(const QString &id, const QString &kind, const QVariant &value)
 
 void Backend::loadNative(const QString &root)
 {
-    m_dll.setFileName(QDir(root).filePath("launcher/native/uncharted_native.dll"));
+    m_dll.setFileName(QDir(root).filePath(CoreFile));
     if (!m_dll.load())
         return;
     m_unPage = reinterpret_cast<PageFn>(m_dll.resolve("un_page"));
@@ -272,9 +294,9 @@ void Backend::navPoll()
         return;
     }
     if (!m_padReady) {   // SDL3 loads on the first poll with the window shown (never for a --play start)
-        const std::wstring r = QDir::toNativeSeparators(m_root).toStdWString();
+        const auto r = corePath(m_root);
         if (!m_padInit(r.c_str())) {
-            m_navTimer.stop();   // no SDL3.dll: no controller navigation
+            m_navTimer.stop();   // no SDL3 library: no controller navigation
             return;
         }
         m_padReady = true;
