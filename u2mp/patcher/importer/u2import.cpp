@@ -36,8 +36,14 @@
 #include "u2conv.hpp"
 #include "log_history.h"   // launcher/native/log_history.h
 
+#ifdef _WIN32
 #include <windows.h>
 #include <bcrypt.h>
+#else
+#include "sha1.h"   // launcher/native/sha1.h: Windows keeps bcrypt
+#include <ctime>
+#include <unistd.h>
+#endif
 
 #include <chrono>
 #include <cstdio>
@@ -286,12 +292,21 @@ void sha1_memo_save(const fs::path &work) {
 }
 
 bool sha1_memo_stamp(const fs::path &container, long long &size, long long &mtime) {
+#ifndef _WIN32
+    std::error_code ec;   // the stamp is only compared with itself, on this machine
+    if (!fs::is_regular_file(container, ec)) return false;
+    size = (long long)fs::file_size(container, ec);
+    if (ec) return false;
+    mtime = (long long)fs::last_write_time(container, ec).time_since_epoch().count();
+    return !ec;
+#else
     WIN32_FILE_ATTRIBUTE_DATA d = {};
     if (!GetFileAttributesExW(container.wstring().c_str(), GetFileExInfoStandard, &d)) return false;
     if (d.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) return false;
     size = (long long)((uint64_t(d.nFileSizeHigh) << 32) | d.nFileSizeLow);
     mtime = (long long)((uint64_t(d.ftLastWriteTime.dwHighDateTime) << 32) | d.ftLastWriteTime.dwLowDateTime);
     return true;
+#endif
 }
 std::string sha1_memo_key(const Entry &e) { return e.path.empty() ? e.arc_path + "::" + std::to_string(e.index) : S(e.path); }
 fs::path sha1_memo_container(const Entry &e) { return e.path.empty() ? P(e.arc_path) : e.path; }
@@ -374,9 +389,16 @@ private:
     void lg(const std::string &text) {
         log(text);
         if (logf) {
+#ifdef _WIN32
             SYSTEMTIME t;
             GetLocalTime(&t);
             std::fprintf(logf, "%02d:%02d:%02d %s\n", t.wHour, t.wMinute, t.wSecond, text.c_str());
+#else
+            const std::time_t now = std::time(nullptr);
+            std::tm t{};
+            localtime_r(&now, &t);
+            std::fprintf(logf, "%02d:%02d:%02d %s\n", t.tm_hour, t.tm_min, t.tm_sec, text.c_str());
+#endif
             std::fflush(logf);
         }
     }
@@ -395,7 +417,12 @@ private:
         }
         // a sync client or a virus scanner may hold state.json for a moment: retry
         for (int i = 0; i < 40; i++) {
-            if (MoveFileExW(tmp.wstring().c_str(), state_file.wstring().c_str(), MOVEFILE_REPLACE_EXISTING)) {
+#ifdef _WIN32
+            const bool replaced = MoveFileExW(tmp.wstring().c_str(), state_file.wstring().c_str(), MOVEFILE_REPLACE_EXISTING);
+#else
+            const bool replaced = std::rename(tmp.c_str(), state_file.c_str()) == 0;
+#endif
+            if (replaced) {
                 state_dirty = false;
                 return;
             }
@@ -606,11 +633,19 @@ int Importer::run() {
     // a full run starts a new log (it grew with every import before), the earlier ones kept LOG_DAYS days as
     // import.<date>.log; an --only run adds to the last one
     if (a.only.empty()) keep_log_history(out / "import.log");
+#ifdef _WIN32
     logf = _wfopen((out / "import.log").wstring().c_str(), a.only.empty() ? L"wb" : L"ab");
+#else
+    logf = std::fopen((out / "import.log").c_str(), a.only.empty() ? "wb" : "ab");
+#endif
     lg("=== u2mp import " + now_text() + " (converter " + CONV_VERSION + ")");
     state.set("status", str("running"));
     state.set("started", str(now_text()));
+#ifdef _WIN32
     state.set("pid", num(GetCurrentProcessId()));
+#else
+    state.set("pid", num((long long)getpid()));
+#endif
     state.set("inputs", obj({{"ps4", str(a.ps4)}, {"ps3", str(a.ps3)}, {"ps3_dlc", str(a.ps3_dlc)}}));
     state.set("conv", str(CONV_VERSION));
     state.set("updating", Value::boolean(a.update));
@@ -629,7 +664,12 @@ int Importer::run() {
     // the decrypted PS3 EBOOT.elf is required: no import without it
     const std::string elf = !a.ps3_elf.empty() ? a.ps3_elf : S(ps3->base_main.parent_path().parent_path() / "EBOOT.elf");
     bool ok = false;
-    if (FILE *f = _wfopen(P(elf).wstring().c_str(), L"rb")) {
+#ifdef _WIN32
+    FILE *f = _wfopen(P(elf).wstring().c_str(), L"rb");
+#else
+    FILE *f = std::fopen(P(elf).c_str(), "rb");
+#endif
+    if (f) {
         char m[4] = {};
         ok = std::fread(m, 1, 4, f) == 4 && !std::memcmp(m, "\x7f" "ELF", 4);
         std::fclose(f);
@@ -1510,6 +1550,11 @@ int Importer::finish(const std::string &status, std::vector<std::pair<std::strin
 namespace u2imp {
 
 std::string sha1_hex(const Bytes &b) {
+#ifndef _WIN32
+    sha1::Hash h;
+    h.update(b.data(), b.size());
+    return h.hex();
+#else
     static BCRYPT_ALG_HANDLE provider = [] {
         BCRYPT_ALG_HANDLE alg = nullptr;
         BCryptOpenAlgorithmProvider(&alg, BCRYPT_SHA1_ALGORITHM, nullptr, 0);
@@ -1525,6 +1570,7 @@ std::string sha1_hex(const Bytes &b) {
     std::string s;
     for (uint8_t x : d) s += fmt("%02x", x);
     return s;
+#endif
 }
 
 }  // namespace u2imp
@@ -1541,15 +1587,24 @@ std::string shipped_id_text() {
         h.update("\0", 1);
         h.update(d.data(), d.size());
     };
+#ifdef _WIN32
     add("u2import.exe", exe_dir() / "u2import.exe", false);
+#else
+    add("u2import.exe", exe_dir() / "u2import", false);   // the same name in the fingerprint, the Linux file name
+#endif
     add("import-list.tsv", patcher_dir().parent_path() / "docs" / "import-list.tsv", true);
     add("adsr_env.json", launcher_root() / "u3mp" / "patcher" / "tools" / "fixes" / "sound-banks" / "adsr_env.json", true);
     return h.hex();
 }
 
+#ifdef _WIN32
 int wmain(int argc, wchar_t **argv) {
+#else
+int main(int argc, char **argv) {   // Linux: the arguments are UTF-8 already
+#endif
     g_event_prefix = "@U2MP ";
     u3::g_u2 = true;   // the Uncharted 3 converters write for Uncharted 2 (set before any thread starts)
+#ifdef _WIN32
     SetConsoleOutputCP(CP_UTF8);
     std::vector<std::string> v;
     for (int i = 1; i < argc; i++) {
@@ -1558,6 +1613,9 @@ int wmain(int argc, wchar_t **argv) {
         WideCharToMultiByte(CP_UTF8, 0, argv[i], -1, s.data(), n, nullptr, nullptr);
         v.push_back(s);
     }
+#else
+    std::vector<std::string> v(argv + 1, argv + argc);
+#endif
     try {
         if (!v.empty() && v[0] == "--shipped-id") {
             log(shipped_id_text());

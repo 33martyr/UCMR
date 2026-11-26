@@ -313,9 +313,9 @@ extern "C" {
 
 // Suggests a preset. `logs` lists game log paths, one per line; the newest one naming a GPU decides. Without such
 // a log, the highest-ranked DXGI adapter is used. Output: name\tintegrated(1/0/-1)\tpreset, preset possibly empty.
-UN_API int un_gpu_recommendation(const wchar_t *logs, char *out, int cap) {
+UN_API int un_gpu_recommendation(const un_path_char *logs, char *out, int cap) {
     std::vector<fs::path> paths;
-    const std::wstring all = logs ? logs : L"";
+    const std::wstring all = port::wtext(logs, L"");
     for (size_t pos = 0; pos <= all.size();) {
         size_t end = all.find(L'\n', pos);
         std::wstring p = all.substr(pos, end == std::wstring::npos ? std::wstring::npos : end - pos);
@@ -419,8 +419,8 @@ UN_API int un_anti_aliasing_choice(const char *upscaler, const char *launcher_aa
 
 // upscalers available in this install as value\tlabel: off, FSR 1 and FSR 3.1 always; FSR 4 only if its model file
 // is present, DLSS only if both DLLs are
-UN_API int un_upscaling_options(const wchar_t *root, char *out, int cap) {
-    const fs::path r = port::path(root ? root : L".");
+UN_API int un_upscaling_options(const un_path_char *root, char *out, int cap) {
+    const fs::path r = port::path(port::wtext(root, L"."));
     auto file = [&](const char *rel) {
         std::error_code ec;
         return fs::is_regular_file(r / rel, ec);

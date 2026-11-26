@@ -18,8 +18,12 @@
 // the folders of the sources and headers each step's code is built from (tools/fixes/<job> as "<job>").
 //
 // Table format: "U3FIX-CODE-IDS 1\n", then "<step> <id> <folder>,<folder>...\n" per step, then "END\n".
+#ifdef _WIN32
 #include <windows.h>
 #include <bcrypt.h>
+#else
+#include "../launcher/native/sha256.h"   // Windows keeps bcrypt
+#endif
 
 #include <algorithm>
 #include <cstdio>
@@ -50,6 +54,11 @@ std::string read_file(const fs::path &p) {
 }
 
 std::string sha256_hex(const std::string &data) {
+#ifndef _WIN32
+    sha256::Hash h;
+    h.update(data.data(), data.size());
+    return h.hex();
+#else
     BCRYPT_ALG_HANDLE alg = nullptr;
     BCRYPT_HASH_HANDLE h = nullptr;
     unsigned char d[32];
@@ -62,6 +71,7 @@ std::string sha256_hex(const std::string &data) {
     std::string o;
     for (unsigned char c : d) o += hx[c >> 4], o += hx[c & 15];
     return o;
+#endif
 }
 
 std::vector<std::string> lines_of(const std::string &t) {
@@ -113,6 +123,7 @@ std::vector<std::string> deps_of(const fs::path &d) {
 
 }  // namespace
 
+#ifdef _WIN32
 int wmain(int argc, wchar_t **argv) {
     if (argc != 6) fail("usage: code_ids <dispatch.cpp> <objects.txt> <nm.txt> <toolchain> <out.cpp>");
     auto arg = [&](int i) {
@@ -121,6 +132,11 @@ int wmain(int argc, wchar_t **argv) {
         WideCharToMultiByte(CP_UTF8, 0, argv[i], -1, s.data(), n, nullptr, nullptr);
         return s;
     };
+#else
+int main(int argc, char **argv) {   // Linux: UTF-8 arguments
+    if (argc != 6) fail("usage: code_ids <dispatch.cpp> <objects.txt> <nm.txt> <toolchain> <out.cpp>");
+    auto arg = [&](int i) { return std::string(argv[i]); };
+#endif
     const std::string dispatch = norm(arg(1)), toolchain = arg(4);
 
     // the objects, their sources, their bytes' sha256 and the files they are built from

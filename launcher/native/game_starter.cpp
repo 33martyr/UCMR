@@ -4,6 +4,7 @@
 //                    --game <game folder>
 // All of the work is un_start_game in uncharted_native.dll (start.cpp), next to this program; this only hands it the
 // launcher's folder (two folders up) and the command line, and ends with its exit code. Without Python.
+#ifdef _WIN32
 #include <windows.h>
 
 #include <string>
@@ -57,3 +58,48 @@ int wmain(int argc, wchar_t **argv) {
     args += "]";
     return (int)start(root.c_str(), args.c_str());
 }
+#else
+// Linux: the same program as game_starter (no .exe), next to libuncharted_native.so; arguments are UTF-8 already.
+#include <dlfcn.h>
+#include <unistd.h>
+
+#include <cstdio>
+#include <string>
+#include <vector>
+
+namespace {
+
+std::string quoted(const std::string &s) {   // a JSON string, as above
+    std::string out = "\"";
+    for (unsigned char c : s) {
+        if (c == '"' || c == '\\') { out += '\\'; out += (char)c; }
+        else if (c < 0x20) {
+            char b[8];
+            std::snprintf(b, sizeof b, "\\u%04x", c);
+            out += b;
+        } else out += (char)c;
+    }
+    return out + "\"";
+}
+
+std::string parent(const std::string &p) { return p.substr(0, p.find_last_of('/')); }
+
+}  // namespace
+
+int main(int argc, char **argv) {
+    std::vector<char> self(4096);
+    const ssize_t n = ::readlink("/proc/self/exe", self.data(), self.size());
+    if (n <= 0 || (size_t)n >= self.size()) { std::fputs("game_starter: its own path is unknown\n", stderr); return 1; }
+    const std::string folder = parent(std::string(self.data(), (size_t)n));   // launcher/native
+    const std::string root = parent(parent(folder));                          // the launcher's folder
+    void *library = ::dlopen((folder + "/libuncharted_native.so").c_str(), RTLD_NOW | RTLD_LOCAL);
+    if (!library) { std::fputs("game_starter: launcher/native/libuncharted_native.so could not be loaded\n", stderr); return 1; }
+    using StartFn = long long (*)(const char *, const char *);
+    auto start = reinterpret_cast<StartFn>(::dlsym(library, "un_start_game"));
+    if (!start) { std::fputs("game_starter: libuncharted_native.so has no un_start_game\n", stderr); return 1; }
+    std::string args = "[";
+    for (int i = 1; i < argc; ++i) args += (i > 1 ? "," : "") + quoted(argv[i]);
+    args += "]";
+    return (int)start(root.c_str(), args.c_str());
+}
+#endif

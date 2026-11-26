@@ -6,6 +6,7 @@
 // Windows API boundary; port::utf8 / port::wide are the only conversions.
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -18,11 +19,16 @@
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <windows.h>
+#include <shellapi.h>
 #else
 #include <cstdlib>
 #include <dlfcn.h>
 #include <sched.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #endif
 
@@ -104,19 +110,74 @@ inline std::wstring wide(const std::string &s) {   // UTF-8 to UTF-32
 }
 #endif
 
+// the launcher's wide path text as a path. Linux: UTF-8, and a backslash (the Windows separator some joins and
+// constant names still use) becomes "/"; no file name of ours or of the game contains one.
 inline fs::path path(const std::wstring &w) {
 #ifdef _WIN32
     return fs::path(w);
 #else
-    return fs::path(utf8(w));
+    std::string s = utf8(w);
+    for (char &c : s)
+        if (c == '\\') c = '/';
+    return fs::path(s);
 #endif
 }
 
+#ifndef _WIN32
+// an exported function's UTF-8 path argument (native.h un_path_char) as a path
+inline fs::path path(const char *s) { return fs::path(s ? s : ""); }
+#endif
+
+// an exported function's path argument (native.h un_path_char: wchar_t on Windows, UTF-8 char on Linux) as the
+// launcher's wide text; `fallback` when it is null
+inline std::wstring wtext(const wchar_t *p, const wchar_t *fallback = L"") { return p ? std::wstring(p) : std::wstring(fallback); }
+inline std::wstring wtext(const char *p, const wchar_t *fallback = L"") { return p ? wide(p) : std::wstring(fallback); }
+
+// the other way: UTF-8 text as an exported function's path argument (wide on Windows, UTF-8 on Linux)
+#ifdef _WIN32
+using arg_string = std::wstring;
+inline std::wstring arg(const std::string &s) { return wide(s); }
+inline std::wstring arg(const std::wstring &w) { return w; }
+#else
+using arg_string = std::string;
+inline std::string arg(const std::string &s) { return s; }
+inline std::string arg(const std::wstring &w) { return utf8(w); }
+#endif
+
+// the native separator for wide joins
+#ifdef _WIN32
+inline constexpr wchar_t sep = L'\\';
+#else
+inline constexpr wchar_t sep = L'/';
+#endif
+
+// UTF-8 path text as a path (Linux: a backslash becomes "/", as in path() above)
 inline fs::path path_utf8(const std::string &s) {
 #ifdef _WIN32
     return fs::u8path(s);
 #else
-    return fs::path(s);
+    std::string t = s;
+    for (char &c : t)
+        if (c == '\\') c = '/';
+    return fs::path(t);
+#endif
+}
+
+// opens a folder, file or web address with the desktop's default program and does not wait (Windows: ShellExecuteW
+// "open"; Linux: xdg-open)
+inline void open_path(const fs::path &p) {
+#ifdef _WIN32
+    ShellExecuteW(nullptr, L"open", p.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+#else
+    const pid_t pid = ::fork();
+    if (pid == 0) {   // a grandchild runs xdg-open, so nobody has to wait for it
+        if (::fork() == 0) {
+            ::execlp("xdg-open", "xdg-open", p.c_str(), (char *)nullptr);
+            ::_exit(127);
+        }
+        ::_exit(0);
+    }
+    if (pid > 0) ::waitpid(pid, nullptr, 0);
 #endif
 }
 
@@ -374,6 +435,28 @@ inline std::string error_text(unsigned long code) {
 inline long long now_ms() {
     using namespace std::chrono;
     return (long long)duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
+}
+
+// ------------------------------------------------------------------------------------------------ later phases
+
+// a feature whose Linux body comes in a later phase (docs/WINDOWS-DEPENDENCIES.md §13): one log line on stderr, and
+// the text the caller hands back as its reason
+inline const char *not_yet(const char *what) {
+    std::fprintf(stderr, "uncharted_native: %s: not on Linux yet\n", what);
+    return "not on Linux yet";
+}
+
+// the core's text answer convention (native.h): 0 when `s` fits in `out`, else -(the size needed)
+inline int give(const std::string &s, char *out, int cap) {
+    if ((int)s.size() + 1 > cap) return -(int)(s.size() + 1);
+    std::memcpy(out, s.c_str(), s.size() + 1);
+    return 0;
+}
+
+// a stub's answer: "<what>: not on Linux yet" in `out`, then `status` (or the size needed)
+inline int not_yet_answer(const char *what, int status, char *out, int cap) {
+    const int r = give(std::string(what) + ": " + not_yet(what), out, cap);
+    return r < 0 ? r : status;
 }
 
 }   // namespace port

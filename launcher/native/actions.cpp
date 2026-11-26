@@ -20,8 +20,11 @@
 #include "native.h"
 #include "json.h"
 
+#ifdef _WIN32
 #include <windows.h>
 #include <shellapi.h>
+#endif
+#include "port.h"
 
 #include <atomic>
 #include <cstdlib>
@@ -32,9 +35,9 @@
 #include <vector>
 
 extern "C" {
-UN_API int un_game_update(const char *what, const wchar_t *root, const char *args_json, char *out, int cap);
+UN_API int un_game_update(const char *what, const un_path_char *root, const char *args_json, char *out, int cap);
 UN_API int un_game_update_step(char *out, int cap);
-UN_API int un_check_game_files(const wchar_t *root, const wchar_t *game_dir, char *out, int cap);
+UN_API int un_check_game_files(const un_path_char *root, const un_path_char *game_dir, char *out, int cap);
 }
 
 namespace {
@@ -51,11 +54,15 @@ int give(const std::string &s, char *out, int cap) {
 }
 
 std::wstring wide(const std::string &s) {
+#ifdef _WIN32
     if (s.empty()) return L"";
     const int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), nullptr, 0);
     std::wstring w(n, L'\0');
     MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), &w[0], n);
     return w;
+#else
+    return port::wide(s);
+#endif
 }
 
 // a text call of the DLL's convention (0 ok; a negative status: the size it needs); (status, text)
@@ -71,12 +78,19 @@ template <typename Call> std::pair<int, std::string> text_call(Call call) {
 }
 
 std::string system_answer(const char *what, const std::string &arg) {
-    const std::wstring a = wide(arg);
+    const port::arg_string a = port::arg(arg);
     auto r = text_call([&](char *o, int c) { return un_system(what, a.c_str(), o, c); });
     return r.first == 0 ? r.second : "";
 }
 
-bool exists(const std::string &path) { return GetFileAttributesW(wide(path).c_str()) != INVALID_FILE_ATTRIBUTES; }
+bool exists(const std::string &path) {
+#ifdef _WIN32
+    return GetFileAttributesW(wide(path).c_str()) != INVALID_FILE_ATTRIBUTES;
+#else
+    std::error_code ec;
+    return std::filesystem::exists(port::path_utf8(path), ec);
+#endif
+}
 bool is_game_dir(const std::string &folder) { return !folder.empty() && system_answer("is_game_dir", folder) == "1"; }
 
 std::string parent_of(std::string path) {
@@ -92,10 +106,15 @@ std::string name_of(std::string path) {
 }
 
 void open_folder(const std::string &path) {
+#ifdef _WIN32
     ShellExecuteW(nullptr, L"open", wide(path).c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+#else
+    port::open_path(port::path_utf8(path));
+#endif
 }
 
 bool delete_tree(const std::wstring &path) {
+#ifdef _WIN32
     WIN32_FIND_DATAW f;
     HANDLE h = FindFirstFileW((path + L"\\*").c_str(), &f);
     if (h != INVALID_HANDLE_VALUE) {
@@ -114,6 +133,11 @@ bool delete_tree(const std::wstring &path) {
         FindClose(h);
     }
     return RemoveDirectoryW(path.c_str()) != 0;
+#else
+    std::error_code ec;   // like the Windows body: links are removed, not followed; false when nothing was there
+    const auto n = std::filesystem::remove_all(port::path(path), ec);
+    return !ec && n > 0;
+#endif
 }
 
 // gameupdate.cpp: (status, text); 1 a reason for the player, 3 a file system failure ("[WinError n] ...")
@@ -122,7 +146,7 @@ std::pair<int, std::string> game_update(const char *what, const std::string &roo
     a.kind = Value::Array;
     for (auto &s : args) a.items.push_back(Value::text(s));
     const std::string j = json::dump(a, false);
-    const std::wstring r = wide(root);
+    const port::arg_string r = port::arg(root);
     return text_call([&](char *o, int c) { return un_game_update(what, r.c_str(), j.c_str(), o, c); });
 }
 
@@ -220,6 +244,7 @@ std::string answered_path(const Request &q) { return q.answer.kind == Value::Str
 // the newest of the games' boot.log files' folder, else the analysis folder
 Value open_logs(const Request &q) {
     std::string best;
+#ifdef _WIN32
     FILETIME best_time{};
     for (const char *folder : {"uncharted", "big2-ps4_Shipping", "big3-ps4_Shipping"}) {
         const std::string log = q.root + "\\analysis\\" + folder + "\\boot.log";
@@ -230,6 +255,19 @@ Value open_logs(const Request &q) {
             best_time = a.ftLastWriteTime;
         }
     }
+#else
+    std::filesystem::file_time_type best_time{};
+    for (const char *folder : {"uncharted", "big2-ps4_Shipping", "big3-ps4_Shipping"}) {
+        const std::string log = q.root + "/analysis/" + folder + "/boot.log";
+        std::error_code ec;
+        const auto t = std::filesystem::last_write_time(port::path_utf8(log), ec);
+        if (ec) continue;
+        if (best.empty() || t > best_time) {
+            best = log;
+            best_time = t;
+        }
+    }
+#endif
     open_folder(best.empty() ? q.root + "\\analysis" : parent_of(best));
     return done();
 }
@@ -314,7 +352,7 @@ std::vector<std::string> lines_of(const std::string &text) {   // str.splitlines
 }
 
 Value check_game_files(const Request &q) {
-    const std::wstring r = wide(q.root), g = wide(q.game_dir);
+    const port::arg_string r = port::arg(q.root), g = port::arg(q.game_dir);
     std::string out(1 << 20, '\0');
     int status = un_check_game_files(r.c_str(), g.c_str(), &out[0], (int)out.size());
     if (status < 0) {

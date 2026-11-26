@@ -12,6 +12,13 @@
 #endif
 #define UN_VERSION 1
 
+/* Paths passed in: UTF-16 (wchar_t) on Windows, as the API always was; UTF-8 (char) on Linux. */
+#ifdef _WIN32
+typedef wchar_t un_path_char;
+#else
+typedef char un_path_char;
+#endif
+
 #define UN_ERR_NO_STEAM 1   /* no Steam account folder on this PC */
 #define UN_ERR_BAD_FILE 2   /* a shortcuts.vdf that can't be read: out = "<file>: <reason>"; nothing was written */
 #define UN_ERR_OS 3         /* a file couldn't be written: out = the reason */
@@ -38,30 +45,30 @@ UN_API int un_steam_roundtrip(const char *path);
  * frames as offsets from guest_base). un_minidump: 1 written, 0 failed. */
 UN_API int un_thread_report(unsigned long pid, unsigned long long guest_base, unsigned long long guest_size, char *out,
                             int cap);
-UN_API int un_minidump(unsigned long pid, const wchar_t *path);
+UN_API int un_minidump(unsigned long pid, const un_path_char *path);
 /* Freeze watchdog (hang.cpp): a thread that watches the game's log for its Frame stats lines; none for `seconds` while
  * the game runs writes hang-<time>.txt beside the log (and a minidump in dumps, in the source tree or with
  * UNCHARTED_HANG_DUMP=1). un_hang_watchdog: its id, 0 not started. un_hang_reports out: the reports so far. */
-UN_API int un_hang_watchdog(unsigned long pid, const wchar_t *log, const wchar_t *dumps, int seconds, const wchar_t *root);
+UN_API int un_hang_watchdog(unsigned long pid, const un_path_char *log, const un_path_char *dumps, int seconds, const un_path_char *root);
 UN_API int un_hang_reports(int id, char *out, int cap);
 
 /* Resource tracking for long sessions (leaks): a background thread writes <folder>\memory-<time>.csv every `seconds`
  * until the game ends; the newest 10 such files stay. out: the file's path. 0 started, 1 not started. */
-UN_API int un_memory_monitor(unsigned long pid, const wchar_t *folder, double seconds, char *out, int cap);
+UN_API int un_memory_monitor(unsigned long pid, const un_path_char *folder, double seconds, char *out, int cap);
 
 /* Settings core (config.cpp): tables, and the per-game runtime settings file <user_dir>\probe-<game>.ini.
  * un_settings_table name: "ini_defaults" (key\tvalue), "fps_limits" (value\tlabel), "presets"
  *   (name\ttitle\tsummary\tdetail\tresolution\tupscale\tkey=value;...).
  * un_ini_read out: key\tvalue lines (defaults, then the file's keys). un_ini_write updates: key\tvalue lines; 0 ok. */
 UN_API int un_settings_table(const char *name, char *out, int cap);
-UN_API int un_ini_read(const wchar_t *user_dir, const char *game, char *out, int cap);
-UN_API int un_ini_write(const wchar_t *user_dir, const char *game, const char *updates);
+UN_API int un_ini_read(const un_path_char *user_dir, const char *game, char *out, int cap);
+UN_API int un_ini_write(const un_path_char *user_dir, const char *game, const char *updates);
 /* The launcher's settings file (launcher.json): read with its defaults, the Wine merge with the prefix's own file and
  * the version migrations (which also update the runtime settings files); out: the settings as JSON.
  * un_config_write: writes the JSON given (any layout) in the file's layout, safely; 0 ok, 1 not written, 2 bad JSON. */
-UN_API int un_config_read(const wchar_t *config_file, const wchar_t *prefix_file, const wchar_t *user_dir, int wine,
+UN_API int un_config_read(const un_path_char *config_file, const un_path_char *prefix_file, const un_path_char *user_dir, int wine,
                           char *out, int cap);
-UN_API int un_config_write(const wchar_t *config_file, const char *config_json);
+UN_API int un_config_write(const un_path_char *config_file, const char *config_json);
 
 /* Game detection and system helpers (system.cpp). un_system_tables: GAMES, LANGUAGES, CHEATS as JSON.
  * un_system what: unix_path, windows_path, shared_config, slow_drive, is_game_dir, update_dir, app_version, voices,
@@ -70,7 +77,7 @@ UN_API int un_config_write(const wchar_t *config_file, const char *config_json);
  * 2 no answer (app_version: no readable APP_VER; an empty one is ""). */
 UN_API int un_system_tables(char *out, int cap);
 UN_API int un_wine(void);
-UN_API int un_system(const char *what, const wchar_t *arg, char *out, int cap);
+UN_API int un_system(const char *what, const un_path_char *arg, char *out, int cap);
 UN_API int un_pid_alive(unsigned long pid);
 
 /* Controllers through SDL3 (gamepads.cpp). un_pad_init: loads SDL3 once (root: the launcher's folder); 1 when
@@ -78,7 +85,7 @@ UN_API int un_pid_alive(unsigned long pid);
  * empty) and the buttons held (space-separated), one per line. un_pad_nav (the window's menu navigation): the held
  * buttons of all pads as bits by SDL button index (21 / 22: left / right trigger) and the left stick; returns the
  * pad count, -1 without SDL. */
-UN_API int un_pad_init(const wchar_t *root);
+UN_API int un_pad_init(const un_path_char *root);
 UN_API int un_pad_state(char *out, int cap);
 UN_API int un_pad_nav(unsigned *buttons, int *lx, int *ly);
 
@@ -96,21 +103,21 @@ UN_API int un_starter_files(const char *what, const char *args_json, char *out, 
  * (as un_apply_patches takes it); un_apply_image_patches applies them to the linked image (as un_apply_patches).
  * 1: a setting is not valid (out: why). */
 UN_API int un_image_patches(const char *executable, char *out, int cap);
-UN_API int un_apply_image_patches(const wchar_t *image, const char *executable, char *out, int cap);
+UN_API int un_apply_image_patches(const un_path_char *image, const char *executable, char *out, int cap);
 /* The game's preparation (prepare.cpp, gow3_pc/scripts/prepare.py): boot.bin, eboot.elf, entry.bin and analysis.json in
  * out_dir from the game folder's executable. out: the lines prepare.py prints; 1 failed (out: why). */
-UN_API int un_prepare(const wchar_t *game, const wchar_t *out_dir, const char *executable, char *out, int cap);
+UN_API int un_prepare(const un_path_char *game, const un_path_char *out_dir, const char *executable, char *out, int cap);
 
 /* The game starter's code patches (patcher.cpp). un_apply_patches: the patch list as JSON (tools/game_patcher.py);
  * out: the log; 0 applied and written, 1 not written (last line: why), negative: out too small (nothing written).
  * un_pattern_find out: match offsets without overlaps (at most limit; 0 all), one per line; 1 unreadable. */
-UN_API int un_apply_patches(const wchar_t *image, const char *patches_json, char *out, int cap);
-UN_API int un_pattern_find(const wchar_t *file, const char *pattern, int limit, char *out, int cap);
+UN_API int un_apply_patches(const un_path_char *image, const char *patches_json, char *out, int cap);
+UN_API int un_pattern_find(const un_path_char *file, const char *pattern, int limit, char *out, int cap);
 /* un_resolution_patch: the render resolution in the linked image `data` (in place, only when it worked); extra_mib:
  * how much the memory areas grew. 0 patched, 1 the code is not as expected, 2 too large (out's last line: why). */
 /* un_render_resolution: the render size that fits of the size chosen and smaller ones, patched into the image at
  * `image`; out: "<w> <h> <extra MiB>", then the log lines. 0 ok, 1 not as expected (last line: why). */
-UN_API int un_render_resolution(const wchar_t *image, const char *executable, int width, int height, int multiplayer,
+UN_API int un_render_resolution(const un_path_char *image, const char *executable, int width, int height, int multiplayer,
                                 char *out, int cap);
 UN_API int un_resolution_patch(unsigned char *data, unsigned long long size, int width, int height, int move,
                                long long *extra_mib, char *out, int cap);

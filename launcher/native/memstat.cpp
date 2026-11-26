@@ -4,7 +4,9 @@
 // then appears as a column that only ever grows. Sampling is done from the launcher side, not inside the game.
 
 #include "native.h"
+#include "port.h"
 
+#ifdef _WIN32
 #include <windows.h>
 #include <psapi.h>
 #include <tlhelp32.h>
@@ -105,7 +107,7 @@ extern "C" {
 // Begins sampling process `pid` every `seconds` into <folder>\memory-<YYYYmmdd-HHMMSS>.csv until it exits; the folder
 // is pruned to the 10 most recent such files. On success the CSV path is copied to `out` as UTF-8 and 0 is returned;
 // 1 means monitoring could not start, and a negative value is the buffer size `out` would need.
-UN_API int un_memory_monitor(unsigned long pid, const wchar_t *folder, double seconds, char *out, int cap) {
+UN_API int un_memory_monitor(unsigned long pid, const un_path_char *folder, double seconds, char *out, int cap) {
     if (seconds <= 0 || !folder) return 1;
     std::time_t now = std::time(nullptr);
     std::tm local{};
@@ -130,3 +132,16 @@ UN_API int un_memory_monitor(unsigned long pid, const wchar_t *folder, double se
 }
 
 }  // extern "C"
+
+#else   // Linux: /proc/<pid>/status sampling comes in a later phase (docs/WINDOWS-DEPENDENCIES.md §13 phase 6)
+
+extern "C" {
+
+UN_API int un_memory_monitor(unsigned long pid, const un_path_char *folder, double seconds, char *out, int cap) {
+    port::not_yet("memory monitor");
+    return 1;   // "could not start", as when the process can't be opened
+}
+
+}  // extern "C"
+
+#endif

@@ -905,7 +905,7 @@ UN_API int un_image_patches(const char *executable, char *out, int cap) {
 // Writes this executable's patches, chosen by the current settings, into the linked image; out receives the log lines.
 // Returns 0 when applied, 1 when not (the last line gives the reason), or a negative size when out is too small
 // (nothing is written; call again with that size).
-UN_API int un_apply_image_patches(const wchar_t *image, const char *executable, char *out, int cap) {
+UN_API int un_apply_image_patches(const un_path_char *image, const char *executable, char *out, int cap) {
     std::string list;
     try {
         list = json::dump(spec(image_patches(executable ? executable : "")));

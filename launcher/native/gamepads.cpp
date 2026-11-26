@@ -145,7 +145,7 @@ int give(const std::string &s, char *out, int cap) {
 extern "C" {
 
 // one-time SDL3 load, searching relative to `root` (the launcher folder); returns 1 if gamepad input is available
-UN_API int un_pad_init(const wchar_t *root) {
+UN_API int un_pad_init(const un_path_char *root) {
     if (!tried) {
         tried = true;
         load(root && *root ? port::path(root) : port::fs::path("."));

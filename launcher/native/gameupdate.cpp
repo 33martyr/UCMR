@@ -19,6 +19,8 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include "port.h"
+#ifdef _WIN32
 #include <windows.h>
 
 #include <algorithm>
@@ -405,7 +407,7 @@ extern "C" {
 // `root` (the launcher's folder) is no longer used. Returns 0 on success, 1 with a message meant for the player
 // (UpdateError), 2 for an unrecognised `what` (also the removed install / install_game), 3 with a file system error text
 // (OSError).
-UN_API int un_game_update(const char *what, const wchar_t *root, const char *args_json, char *out, int cap) {
+UN_API int un_game_update(const char *what, const un_path_char *root, const char *args_json, char *out, int cap) {
     (void)root;
     const std::string w = what ? what : "";
     Value args;
@@ -435,3 +437,20 @@ UN_API int un_game_update_step(char *out, int cap) {
 }
 
 }  // extern "C"
+
+#else   // Linux: the update folder checks come in phase 2 (docs/WINDOWS-DEPENDENCIES.md §13)
+
+#include <string>
+
+extern "C" {
+
+UN_API int un_game_update(const char *what, const un_path_char *root, const char *args_json, char *out, int cap) {
+    if (what && std::string(what) == "existing_update") return port::give("", out, cap);   // none found
+    return port::not_yet_answer("game update", 1, out, cap);
+}
+
+UN_API int un_game_update_step(char *out, int cap) { return port::give("", out, cap); }
+
+}  // extern "C"
+
+#endif

@@ -33,12 +33,12 @@
 #include <vector>
 
 extern "C" {   // updater.cpp
-UN_API int un_update_installed(const wchar_t *root, char *out, int cap);
+UN_API int un_update_installed(const un_path_char *root, char *out, int cap);
 UN_API int un_update_latest(const char *current, int timeout, char *out, int cap);
-UN_API int un_update_download(const char *release_json, const wchar_t *root, char *out, int cap);
+UN_API int un_update_download(const char *release_json, const un_path_char *root, char *out, int cap);
 UN_API void un_update_progress(long long *done, long long *total);
-UN_API int un_update_stage(const wchar_t *archive, const wchar_t *root, const char *version, char *out, int cap);
-UN_API int un_update_start_apply(const wchar_t *root, const wchar_t *staged, char *out, int cap);
+UN_API int un_update_stage(const un_path_char *archive, const un_path_char *root, const char *version, char *out, int cap);
+UN_API int un_update_start_apply(const un_path_char *root, const un_path_char *staged, char *out, int cap);
 }
 
 namespace {
@@ -69,7 +69,7 @@ template <typename Call> std::pair<int, std::string> text_call(Call call, int ro
 
 // the installed version as dotted numbers without leading zeros; empty when running from a git checkout
 std::string installed(const std::string &root) {
-    const std::wstring r = port::wide(root);
+    const port::arg_string r = port::arg(root);
     auto t = text_call([&](char *o, int c) { return un_update_installed(r.c_str(), o, c); });
     if (t.first != 0) return "";
     std::string out;
@@ -150,7 +150,12 @@ void check(const Host &h, bool manual, Value &out) {
         if (manual) out.set("dialog", dialog("info", "This is a source checkout: update it with git."));
         return;
     }
-    if (_wgetenv(L"RECOMPLAUNCHER") && std::wcscmp(_wgetenv(L"RECOMPLAUNCHER"), L"1") == 0) {
+#ifdef _WIN32
+    const bool recomplauncher = _wgetenv(L"RECOMPLAUNCHER") && std::wcscmp(_wgetenv(L"RECOMPLAUNCHER"), L"1") == 0;
+#else
+    const bool recomplauncher = std::getenv("RECOMPLAUNCHER") && std::strcmp(std::getenv("RECOMPLAUNCHER"), "1") == 0;
+#endif
+    if (recomplauncher) {
         // RecompLauncher installs the releases itself (updater.cpp answers "nothing newer" there as well)
         if (manual) out.set("dialog", dialog("info", "RecompLauncher keeps this copy up to date: update it there."));
         return;
@@ -202,14 +207,14 @@ void install(const Host &h, bool automatic, Value &out) {
     const Value release = g.release;
     const std::string root = h.root;
     g.worker = std::thread([release, root]() {
-        const std::wstring r = port::wide(root);
+        const port::arg_string r = port::arg(root);
         const std::string request = json::dump(release, false);
         std::string staged, error;
         auto d = text_call([&](char *o, int c) { return un_update_download(request.c_str(), r.c_str(), o, c); }, 1 << 16, false);
         if (d.first != 0) {
             error = d.second;
         } else {
-            const std::wstring archive = port::wide(d.second);
+            const port::arg_string archive = port::arg(d.second);
             const std::string version = version_text(release);
             auto s = text_call([&](char *o, int c) { return un_update_stage(archive.c_str(), r.c_str(), version.c_str(), o, c); },
                                1 << 16, false);
@@ -282,7 +287,7 @@ void tick(const Host &h, Value &out) {
                 out.set("dialog", dialog("info", IMPORT_BUSY));
             } else {
                 out.set("status", status("Installing the new version...", "The launcher will reopen shortly."));
-                const std::wstring r = port::wide(h.root), s = port::wide(g.staged);
+                const port::arg_string r = port::arg(h.root), s = port::arg(g.staged);
                 auto a = text_call([&](char *o, int c) { return un_update_start_apply(r.c_str(), s.c_str(), o, c); }, 1 << 16,
                                    false);
                 if (a.first != 0) {

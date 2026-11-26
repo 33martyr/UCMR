@@ -9,8 +9,10 @@
 // un_minidump: writes a Windows minidump holding the stacks and registers of all threads.
 
 #include "native.h"
+#include "port.h"
 
 #include <cstdlib>
+#ifdef _WIN32
 #include <windows.h>
 #include <dbghelp.h>
 #include <psapi.h>
@@ -462,10 +464,10 @@ extern "C" {
 // Launches a watchdog thread for process `pid`. Arguments: the game log to poll, the folder for minidumps, how many
 // seconds without frames mean frozen, and the launcher root (a release package has a VERSION file there, which turns
 // minidumps off unless UNCHARTED_HANG_DUMP=1). Returns a watchdog id > 0, or 0 on failure.
-UN_API int un_hang_watchdog(unsigned long pid, const wchar_t *log, const wchar_t *dumps, int seconds, const wchar_t *root) {
+UN_API int un_hang_watchdog(unsigned long pid, const un_path_char *log, const un_path_char *dumps, int seconds, const un_path_char *root) {
     HANDLE process = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
     if (!process) return 0;
-    Watchdog *w = new Watchdog{process, log ? log : L"", dumps ? dumps : L"", root ? root : L".", seconds, {}, {}};
+    Watchdog *w = new Watchdog{process, port::wtext(log, L""), port::wtext(dumps, L""), port::wtext(root, L"."), seconds, {}, {}};
     int id;
     {
         std::lock_guard<std::mutex> hold(watchdogs_lock);
@@ -493,7 +495,7 @@ UN_API int un_hang_reports(int id, char *out, int cap) {
     return give(text, out, cap);
 }
 
-UN_API int un_minidump(unsigned long pid, const wchar_t *path) {
+UN_API int un_minidump(unsigned long pid, const un_path_char *path) {
     HANDLE process = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ | PROCESS_DUP_HANDLE, FALSE, pid);
     if (!process) return 0;
     HANDLE file = CreateFileW(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -511,3 +513,39 @@ UN_API int un_minidump(unsigned long pid, const wchar_t *path) {
 }
 
 }  // extern "C"
+
+#else   // Linux: the freeze report (/proc + ptrace) comes in a later phase (docs/WINDOWS-DEPENDENCIES.md §13 phase 6)
+
+#include <cstring>
+#include <string>
+
+extern "C" {
+
+UN_API int un_thread_report(unsigned long pid, unsigned long long guest_base, unsigned long long guest_size, char *out,
+                            int cap) {
+    const std::string s = std::string("  (thread report: ") + port::not_yet("thread report") + ")";
+    if ((int)s.size() + 1 > cap) return -(int)(s.size() + 1);
+    std::memcpy(out, s.c_str(), s.size() + 1);
+    return 0;
+}
+
+UN_API int un_hang_watchdog(unsigned long pid, const un_path_char *log, const un_path_char *dumps, int seconds,
+                            const un_path_char *root) {
+    port::not_yet("freeze watchdog");
+    return 0;   // not started
+}
+
+UN_API int un_hang_reports(int id, char *out, int cap) {
+    if (cap < 1) return -1;
+    out[0] = '\0';
+    return 0;
+}
+
+UN_API int un_minidump(unsigned long pid, const un_path_char *path) {
+    port::not_yet("minidump");
+    return 0;
+}
+
+}  // extern "C"
+
+#endif

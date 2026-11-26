@@ -23,6 +23,8 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include "port.h"
+#ifdef _WIN32
 #include <windows.h>
 #include <bcrypt.h>
 #include <winhttp.h>
@@ -660,8 +662,8 @@ std::vector<long long> version_of(const char *text) { return parse_version(text 
 extern "C" {
 
 // Writes the installed version, such as "0.10.62", to out. Returns 2 when there is no VERSION (a source checkout).
-UN_API int un_update_installed(const wchar_t *root, char *out, int cap) {
-    const std::vector<long long> v = installed_version(root ? root : L".");
+UN_API int un_update_installed(const un_path_char *root, char *out, int cap) {
+    const std::vector<long long> v = installed_version(port::wtext(root, L"."));
     if (v.empty()) return give("", out, cap) < 0 ? -1 : 2;
     return give(version_text(v), out, cap);
 }
@@ -683,11 +685,11 @@ UN_API int un_update_latest(const char *current, int timeout, char *out, int cap
 // Fetches the release described by release_json (the object un_update_latest produced) into root\update and writes
 // the zip's path to out. The call blocks until done; poll un_update_progress meanwhile. Returns 1 with the reason in
 // out on failure.
-UN_API int un_update_download(const char *release_json, const wchar_t *root, char *out, int cap) {
+UN_API int un_update_download(const char *release_json, const un_path_char *root, char *out, int cap) {
     Value release;
     json::parse(release_json ? release_json : "{}", release);
     try {
-        return give(utf8(download(release, root ? root : L".")), out, cap);
+        return give(utf8(download(release, port::wtext(root, L"."))), out, cap);
     } catch (const UpdateError &e) {
         int status = give(e.message, out, cap);
         return status < 0 ? status : 1;
@@ -702,9 +704,9 @@ UN_API void un_update_progress(long long *done, long long *total) {
 
 // Extracts the downloaded zip into root\update\staged, checks it against `version` (e.g. "0.10.63") and writes the
 // folder to out. Returns 1 with the reason in out when the package is unusable.
-UN_API int un_update_stage(const wchar_t *archive, const wchar_t *root, const char *version, char *out, int cap) {
+UN_API int un_update_stage(const un_path_char *archive, const un_path_char *root, const char *version, char *out, int cap) {
     try {
-        return give(utf8(stage(archive ? archive : L"", root ? root : L".", version_of(version))), out, cap);
+        return give(utf8(stage(port::wtext(archive, L""), port::wtext(root, L"."), version_of(version))), out, cap);
     } catch (const UpdateError &e) {
         int status = give(e.message, out, cap);
         return status < 0 ? status : 1;
@@ -716,9 +718,9 @@ UN_API int un_update_stage(const wchar_t *archive, const wchar_t *root, const ch
 
 // Launches the staged version's installer, which then waits for this process to end. Returns 1 with the reason in
 // out if it would not start.
-UN_API int un_update_start_apply(const wchar_t *root, const wchar_t *staged, char *out, int cap) {
+UN_API int un_update_start_apply(const un_path_char *root, const un_path_char *staged, char *out, int cap) {
     try {
-        start_apply(root ? root : L".", staged ? staged : L".");
+        start_apply(port::wtext(root, L"."), port::wtext(staged, L"."));
         return give("", out, cap);
     } catch (const UpdateError &e) {
         int status = give(e.message, out, cap);
@@ -727,6 +729,42 @@ UN_API int un_update_start_apply(const wchar_t *root, const wchar_t *staged, cha
 }
 
 // Clears out update\ after an update finished or was given up.
-UN_API void un_update_cleanup(const wchar_t *root) { cleanup(root ? root : L"."); }
+UN_API void un_update_cleanup(const un_path_char *root) { cleanup(port::wtext(root, L".")); }
 
 }  // extern "C"
+
+#else   // Linux: HTTP, the tarball asset and the swap come in phases 2 and 7 (docs/WINDOWS-DEPENDENCIES.md §13)
+
+extern "C" {
+
+UN_API int un_update_installed(const un_path_char *root, char *out, int cap) {
+    port::not_yet("launcher update");
+    return port::give("", out, cap) < 0 ? -1 : 2;   // no VERSION: treated like a source checkout
+}
+
+UN_API int un_update_latest(const char *current, int timeout, char *out, int cap) {
+    return port::give("null", out, cap);   // nothing newer
+}
+
+UN_API int un_update_download(const char *release_json, const un_path_char *root, char *out, int cap) {
+    return port::not_yet_answer("launcher update", 1, out, cap);
+}
+
+UN_API void un_update_progress(long long *done, long long *total) {
+    if (done) *done = 0;
+    if (total) *total = 0;
+}
+
+UN_API int un_update_stage(const un_path_char *archive, const un_path_char *root, const char *version, char *out, int cap) {
+    return port::not_yet_answer("launcher update", 1, out, cap);
+}
+
+UN_API int un_update_start_apply(const un_path_char *root, const un_path_char *staged, char *out, int cap) {
+    return port::not_yet_answer("launcher update", 1, out, cap);
+}
+
+UN_API void un_update_cleanup(const un_path_char *root) {}
+
+}  // extern "C"
+
+#endif

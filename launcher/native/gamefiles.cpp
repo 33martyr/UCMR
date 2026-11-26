@@ -51,8 +51,8 @@ extern "C" {
 // a different size"; after it come one "missing <file>" line per absent file and one "size    <file>" line per size
 // mismatch. If the game folder has a uroot subfolder, that subfolder is what gets checked. Returns 0 when everything
 // matches, 1 when something is absent or the wrong size, and 2 when the listing itself is unusable (out says why).
-UN_API int un_check_game_files(const wchar_t *root, const wchar_t *game, char *out, int cap) {
-    const fs::path list_path = port::path(root ? root : L".") / "tools" / "game_files_102.json.gz";
+UN_API int un_check_game_files(const un_path_char *root, const un_path_char *game, char *out, int cap) {
+    const fs::path list_path = port::path(port::wtext(root, L".")) / "tools" / "game_files_102.json.gz";
     std::string gz, text;
     Value wanted;
     if (!read_file(list_path, gz))
@@ -64,7 +64,7 @@ UN_API int un_check_game_files(const wchar_t *root, const wchar_t *game, char *o
     }
     if (!json::parse(text, wanted) || wanted.kind != Value::Object)
         return give("The game file list can't be read.", out, cap) < 0 ? -1 : 2;
-    fs::path folder = port::path(game ? game : L"");
+    fs::path folder = port::path(port::wtext(game, L""));
     long long ignored = 0;
     if (size_of(folder / "uroot" / "eboot.bin", ignored)) folder /= "uroot";
     std::string missing, wrong;

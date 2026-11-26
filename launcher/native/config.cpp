@@ -188,7 +188,7 @@ UN_API int un_settings_table(const char *name, char *out, int cap) {
 // Effective runtime settings for one game as key\tvalue lines: every default key comes first (overridden by the
 // file where present), followed by keys only the file has, in the order they appear there. fps_limit is passed
 // through fps_limit() before it is returned.
-UN_API int un_ini_read(const wchar_t *user_dir, const char *game, char *out, int cap) {
+UN_API int un_ini_read(const un_path_char *user_dir, const char *game, char *out, int cap) {
     std::string text;
     for (auto &kv : ini_values(port::path(user_dir), game)) text += kv.first + "\t" + kv.second + "\n";
     return give(text, out, cap);
@@ -196,7 +196,7 @@ UN_API int un_ini_read(const wchar_t *user_dir, const char *game, char *out, int
 
 // `updates` holds key\tvalue lines. Each key is rewritten on every line where it already occurs, keys that occur
 // nowhere are added at the end. Result: 0 on success, 1 if writing the file failed.
-UN_API int un_ini_write(const wchar_t *user_dir, const char *game, const char *updates) {
+UN_API int un_ini_write(const un_path_char *user_dir, const char *game, const char *updates) {
     Pairs changes;
     std::string u = updates ? updates : "";
     for (const std::string &line : lines_of(u)) {
@@ -206,14 +206,14 @@ UN_API int un_ini_write(const wchar_t *user_dir, const char *game, const char *u
     return ini_update(port::path(user_dir), game, changes) ? 0 : 1;
 }
 
-UN_API int un_config_read(const wchar_t *config_file, const wchar_t *prefix_file, const wchar_t *user_dir, int wine,
+UN_API int un_config_read(const un_path_char *config_file, const un_path_char *prefix_file, const un_path_char *user_dir, int wine,
                           char *out, int cap) {
     return give(json::dump(read_config(port::path(config_file), port::path(prefix_file), port::path(user_dir),
                                       wine != 0)),
                 out, cap);
 }
 
-UN_API int un_config_write(const wchar_t *config_file, const char *config_json) {
+UN_API int un_config_write(const un_path_char *config_file, const char *config_json) {
     json::Value v;
     if (!json::parse(config_json ? config_json : "", v) || !v.is_object()) return 2;
     return write_config(port::path(config_file), v) ? 0 : 1;

@@ -3,7 +3,12 @@
 // when a name is not plain ASCII), files deflated with zlib (level 6), folders as stored "name/" entries. A plain zip
 // with sizes in the local headers and a central directory, no zip64: what the launcher's updater
 // (launcher/native/updater.cpp) and Windows' own zip support read. Built and run by tools/package_windows.sh.
+#ifdef _WIN32
 #include <windows.h>
+#else
+#include <sys/stat.h>
+#include <ctime>
+#endif
 #include <zlib.h>
 
 #include <algorithm>
@@ -28,6 +33,16 @@ void put16(std::string &o, uint32_t v) { o += char(v & 0xff), o += char((v >> 8)
 void put32(std::string &o, uint32_t v) { put16(o, v & 0xffff), put16(o, v >> 16); }
 
 void dos_time(const fs::path &p, uint16_t &t, uint16_t &d) {   // the file's local modification time (1980-01-01 at least)
+#ifndef _WIN32
+    struct stat st{};
+    std::tm local{};
+    d = 0x21;   // what FileTimeToDosDateTime leaves for a time it cannot store (before 1980, after 2107)
+    t = 0;
+    if (::stat(p.c_str(), &st) == 0 && localtime_r(&st.st_mtime, &local) && local.tm_year >= 80 && local.tm_year <= 207) {
+        d = (uint16_t)(((local.tm_year - 80) << 9) | ((local.tm_mon + 1) << 5) | local.tm_mday);
+        t = (uint16_t)((local.tm_hour << 11) | (local.tm_min << 5) | (local.tm_sec / 2));
+    }
+#else
     WIN32_FILE_ATTRIBUTE_DATA a{};
     FILETIME local{};
     WORD dd = 0x21, dt = 0;
@@ -35,6 +50,7 @@ void dos_time(const fs::path &p, uint16_t &t, uint16_t &d) {   // the file's loc
         FileTimeToDosDateTime(&local, &dd, &dt);
     t = dt;
     d = dd;
+#endif
 }
 
 bool fail(const std::string &why) {
@@ -44,7 +60,11 @@ bool fail(const std::string &why) {
 
 }  // namespace
 
+#ifdef _WIN32
 int wmain(int argc, wchar_t **argv) {
+#else
+int main(int argc, char **argv) {   // Linux: UTF-8 arguments
+#endif
     if (argc != 3) {
         std::fprintf(stderr, "usage: mkzip <out.zip> <folder>\n");
         return 2;

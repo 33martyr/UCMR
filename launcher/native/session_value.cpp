@@ -198,11 +198,11 @@ extern "C" {
 // `eboots`: paths of decrypted EBOOT.elf candidates, one per line; `image`: the player's current multiplayer image (may
 // be empty). Returns 1 the file was already right, 2 written from an EBOOT, 3 written from the image, 0 the value was
 // found nowhere, -1 it was found and the file can't be written.
-UN_API int un_u3_session_value(const wchar_t *data_dir, const wchar_t *eboots, const wchar_t *image) {
+UN_API int un_u3_session_value(const un_path_char *data_dir, const un_path_char *eboots, const un_path_char *image) {
     if (!data_dir || !*data_dir) return 0;
     const fs::path dir = port::path(data_dir);
     port::ensure_dir(dir);   // a player who never started the multiplayer has no data folder yet
-    const std::wstring list = eboots ? eboots : L"";
+    const std::wstring list = port::wtext(eboots, L"");
     push_key_file(dir, list);   // helper v7.254: the 3232 push keys (no image fallback: no image ever held them)
     const fs::path file = dir / "u3-session.key";
     if (file_has_it(file)) return 1;
