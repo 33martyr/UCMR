@@ -25,11 +25,21 @@
 #include <windows.h>
 #include <shellapi.h>
 #else
+#include <cerrno>
+#include <csignal>
 #include <cstdlib>
+#include <dirent.h>
 #include <dlfcn.h>
+#include <fcntl.h>
+#include <poll.h>
 #include <sched.h>
+#include <sys/prctl.h>
+#include <sys/resource.h>
+#include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
+extern char **environ;
 #endif
 
 namespace port {
@@ -436,6 +446,339 @@ inline long long now_ms() {
     using namespace std::chrono;
     return (long long)duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
 }
+
+// ------------------------------------------------------------------------------------------------ program names
+
+// a program file name: "u3fix" -> "u3fix.exe" on Windows, "u3fix" on Linux
+inline std::string exe_name(const std::string &base) {
+#ifdef _WIN32
+    return base + ".exe";
+#else
+    return base;
+#endif
+}
+
+// a name the Windows build and the recipe write with ".exe" ("u3fix.exe") as this system's program name: unchanged on
+// Windows, without the ".exe" on Linux (any case)
+inline std::string program_name(const std::string &name) {
+#ifdef _WIN32
+    return name;
+#else
+    const size_t n = name.size();
+    if (n > 4 && name[n - 4] == '.' && (name[n - 3] | 0x20) == 'e' && (name[n - 2] | 0x20) == 'x' &&
+        (name[n - 1] | 0x20) == 'e')
+        return name.substr(0, n - 4);
+    return name;
+#endif
+}
+
+// ------------------------------------------------------------------------------------------------ processes (Linux)
+//
+// Windows: every caller keeps its own CreateProcessW body (each with its own flags, handle list and window rules) next
+// to the Linux body that uses these. Linux: fork + execve, so the child can take its working folder, priority and
+// death signal before the program starts; the child calls only async-signal-safe functions. A failed execve reaches
+// spawn() through a close-on-exec pipe, so spawn() fails like CreateProcessW does when the program is missing.
+#ifndef _WIN32
+
+struct Spawn {
+    std::vector<std::string> argv;   // argv[0]: a path, or a name looked up on PATH
+    std::string cwd;                 // "" = this process's
+    bool set_env = false;            // true: `env` is the child's whole environment ("NAME=value"), else it inherits
+    std::vector<std::string> env;
+    enum Out { inherit, pipe, file, null } out = inherit;   // stdout
+    enum Err { same_as_out, inherit_err, err_pipe } err = same_as_out;   // stderr: where stdout goes, ours, or its own pipe (Child::err)
+    std::string out_file;            // Out::file: this file, truncated or (append) added to
+    bool append = false;
+    bool in_pipe = false;            // a pipe to its stdin (Child::in); else stdin is /dev/null (or inherited)
+    bool null_in = true;
+    bool low_priority = false;       // nice 10: BELOW_NORMAL_PRIORITY_CLASS's counterpart
+    bool die_with_parent = false;    // kill_with_parent: SIGKILL when the thread that started it ends (PR_SET_PDEATHSIG)
+    bool own_group = false;          // its own process group (and session): it outlives the launcher's terminal
+};
+
+struct Child {
+    pid_t pid = -1;
+    int in = -1;    // Spawn::in_pipe: write end of its stdin
+    int out = -1;   // Out::pipe: read end of its stdout (+ stderr unless Spawn::err says otherwise)
+    int err = -1;   // Spawn::err_pipe: read end of its stderr
+    bool done = false;
+    int code = -1;  // exit code once done (128 + signal when killed)
+};
+
+inline void close_fd(int &fd) {
+    if (fd >= 0) ::close(fd);
+    fd = -1;
+}
+
+// the program file execve gets: a name without '/' is looked up on PATH (of the child's environment, else ours)
+inline std::string find_program(const std::string &name, const std::vector<std::string> *env = nullptr) {
+    if (name.empty() || name.find('/') != std::string::npos) return name;
+    std::string path_var;
+    bool found = false;
+    if (env)
+        for (const std::string &e : *env)
+            if (e.compare(0, 5, "PATH=") == 0) { path_var = e.substr(5); found = true; }
+    if (!found) {
+        const char *p = std::getenv("PATH");
+        path_var = p ? p : "/usr/local/bin:/usr/bin:/bin";
+    }
+    size_t at = 0;
+    for (;;) {
+        const size_t end = path_var.find(':', at);
+        std::string dir = path_var.substr(at, end == std::string::npos ? std::string::npos : end - at);
+        if (dir.empty()) dir = ".";
+        const std::string full = dir + "/" + name;
+        if (::access(full.c_str(), X_OK) == 0) {
+            struct stat st;
+            if (::stat(full.c_str(), &st) == 0 && S_ISREG(st.st_mode)) return full;
+        }
+        if (end == std::string::npos) break;
+        at = end + 1;
+    }
+    return name;   // execve fails with ENOENT, reported by spawn()
+}
+
+// starts the program; false with the reason in `error` when it could not start
+inline bool spawn(const Spawn &s, Child &child, std::string &error) {
+    child = Child();
+    if (s.argv.empty()) { error = "no program"; return false; }
+    const std::string program = find_program(s.argv[0], s.set_env ? &s.env : nullptr);
+    std::vector<char *> argv, envp;
+    for (const std::string &a : s.argv) argv.push_back(const_cast<char *>(a.c_str()));
+    argv.push_back(nullptr);
+    if (s.set_env) {
+        for (const std::string &e : s.env) envp.push_back(const_cast<char *>(e.c_str()));
+        envp.push_back(nullptr);
+    }
+    int in_fd[2] = {-1, -1}, out_fd[2] = {-1, -1}, err_fd[2] = {-1, -1}, report[2] = {-1, -1}, out_file = -1, null_fd = -1;
+    auto fail = [&](const std::string &why) {
+        for (int *fd : {&in_fd[0], &in_fd[1], &out_fd[0], &out_fd[1], &err_fd[0], &err_fd[1], &report[0], &report[1], &out_file, &null_fd})
+            close_fd(*fd);
+        error = why;
+        return false;
+    };
+    if (s.in_pipe && ::pipe2(in_fd, O_CLOEXEC) != 0) return fail(std::string("pipe: ") + std::strerror(errno));
+    if (s.out == Spawn::pipe && ::pipe2(out_fd, O_CLOEXEC) != 0) return fail(std::string("pipe: ") + std::strerror(errno));
+    if (s.err == Spawn::err_pipe && ::pipe2(err_fd, O_CLOEXEC) != 0) return fail(std::string("pipe: ") + std::strerror(errno));
+    if (s.out == Spawn::file) {
+        out_file = ::open(s.out_file.c_str(), O_WRONLY | O_CREAT | O_CLOEXEC | (s.append ? O_APPEND : O_TRUNC), 0644);
+        if (out_file < 0) return fail("could not open " + s.out_file + ": " + std::strerror(errno));
+    }
+    if ((!s.in_pipe && s.null_in) || s.out == Spawn::null) {
+        null_fd = ::open("/dev/null", O_RDWR | O_CLOEXEC);
+        if (null_fd < 0) return fail(std::string("/dev/null: ") + std::strerror(errno));
+    }
+    if (::pipe2(report, O_CLOEXEC) != 0) return fail(std::string("pipe: ") + std::strerror(errno));
+    const int stdin_fd = s.in_pipe ? in_fd[0] : s.null_in ? null_fd : -1;
+    const int stdout_fd = s.out == Spawn::pipe ? out_fd[1] : s.out == Spawn::file ? out_file : s.out == Spawn::null ? null_fd : -1;
+    const pid_t parent = ::getpid();
+    const char *cwd = s.cwd.empty() ? nullptr : s.cwd.c_str();
+    const pid_t pid = ::fork();
+    if (pid < 0) return fail(std::string("fork: ") + std::strerror(errno));
+    if (pid == 0) {   // the child: async-signal-safe calls only, up to execve
+        int why = 0;
+        if (s.die_with_parent) {
+            ::prctl(PR_SET_PDEATHSIG, SIGKILL);
+            if (::getppid() != parent) ::_exit(127);   // the parent is already gone
+        }
+        if (s.own_group) ::setsid();
+        if (stdin_fd >= 0) ::dup2(stdin_fd, 0);   // dup2 clears close-on-exec on the copy
+        if (err_fd[1] >= 0) ::dup2(err_fd[1], 2);
+        if (stdout_fd >= 0) {
+            ::dup2(stdout_fd, 1);
+            if (s.err == Spawn::same_as_out) ::dup2(stdout_fd, 2);
+        }
+        struct sigaction dfl;
+        std::memset(&dfl, 0, sizeof dfl);
+        dfl.sa_handler = SIG_DFL;
+        ::sigaction(SIGPIPE, &dfl, nullptr);
+        sigset_t none;
+        sigemptyset(&none);
+        ::sigprocmask(SIG_SETMASK, &none, nullptr);
+        if (s.low_priority) ::setpriority(PRIO_PROCESS, 0, 10);
+        if (cwd && ::chdir(cwd) != 0) why = errno;
+        if (!why) {
+            ::execve(program.c_str(), argv.data(), s.set_env ? envp.data() : environ);
+            why = errno;
+        }
+        const ssize_t put = ::write(report[1], &why, sizeof why);
+        (void)put;
+        ::_exit(127);
+    }
+    close_fd(report[1]);
+    int why = 0;
+    ssize_t got;
+    do got = ::read(report[0], &why, sizeof why); while (got < 0 && errno == EINTR);
+    close_fd(report[0]);
+    close_fd(in_fd[0]);
+    close_fd(out_fd[1]);
+    close_fd(err_fd[1]);
+    close_fd(out_file);
+    close_fd(null_fd);
+    if (got == (ssize_t)sizeof why) {   // execve (or chdir) failed: the child has exited
+        ::waitpid(pid, nullptr, 0);
+        close_fd(in_fd[1]);
+        close_fd(out_fd[0]);
+        close_fd(err_fd[0]);
+        error = std::string(cwd && why == ENOENT && ::access(cwd, F_OK) != 0 ? "no folder " + s.cwd
+                                                                               : "could not start " + s.argv[0]) +
+                ": " + std::strerror(why);
+        return false;
+    }
+    child.pid = pid;
+    child.in = in_fd[1];
+    child.out = out_fd[0];
+    child.err = err_fd[0];
+    return true;
+}
+
+inline int exit_code_of_status(int status) {
+    if (WIFEXITED(status)) return WEXITSTATUS(status);
+    if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
+    return -1;
+}
+
+// true while it runs; once it has ended, child.done and child.code are set (the process is reaped here)
+inline bool running(Child &child) {
+    if (child.pid <= 0 || child.done) return false;
+    int status = 0;
+    const pid_t r = ::waitpid(child.pid, &status, WNOHANG);
+    if (r == 0) return true;
+    child.done = true;
+    child.code = r == child.pid ? exit_code_of_status(status) : -1;
+    return false;
+}
+
+// waits up to timeout_ms (negative: no limit); its exit code, or -1 when it still runs
+inline int wait(Child &child, int timeout_ms = -1) {
+    if (child.pid <= 0) return -1;
+    if (child.done) return child.code;
+    if (timeout_ms < 0) {
+        int status = 0;
+        pid_t r;
+        do r = ::waitpid(child.pid, &status, 0); while (r < 0 && errno == EINTR);
+        child.done = true;
+        child.code = r == child.pid ? exit_code_of_status(status) : -1;
+        return child.code;
+    }
+    const long long until = now_ms() + timeout_ms;
+    for (;;) {
+        if (!running(child)) return child.code;
+        if (now_ms() >= until) return -1;
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+}
+
+// TerminateProcess's counterpart: SIGKILL, then reaped
+inline void kill(Child &child) {
+    if (child.pid <= 0 || child.done) return;
+    ::kill(child.pid, SIGKILL);
+    wait(child);
+}
+
+// closes our pipe ends (the process itself is left alone)
+inline void close(Child &child) {
+    close_fd(child.in);
+    close_fd(child.out);
+    close_fd(child.err);
+}
+
+// up to `n` bytes from a pipe within timeout_ms (0: only what is there now, negative: until some arrives or it ends):
+// the count, 0 when nothing came in time, -1 when the other side has closed it
+inline long read_some(int fd, char *buf, size_t n, int timeout_ms) {
+    if (fd < 0) return -1;
+    pollfd p{fd, POLLIN, 0};
+    int r;
+    do r = ::poll(&p, 1, timeout_ms); while (r < 0 && errno == EINTR);
+    if (r < 0) return -1;
+    if (r == 0) return 0;
+    ssize_t got;
+    do got = ::read(fd, buf, n); while (got < 0 && errno == EINTR);
+    return got > 0 ? (long)got : -1;
+}
+
+// the whole buffer into a pipe (or file); false when it could not be written
+inline bool write_all(int fd, const void *data, size_t n) {
+    const char *p = (const char *)data;
+    while (n) {
+        ssize_t put = ::write(fd, p, n);
+        if (put < 0 && errno == EINTR) continue;
+        if (put <= 0) return false;
+        p += put;
+        n -= (size_t)put;
+    }
+    return true;
+}
+
+// the process exists (OpenProcess(SYNCHRONIZE)'s counterpart: kill(pid, 0); EPERM = it exists, owned by someone else)
+inline bool process_alive(long long pid) {
+    if (pid <= 0) return false;
+    return ::kill((pid_t)pid, 0) == 0 || errno == EPERM;
+}
+
+struct ProcessInfo {
+    long long pid = 0, parent = 0;
+    std::string name;   // the program's file name ("steam", "gow3-probe"); /proc/<pid>/comm when the link is unreadable
+};
+
+// every process (the toolhelp snapshot's counterpart), from /proc
+inline std::vector<ProcessInfo> list_processes() {
+    std::vector<ProcessInfo> out;
+    DIR *d = ::opendir("/proc");
+    if (!d) return out;
+    while (dirent *e = ::readdir(d)) {
+        char *end = nullptr;
+        const long long pid = std::strtoll(e->d_name, &end, 10);
+        if (pid <= 0 || !end || *end) continue;
+        const std::string base = std::string("/proc/") + e->d_name;
+        std::FILE *f = std::fopen((base + "/stat").c_str(), "rb");   // /proc files report size 0: read them as a stream
+        if (!f) continue;                                             // it has ended meanwhile
+        char buf[1024];
+        const size_t got = std::fread(buf, 1, sizeof buf, f);
+        std::fclose(f);
+        const std::string stat(buf, got);
+        ProcessInfo p;
+        p.pid = pid;
+        const size_t open = stat.find('('), close_at = stat.rfind(')');
+        if (open == std::string::npos || close_at == std::string::npos || close_at < open) continue;
+        p.name = stat.substr(open + 1, close_at - open - 1);   // comm: at most 15 characters
+        // after ") ": state, then the parent's id
+        const size_t ppid_at = stat.find(' ', close_at + 2);
+        if (ppid_at != std::string::npos) p.parent = std::strtoll(stat.c_str() + ppid_at + 1, nullptr, 10);
+        char link[4096];
+        const ssize_t n = ::readlink((base + "/exe").c_str(), link, sizeof link - 1);
+        if (n > 0) {
+            std::string exe(link, (size_t)n);
+            const std::string deleted = " (deleted)";
+            if (exe.size() > deleted.size() && exe.compare(exe.size() - deleted.size(), deleted.size(), deleted) == 0)
+                exe.resize(exe.size() - deleted.size());
+            const size_t slash = exe.rfind('/');
+            p.name = slash == std::string::npos ? exe : exe.substr(slash + 1);
+        }
+        out.push_back(p);
+    }
+    ::closedir(d);
+    return out;
+}
+
+// `taskkill /PID <pid> /T /F`'s counterpart: SIGKILL to the process and everything it started (children first
+// stopped, so none can start more meanwhile)
+inline void kill_tree(long long pid) {
+    if (pid <= 0) return;
+    const std::vector<ProcessInfo> all = list_processes();
+    std::vector<long long> tree{pid};
+    for (size_t i = 0; i < tree.size(); ++i)
+        for (const ProcessInfo &p : all)
+            if (p.parent == tree[i] && p.pid != pid) tree.push_back(p.pid);
+    for (long long p : tree) ::kill((pid_t)p, SIGSTOP);
+    for (long long p : tree) ::kill((pid_t)p, SIGKILL);
+}
+
+// files: a hard link (CreateHardLinkW's counterpart) and a folder link (the junction's counterpart: a symlink)
+inline bool hard_link(const fs::path &existing, const fs::path &link) { return ::link(existing.c_str(), link.c_str()) == 0; }
+inline bool dir_link(const fs::path &target, const fs::path &link) { return ::symlink(target.c_str(), link.c_str()) == 0; }
+
+#endif   // !_WIN32
 
 // ------------------------------------------------------------------------------------------------ later phases
 
