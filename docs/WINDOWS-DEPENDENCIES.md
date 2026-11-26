@@ -26,7 +26,8 @@ followed by `(`, Windows headers, types, wide-string constructs, `.exe`/MSYS2 na
 **Progress:** phases 0, 1 and 2 of §13 are done: the Linux CI workflow (§7.4), the launcher core building on Linux
 with the platform layer (§4.1, §12), and processes: the launcher starts the imports, the game starter and the runtime,
 checks for its own updates over libcurl, and `u2import`, `u3import` and `u3fix` build, link and run on Linux (§4.7,
-§4.8). Phase 3 (the Qt window and the Linux tarball) is next.
+§4.8). Phase 3 is done too: the Qt window runs on Linux (§4.2) and every push builds `UCMR_linux.tar.gz` (§7.4, §7.5),
+a launcher and import preview: the games do not run on Linux until the runtime is ported (phase 4, next).
 
 ## How to help
 
@@ -80,7 +81,7 @@ often exist already).
 | Area | Files | Lines | Files w/ API | API sites | Wide | `#if` | State | Effort |
 |---|---:|---:|---:|---:|---:|---:|---|---|
 | `launcher/native` (core DLL, game starter, updater) | 33 | 18 940 | 27 | 855 | 1 921 | 0 | Windows-only, no Linux branch anywhere | **L** |
-| `launcher-qt` (Qt window) | 5 C++ + 24 QML | 1 258 | 0 | 0 | 4 | 0 | Qt is portable; DLL name, `LOCALAPPDATA`, `wchar_t` API, `WIN32`/winres in CMake | S |
+| `launcher-qt` (Qt window) | 5 C++ + 24 QML | 1 258 | 0 | 0 | 4 | 0 | Qt is portable; DLL name, `LOCALAPPDATA`, `wchar_t` API, `WIN32`/winres in CMake | S — **done** (phase 3) |
 | `gow3_pc/src/*.c` (HLE runtime, loader `probe.c`) | 28 | 13 756 | 13 | 262 | 1 | 79 | Originally POSIX; Windows added via `compat_win.{c,h}` and `#ifdef` bodies; both exist | M |
 | `gow3_pc/src` C++ top level (`pokes`, `debug_menus`, `name_dictionary`, `sid_names`, ...) | 19 | 2 073 | 2 | 16 | 13 | 3 | `pokes.cpp` unguarded Win32 | S |
 | `gow3_pc/src/u2mp` | 77 | 33 387 | 5 | 59 | 15 | 19 | Mostly portable (`host_memory.h`, `net.cpp`, `online_link.cpp` have both bodies); 2 unguarded spots | S |
@@ -210,9 +211,10 @@ own `CreateProcessW` body unchanged beside the Linux one. `launcher/native/port_
 
 | File | Windows constructs | Shared path / platform function | Effort |
 |---|---|---|---|
-| `src/backend.cpp` | `launcher/native/uncharted_native.dll` file name (3x), `%LOCALAPPDATA%` cache path via `qEnvironmentVariable`, `toStdWString()` for the core API, `SDL3.dll` note | file name per OS (`QLibrary` with base name + suffix), `QStandardPaths::CacheLocation`, `un_path_char` (§4.1) | S |
-| `src/backend.h` | `wchar_t` function pointer types | `un_path_char` | S |
-| `CMakeLists.txt` | `qt_add_executable(UCMRLauncher WIN32 ...)`, `ucmr_winres(...)` | `WIN32` and winres only `if (WIN32)`; Linux: `.desktop` + PNG icon | S |
+| `src/backend.cpp` | `launcher/native/uncharted_native.dll` file name (3x), `%LOCALAPPDATA%` cache path via `qEnvironmentVariable`, `toStdWString()` for the core API, `SDL3.dll` note | file name per OS (`QLibrary` with base name + suffix), `QStandardPaths::CacheLocation`, `un_path_char` (§4.1) | S — **done**: `CoreFile` is `libuncharted_native.so` on Linux; `corePath()` gives the core `un_path_char` (UTF-16 on Windows as before, `QFile::encodeName` UTF-8 on Linux); the old `%LOCALAPPDATA%` cache clean-up is Windows-only (no `QStandardPaths` needed: the QML cache lives in the launcher's folder on both systems, and no Linux version ever wrote one elsewhere) |
+| `src/backend.h` | `wchar_t` function pointer types | `un_path_char` | S — **done** (includes `native.h`) |
+| `src/main.cpp` | — | `--self-check` for CI (QML and core load, core ready, normal close, exit 0); `setDesktopFileName` on Linux | S — **done** |
+| `CMakeLists.txt` | `qt_add_executable(UCMRLauncher WIN32 ...)`, `ucmr_winres(...)` | `WIN32` and winres only `if (WIN32)`; Linux: `.desktop` + PNG icon | S — **done**: `WIN32_EXECUTABLE` and winres inside `if (WIN32)`; Linux run path `$ORIGIN/lib`; `linux/UCMR_Launcher.desktop`, icon = the existing `launcher/assets/icon.png` (256x256). Fonts: the QML asks for Segoe UI, which Linux lacks (fontconfig picks its sans font); the layout is unchanged |
 
 ### 4.3 `gow3_pc/src` runtime (C)
 
@@ -459,6 +461,16 @@ Toolchain note: clang 15 with libstdc++ 12 (the newest in Ubuntu 22.04) rejects 
 glibc 2.35 baseline (phase 3) needs a newer clang on 22.04 (apt.llvm.org) or an older-glibc container. `json.h`'s
 `Value` defines its destructor after the class so clang with libstdc++ accepts it in C++20.
 
+**State (phase 3):** the **Linux package** job (ubuntu-22.04, the glibc 2.35 baseline) installs clang 18 from
+apt.llvm.org and Qt 6.8.3 from download.qt.io through aqtinstall (CI glue only; 22.04's own Qt 6.2 is older than the
+6.5 the window needs; Qt and the small FFmpeg are cached), runs `tools/build_ffmpeg.sh` (its Linux branch) and
+`tools/package_linux.sh`, and uploads `UCMR_linux.tar.gz` as an artifact. Its check unpacks the tarball, moves the Qt
+it was built with out of the way, checks that every library of `launcher-qt/` resolves, starts
+`UCMR_Launcher --self-check` with `QT_QPA_PLATFORM=offscreen` (the QML and the core load, the core gets ready, the
+launcher closes the normal way) and runs `tools/importer_smoke.sh` on the unpacked folder. The package prints the
+newest `GLIBC_`/`GLIBCXX_` version its programs ask for. It is a test package (no private files, so no helper) and
+not part of a release (phase 7). `build_importers_linux.sh` now links libstdc++ statically, like the launcher core.
+
 The plan:
 
 - `runs-on: ubuntu-22.04` (glibc 2.35 baseline; or a container of the oldest supported distro).
@@ -486,6 +498,34 @@ The plan:
 | `README.txt` (`README-Windows.txt`), `recomplauncher.json` | `README.txt` (`README-Linux.txt`), `recomplauncher.json` |
 | `mkzip.exe` → `UCMR_windows.zip` | `tar` → `UCMR_linux.tar.gz`; `appimagetool` → AppImage |
 | no-game-files check | same check |
+
+**State (phase 3):** `tools/package_linux.sh` makes `dist/UCMR_linux.tar.gz` (top folder `UCMR_linux/`, as the zip's
+`UCMR_windows/`):
+
+- `UCMR_Launcher`: a short start script (`tools/linux_starter/UCMR_Launcher.sh`) that changes to its folder and
+  `exec`s `launcher-qt/UCMRLauncher` with the same arguments (`--play` included). It sets **no** environment
+  variable: the window finds its Qt libraries through its run path (`$ORIGIN/lib`, Qt's own libraries and plugins
+  carry `$ORIGIN`-relative run paths) and its plugins and QML through `launcher-qt/qt.conf`, so a file manager or
+  browser the launcher opens never inherits the package's Qt.
+- `launcher-qt/`: the program, `lib/` (Qt's libraries and its ICU, found with `ldd`, plus the xcb helpers desktops
+  often lack: `xcb-cursor`, `xcb-icccm`, `xcb-image`, `xcb-keysyms`, `xcb-render-util`, `xcb-util`, `xcb-xinerama`,
+  `xcb-xkb`, `xkbcommon-x11`), `plugins/` (xcb, Wayland with its shell/decoration/graphics parts, offscreen, the xcb
+  GL integrations, compose-key input, the `.ico` reader, the xdg desktop portal theme for file dialogs), `qml/`
+  (QtCore, QtQml, QtQuick pruned to the Basic style as on Windows). A copy of a library that is not installed stops
+  the package. No custom tool (no linuxdeploy), so nothing is downloaded but Qt itself.
+- `UCMR_Launcher.desktop` (`launcher-qt/linux/`), `launcher/assets/` (icon.png), `launcher/native/`
+  (`libuncharted_native.so`, `game_starter`), `u2mp/bin/u2import`, `u3mp/bin/` (`u3import`, `u3fix`, `ffmpeg`),
+  `u3mp/patcher/` (the same newest-helper check as Windows), `tools/game_files_102.json.gz`, `README.txt`
+  (`tools/README-Linux.txt`: **the games do not run on Linux yet**), `LICENSE.txt`, `VERSION`, `recomplauncher.json`,
+  `analysis/uncharted-user/disabled-optimizations.txt`.
+- `licenses/`: Qt (LGPL 3 texts from the system and a source note), FFmpeg, BearSSL, and `distro/` with the
+  `copyright` file of each distribution package a bundled system library came from (`dpkg -S`).
+- FFmpeg: `tools/build_ffmpeg.sh` has a Linux branch that builds the same FFmpeg 8.1.1 parts as one `ffmpeg` with the
+  libraries linked in (static; needs only the C library and zlib), into `downloads/ffmpeg-8.1.1-min-linux`.
+- Missing on purpose: the game runtime (`gow3_pc`, phase 4), `tools/apply_update` (phase 7), GNU objdump (the system's
+  `binutils`; the README says so: without it the U3 import skips the Havok tables, as on Windows without it), SDL3
+  (the window's controller navigation uses the system's `libSDL3.so.0` if installed; the runtime brings its own in
+  phase 4).
 
 ### 7.6 Install and update model on Linux
 
@@ -676,7 +716,7 @@ in both CI jobs.
 | 0. CI skeleton | `build-linux.yml` (or a second job): build what is already portable (u2 importer core, importer/fix libraries, `gow3gpu.so`, the GPU unit tests outside `if (WIN32)`); release moves to its own job | Linux job green on a subset; Windows unchanged. **Done** (§7.4) except `gow3gpu.so` and the release job (it stays in `build-windows.yml` until phase 7) |
 | 1. Platform layer + leaf files | `port.h`, one shared SHA-256, `un_path_char` in `native.h`; port the S-files of §4.1 (`session_value`, `updates`, `gamepads`, `pages`, `patch_tables`, `starter`, `self_reader.h`, `prepare`, `gamefiles`, `patcher`, `config`, `actions`), `u2import.cpp`, `mkzip`, `code_ids` | launcher core compiles on Linux with stubs that say "not on Linux yet" for Steam, shortcuts, hang, display. **Done**: every §4.1 file builds on Linux; the stubs are marked in §4.1 |
 | 2. Processes | `port::spawn`; `core.cpp`, `play.cpp`, `start.cpp`, `updater.cpp`, `dctools/proc.cpp`, `importer/common.cpp`, `u3import.cpp` (links), recipe `.exe` mapping, `wmain`→`main` | `u3import`/`u3fix`/`u2import` run on both; an import test on a fixture runs in both jobs. **Done**: both CI jobs run `tools/importer_smoke.sh` (no game files; no fixture test exists yet, §7.4) and Linux runs `port_smoke`. Still stubs on Linux: unpacking the update tarball and the apply step (phase 7), the window icon's PNG decode, the online program (phase 5), the runtime itself (phase 4) |
-| 3. Window + package | `launcher-qt` CMake/file names/`QStandardPaths`; `package_linux.sh` (tarball); Linux branch of `build_ffmpeg.sh`; README-Linux | Linux tarball artifact from every push |
+| 3. Window + package | `launcher-qt` CMake/file names/`QStandardPaths`; `package_linux.sh` (tarball); Linux branch of `build_ffmpeg.sh`; README-Linux | Linux tarball artifact from every push. **Done** (§4.2, §7.4, §7.5): the window runs on Linux (checked headless in CI with `--self-check`), `UCMR_linux.tar.gz` from every push and PR; no game runtime in it yet, no release yet |
 | 4. Runtime | one `gow3-probe` CMake target for both; tests out of `if (WIN32)`; fix unguarded `pokes.cpp`, `session.cpp`, `u2_online_abi.h`, `u3voice.h`; check every POSIX body in `probe.c`/`runtime_*.c` against current Windows features (exec watch, restart command, scheduling, native TSC); `gow3:` Windows additions in shadPS4 get Linux bodies; case-insensitive base mount | the game boots on Linux in CI smoke tests that need no game files (runtime tests, loader tests) |
 | 5. Online and helper | the runtime host-function table and one helper PC backend over it, used on both systems; online programs with BSD sockets and the `0600` token file on Linux (DPAPI stays on Windows) | U3 MP/LAN on Linux; Windows helper behaviour unchanged |
 | 6. Linux bodies for Windows-only features | `runtime_isa` on `ucontext_t`, hang watchdog (`ptrace`), Add to Steam on Linux, `.desktop` shortcuts, display info, profiler, DLSS (optional) | feature parity list shrinks |
@@ -691,6 +731,8 @@ side, no behaviour change on Windows, the simplest form that does the full job.
   built on Linux yet, and its POSIX branches were not re-verified against today's Windows features.
 - The Linux bodies of the imports, PLAY and the game start were built and run with made-up folders and `sh`, never
   with a real game or a whole import on Linux.
+- The Linux window was checked headless (`QT_QPA_PLATFORM=offscreen`) in CI only, not yet on a real X11/Wayland
+  desktop or a Steam Deck; the QML is unchanged, but Linux has no Segoe UI, so text uses the system's sans font.
 - Counts are token-based (comments included); `helper-source` counts include BearSSL.
 - Submodules under `gow3_pc/gpu/third_party` (FSR-Vulkan, xbyak, ...) were not scanned (not tracked files).
 - How RecompLauncher chooses a release asset per OS (only its JSON schema was read).
