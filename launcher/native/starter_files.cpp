@@ -12,6 +12,12 @@
 #ifdef _WIN32
 #include <windows.h>
 #include <wincodec.h>
+#else
+#include <cerrno>
+#include <cstdio>
+#include <cstdlib>
+#include <cwctype>
+#endif
 
 #include <algorithm>
 #include <map>
@@ -28,6 +34,9 @@ int give(const std::string &s, char *out, int cap) {
     return 0;
 }
 
+struct Failure { std::string message; };
+
+#ifdef _WIN32
 std::string utf8(const std::wstring &w) {
     if (w.empty()) return std::string();
     int n = WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(), nullptr, 0, nullptr, nullptr);
@@ -101,8 +110,6 @@ bool make_dirs(const std::wstring &p) {
     if (cut != std::wstring::npos && cut > 2) make_dirs(p.substr(0, cut));
     return CreateDirectoryW(p.c_str(), nullptr) || GetLastError() == ERROR_ALREADY_EXISTS;
 }
-
-struct Failure { std::string message; };
 
 // Copies a folder and everything in it; file times come along with the files (like shutil.copytree).
 void copy_tree(const std::wstring &from, const std::wstring &to) {
@@ -299,6 +306,226 @@ std::string boot_view(const std::wstring &root, const std::wstring &base, const 
     prune_views(view, widen(title.empty() ? "game" : title), chosen);
     return utf8(view);
 }
+#else
+// Linux bodies of the same chores, on std::filesystem. The arguments keep the launcher's wide text; port::path turns
+// it (and the backslashes of the names below) into a path.
+namespace fs = std::filesystem;
+
+std::string utf8(const std::wstring &w) { return port::utf8(w); }
+std::wstring widen(const std::string &s) { return port::wide(s); }
+std::wstring lower(std::wstring s) {
+    for (wchar_t &c : s) c = (wchar_t)std::towlower((wint_t)c);
+    return s;
+}
+std::wstring env(const wchar_t *name) {
+    const char *v = std::getenv(port::utf8(std::wstring(name)).c_str());
+    return v ? port::wide(v) : std::wstring();
+}
+fs::path P(const std::wstring &w) { return port::path(w); }
+std::wstring join(const std::wstring &a, const std::wstring &b) {
+    if (a.empty()) return b;
+    return (a.back() == L'\\' || a.back() == L'/') ? a + b : a + L"/" + b;
+}
+
+// Python's OSError wording on Linux: "[Errno n] text: 'path'"
+std::string os_error(const fs::path &path, int code) {
+    return "[Errno " + std::to_string(code) + "] " + std::strerror(code) + ": '" + path.string() + "'";
+}
+std::string os_error(const fs::path &path, const std::error_code &ec) { return os_error(path, ec.value()); }
+
+bool make_dirs(const fs::path &p) { return port::ensure_dir(p); }
+
+// the contents and the write time (CopyFileW's counterpart: the copy gets the source's write time)
+bool copy_with_time(const fs::path &from, const fs::path &to, std::error_code &ec) {
+    fs::copy_file(from, to, fs::copy_options::overwrite_existing, ec);
+    if (ec) return false;
+    const auto t = fs::last_write_time(from, ec);
+    if (!ec) fs::last_write_time(to, t, ec);
+    return !ec;
+}
+
+// Copies a folder and everything in it; file times come along with the files (like shutil.copytree).
+void copy_tree(const fs::path &from, const fs::path &to) {
+    std::error_code ec;
+    if (!fs::create_directory(to, ec)) throw Failure{os_error(to, ec ? ec : std::make_error_code(std::errc::file_exists))};
+    for (fs::directory_iterator it(from, ec), end; !ec && it != end; it.increment(ec)) {
+        const fs::path a = it->path(), b = to / a.filename();
+        std::error_code e;
+        if (it->is_directory(e)) copy_tree(a, b);
+        else if (!copy_with_time(a, b, e)) throw Failure{os_error(a, e)};
+    }
+}
+
+// The runtime as gow3_pc/out/Uncharted (the Windows body's rules; the copy is made beside it and renamed over it, so a
+// copy still running from an earlier start is no reason to fall back)
+std::string game_executable(const std::wstring &root) {
+    fs::path built = P(root) / "gow3_pc" / "out" / port::exe_name("gow3-probe"),
+             game_exe = P(root) / "gow3_pc" / "out" / port::exe_name("Uncharted");
+    if (env(L"UNCHARTED_TEST_PROBE_EXE") == L"1") return built.string() + "\n";
+    std::wstring other = env(L"UNCHARTED_PROBE_EXE");
+    if (!other.empty()) built = P(other);
+    std::error_code ec;
+    const auto size = fs::file_size(built, ec);
+    const auto time = ec ? fs::file_time_type() : fs::last_write_time(built, ec);
+    if (ec) return built.string() + "\nFalling back to " + built.filename().string() + ": " + os_error(built, ec);
+    std::error_code e2;
+    const auto have_size = fs::file_size(game_exe, e2);
+    const auto have_time = e2 ? fs::file_time_type() : fs::last_write_time(game_exe, e2);
+    if (e2 || have_size != size || have_time != time) {
+        fs::path part = game_exe;
+        part += ".part";
+        if (copy_with_time(built, part, ec)) fs::rename(part, game_exe, ec);
+        if (ec) {
+            fs::remove(part, e2);
+            return built.string() + "\nFalling back to " + built.filename().string() + ": " + os_error(game_exe, ec);
+        }
+    }
+    return game_exe.string() + "\n";
+}
+
+// The folder where this instance keeps its saves, settings and caches (see the Windows body).
+std::string user_dir(const std::wstring &root, const std::string &suffix) {
+    const fs::path main_user = P(root) / "analysis" / "uncharted-user";
+    if (suffix.empty()) return main_user.string() + "\n";
+    const fs::path user = P(root) / "analysis" / ("uncharted-user" + suffix);
+    std::error_code ec;
+    if (fs::exists(user, ec)) return user.string() + "\n";
+    fs::create_directories(user, ec);
+    if (ec) throw Failure{os_error(user, ec)};
+    for (const char *name : {"probe.ini", "probe-u1.ini", "probe-u2.ini", "probe-u3.ini", "disabled-optimizations.txt",
+                             "skip.txt", "savedata", "trophy", "cache", "shader"}) {
+        const fs::path source = main_user / name, dest = user / name;
+        std::error_code e;
+        if (fs::is_directory(source, e)) copy_tree(source, dest);
+        else if (fs::is_regular_file(source, e) && !copy_with_time(source, dest, e)) throw Failure{os_error(source, e)};
+    }
+    return user.string() + "\nInstance " + suffix.substr(2) + ": created the user folder " + user.string() +
+           " with copies of the main settings, saves and caches";
+}
+
+void files_under(const fs::path &folder, const fs::path &relative, std::vector<fs::path> &out) {
+    std::error_code ec;
+    for (fs::directory_iterator it(folder, ec), end; !ec && it != end; it.increment(ec)) {
+        const fs::path rel = relative / it->path().filename();
+        std::error_code e;
+        if (it->is_directory(e)) files_under(it->path(), rel, out);
+        else out.push_back(rel);
+    }
+}
+
+std::string sfo_text(const fs::path &folder, const char *key) {
+    std::vector<char> buf(1 << 16);
+    if (un_system("sfo", folder.c_str(), buf.data(), (int)buf.size()) != 0) return "";
+    Value v;
+    if (!json::parse(buf.data(), v)) return "";
+    const Value *f = v.get(key);
+    if (!f) return "";
+    return f->kind == Value::String ? f->s : f->kind == Value::Int ? std::to_string(f->i) : "";
+}
+
+// a path relative to its layer as the key the views are chosen by: lower case, "/" between the parts
+std::wstring key_of(const fs::path &rel) { return lower(widen(rel.generic_string())); }
+
+// The files of a boot view that are not chosen any more go, and the views of this title's other versions too.
+void prune_views(const fs::path &view, const std::wstring &title,
+                 const std::map<std::wstring, std::pair<fs::path, fs::path>> &chosen) {
+    std::vector<fs::path> files;
+    files_under(view, fs::path(), files);
+    for (const fs::path &rel : files) {   // only the kinds of file a view copies are looked at
+        const std::wstring low = key_of(rel);
+        const bool copied_kind = low.rfind(L"sce_module/", 0) == 0 || low.rfind(L"sce_sys/", 0) == 0 || low == L"eboot.bin" ||
+                                 low == L"big2-ps4_shipping.elf" || low == L"big3-ps4_shipping.elf";
+        std::error_code ec;
+        if (copied_kind && !chosen.count(low)) fs::remove(view / rel, ec);
+    }
+    const fs::path views = view.parent_path();
+    const std::wstring prefix = lower(L"boot-" + title + L"-");
+    std::vector<fs::path> old;
+    std::error_code ec;
+    for (fs::directory_iterator it(views, ec), end; !ec && it != end; it.increment(ec)) {
+        std::error_code e;
+        const fs::path name = it->path().filename();
+        if (it->is_directory(e) && !it->is_symlink(e) && lower(widen(name.string())).rfind(prefix, 0) == 0 &&
+            name != view.filename())
+            old.push_back(it->path());
+    }
+    for (const fs::path &p : old) fs::remove_all(p, ec);   // failures are ignored; links go, their targets stay
+}
+
+// The boot view (see the Windows body): the executables, sce_module and sce_sys of the game with the update's files
+// taking priority, copied again only after their source changes. Names are matched without case, as on Windows.
+std::string boot_view(const std::wstring &root, const std::wstring &base, const std::wstring &update) {
+    std::map<std::wstring, std::pair<fs::path, fs::path>> chosen;   // lower-case path -> (path, source)
+    std::vector<std::wstring> order;
+    auto choose = [&](const fs::path &relative, const fs::path &source) {
+        const std::wstring key = key_of(relative);
+        if (!chosen.count(key)) order.push_back(key);
+        chosen[key] = {relative, source};
+    };
+    for (const fs::path &layer : {P(base), P(update)}) {   // update second, so its entries overwrite the game's
+        std::error_code ec;
+        fs::directory_iterator it(layer, ec), end;
+        if (ec) throw Failure{os_error(layer, ec)};
+        for (; !ec && it != end; it.increment(ec)) {
+            const fs::path name = it->path().filename();
+            const std::wstring low = lower(widen(name.string()));
+            std::error_code e;
+            const bool dir = it->is_directory(e);
+            if (!dir && (low == L"eboot.bin" || low == L"big2-ps4_shipping.elf" || low == L"big3-ps4_shipping.elf")) {
+                choose(name, layer / name);
+            } else if (dir && (low == L"sce_module" || low == L"sce_sys")) {
+                std::vector<fs::path> files;
+                files_under(layer / name, name, files);
+                for (const fs::path &rel : files) choose(rel, layer / rel);
+            }
+        }
+    }
+    const fs::path update_dir = P(update);
+    std::string title = sfo_text(update_dir, "TITLE_ID"), version = sfo_text(update_dir, "APP_VER");
+    const fs::path view = P(root) / "analysis" / "views" /
+                          ("boot-" + (title.empty() ? std::string("game") : title) + "-" +
+                           (version.empty() ? std::string("update") : version));
+    for (const std::wstring &key : order) {
+        const auto &entry = chosen[key];
+        const fs::path dest = view / entry.first, source = entry.second;
+        std::error_code ec;
+        const auto size = fs::file_size(source, ec);
+        const auto time = ec ? fs::file_time_type() : fs::last_write_time(source, ec);
+        if (ec) throw Failure{os_error(source, ec)};
+        // Same size and a write time within 2 s counts as unchanged: FAT32 only stores times to the even second.
+        std::error_code e2;
+        if (fs::file_size(dest, e2) == size && !e2) {
+            const auto have = fs::last_write_time(dest, e2);
+            if (!e2 && (have > time ? have - time : time - have) <= std::chrono::seconds(2)) continue;
+        }
+        make_dirs(dest.parent_path());
+        // Only the contents and the time are copied, not the permissions: a read-only copy could not be refreshed.
+        std::FILE *in = std::fopen(source.c_str(), "rb");
+        if (!in) throw Failure{os_error(source, errno)};
+        std::FILE *outf = std::fopen(dest.c_str(), "wb");
+        if (!outf) {
+            const int code = errno;
+            std::fclose(in);
+            throw Failure{os_error(dest, code)};
+        }
+        std::vector<char> buf(1 << 20);
+        size_t got = 0;
+        bool ok = true;
+        while (ok && (got = std::fread(buf.data(), 1, buf.size(), in)) > 0) ok = std::fwrite(buf.data(), 1, got, outf) == got;
+        ok = ok && !std::ferror(in);
+        int code = ok ? 0 : errno ? errno : EIO;
+        std::fclose(in);
+        if (std::fclose(outf) != 0 && ok) { ok = false; code = errno; }
+        if (ok) {
+            fs::last_write_time(dest, time, ec);
+            if (ec) { ok = false; code = ec.value(); }
+        }
+        if (!ok) throw Failure{os_error(dest, code)};
+    }
+    prune_views(view, widen(title.empty() ? "game" : title), chosen);
+    return view.string();
+}
+#endif
 
 // ------------------------------------------------------------------------------------------------ window icon
 
@@ -311,6 +538,13 @@ struct Rgb {
     std::vector<uint8_t> px;   // three bytes (red, green, blue) per pixel, rows from the top down
 };
 
+#ifndef _WIN32
+// Linux: no PNG decoder yet (Windows decodes through WIC), so the game window keeps SDL's default icon
+bool load_rgb(const std::wstring &path, Rgb &out, std::string &error) {
+    error = "decoding " + P(path).string() + ": not on Linux yet";
+    return false;
+}
+#else
 bool load_rgb(const std::wstring &path, Rgb &out, std::string &error) {
     HRESULT init = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     IWICImagingFactory *factory = nullptr;
@@ -339,6 +573,7 @@ bool load_rgb(const std::wstring &path, Rgb &out, std::string &error) {
     if (SUCCEEDED(init)) CoUninitialize();
     return ok;
 }
+#endif
 
 // The resampler follows Pillow's libImaging/Resample.c with the bicubic kernel (a = -0.5). Each output pixel gets its
 // own set of weights, normalized to sum to 1 and stored as 22-bit fixed point. One pass scales horizontally and one
@@ -448,8 +683,14 @@ void put32(std::string &s, uint32_t v) { for (int i = 0; i < 4; ++i) s += (char)
 void put16(std::string &s, uint16_t v) { s += (char)v; s += (char)(v >> 8); }
 
 std::string window_icon(const std::wstring &root, const std::wstring &game) {
+#ifdef _WIN32
     std::wstring icon = join(root, L"launcher\\assets\\window_icon.bmp");
     if (GetFileAttributesW(icon.c_str()) != INVALID_FILE_ATTRIBUTES) return utf8(icon) + "\n";
+#else
+    const fs::path icon = P(root) / "launcher" / "assets" / "window_icon.bmp";
+    std::error_code ec;
+    if (fs::exists(icon, ec)) return icon.string() + "\n";
+#endif
     std::wstring png = join(game, L"sce_sys\\icon0.png");
     Rgb picture;
     std::string error;
@@ -485,6 +726,7 @@ std::string window_icon(const std::wstring &root, const std::wstring &game) {
         row.resize(stride, '\0');
         bmp += row;
     }
+#ifdef _WIN32
     make_dirs(icon.substr(0, icon.find_last_of(L'\\')));
     HANDLE f = CreateFileW(icon.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (f == INVALID_HANDLE_VALUE) return "\nWindow icon unavailable: " + os_error(icon);
@@ -493,6 +735,11 @@ std::string window_icon(const std::wstring &root, const std::wstring &game) {
     CloseHandle(f);
     if (!ok) return "\nWindow icon unavailable: " + os_error(icon);
     return utf8(icon) + "\n";
+#else
+    make_dirs(icon.parent_path());
+    if (!port::write(icon, bmp.data(), bmp.size())) return "\nWindow icon unavailable: " + os_error(icon, errno ? errno : EIO);
+    return icon.string() + "\n";
+#endif
 }
 
 std::wstring arg_at(const Value &args, size_t i) {
@@ -526,15 +773,3 @@ UN_API int un_starter_files(const char *what, const char *args_json, char *out, 
 }
 
 }  // extern "C"
-
-#else   // Linux: the game starter's file chores come with the game start (docs/WINDOWS-DEPENDENCIES.md §13 phase 2)
-
-extern "C" {
-
-UN_API int un_starter_files(const char *what, const char *args_json, char *out, int cap) {
-    return port::not_yet_answer("game starter files", 1, out, cap);
-}
-
-}  // extern "C"
-
-#endif

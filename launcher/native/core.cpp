@@ -79,7 +79,7 @@ int give(const std::string &s, char *out, int cap) {
 }
 
 #ifdef _WIN32
-// a started program (the imports, the online program); Linux: none until port::spawn (§13 phase 2)
+// a started program (the imports, the online program); Linux: a port::Child made by new, freed by close_process
 using ProcessHandle = HANDLE;
 #else
 using ProcessHandle = void *;
@@ -434,22 +434,76 @@ std::vector<wchar_t> environment(const std::vector<std::pair<std::string, Value>
     return out;
 }
 
-// programs are started through port::spawn in phase 2 (docs/WINDOWS-DEPENDENCIES.md §13): until then nothing starts
+// the environment() block as the "NAME=value" lines port::spawn takes
+std::vector<std::string> environment_lines(const std::vector<std::pair<std::string, Value>> &changes) {
+    std::vector<std::string> lines;
+    const std::vector<wchar_t> block = environment(changes);
+    for (const wchar_t *p = block.data(); *p; p += wcslen(p) + 1) lines.push_back(port::utf8(std::wstring(p)));
+    return lines;
+}
+
+// runs a program and returns (exit code, its output); -1 when it could not start or timed out
 std::pair<int, std::string> run(const std::vector<std::string> &args, int timeout_ms, const std::string &cwd = "",
                                 const std::vector<std::pair<std::string, Value>> &env_changes = {}) {
-    port::not_yet(("starting " + (args.empty() ? std::string("a program") : args[0])).c_str());
-    return {-1, ""};
+    port::Spawn s;
+    s.argv = args;
+    s.cwd = cwd;
+    s.set_env = true;
+    s.env = environment_lines(env_changes);
+    s.out = port::Spawn::pipe;
+    port::Child child;
+    std::string error;
+    if (!port::spawn(s, child, error)) return {-1, ""};
+    std::string output;
+    std::thread reader([&]() {
+        char chunk[4096];
+        long got;
+        while ((got = port::read_some(child.out, chunk, sizeof chunk, -1)) > 0) output.append(chunk, (size_t)got);
+    });
+    const int code = port::wait(child, timeout_ms);
+    const bool done = child.done;
+    if (!done) port::kill(child);   // its pipe closes with it, which ends the reader
+    reader.join();
+    port::close(child);
+    return {done ? code : -1, output};
 }
+
+// a background program whose output goes to a file (the imports); its process, or null with the reason
 ProcessHandle spawn_logged(const std::vector<std::string> &args, const std::string &cwd, const std::string &log, bool append,
                            std::string &error) {
-    error = std::string("could not start ") + (args.empty() ? std::string("the program") : args[0]) + ": " +
-            port::not_yet("starting the imports");
-    return nullptr;
+    if (!append) keep_log_history(port::path_utf8(log));   // the earlier runs' logs stay LOG_DAYS days
+    port::Spawn s;
+    s.argv = args;
+    s.cwd = cwd;
+    s.set_env = true;
+    s.env = environment_lines({{"PYTHONIOENCODING", Value::text("utf-8")}});
+    s.out = port::Spawn::file;
+    s.out_file = port::path_utf8(log).string();
+    s.append = append;
+    s.low_priority = true;   // an import never slows a running game down
+    auto *child = new port::Child;
+    if (!port::spawn(s, *child, error)) {
+        delete child;
+        return nullptr;
+    }
+    return child;
 }
-bool process_running(ProcessHandle h) { return false; }
-void close_process(ProcessHandle h) {}
-long long process_id(ProcessHandle h) { return 0; }
-int exit_code_of(ProcessHandle h) { return 0; }
+
+bool process_running(ProcessHandle h) { return h && port::running(*(port::Child *)h); }
+void close_process(ProcessHandle h) {   // reaps an ended process; one still running is left alone
+    if (!h) return;
+    auto *child = (port::Child *)h;
+    port::running(*child);
+    port::close(*child);
+    delete child;
+}
+long long process_id(ProcessHandle h) { return h ? (long long)((port::Child *)h)->pid : 0; }
+int exit_code_of(ProcessHandle h) {   // 0 when unknown
+    if (!h) return 0;
+    auto *child = (port::Child *)h;
+    port::running(*child);
+    return child->done && child->code >= 0 ? child->code : 0;
+}
 #endif
 bool pid_alive(const Value *pid) {
     if (!pid) return false;
@@ -457,7 +511,11 @@ bool pid_alive(const Value *pid) {
     return n > 0 && un_pid_alive((unsigned long)n);
 }
 void kill_tree(long long pid) {
+#ifdef _WIN32
     run({"taskkill", "/PID", std::to_string(pid), "/T", "/F"}, 15000);
+#else
+    port::kill_tree(pid);
+#endif
 }
 
 }  // namespace
@@ -856,7 +914,7 @@ std::pair<bool, std::string> u3_ready(const Value &s) {
 }
 
 // the Uncharted 3 import (u3mp/patcher/importer, C++): u3mp/bin/u3import.exe of the package
-std::string u3import_exe() { return join(join(join(g.root, "u3mp"), "bin"), "u3import.exe"); }
+std::string u3import_exe() { return join(join(join(g.root, "u3mp"), "bin"), port::program_name("u3import.exe")); }
 
 std::string u3_shipped_id() {   // the shipped recipe's fingerprint (recipe/CONTENT_ID, else computed), worked out once
     if (!g.u3_shipped_known) {
@@ -1324,7 +1382,7 @@ bool u2_running() {
 std::string u2_shipped_id() {
     if (!g.u2_shipped_known) {
         // the installed import's fingerprint (u2mp/bin/u2import.exe --shipped-id), compared with state.json recipe_id
-        auto r = run({join(join(join(g.root, "u2mp"), "bin"), "u2import.exe"), "--shipped-id"}, 120000, join(join(g.root, "u2mp"), "bin"));
+        auto r = run({join(join(join(g.root, "u2mp"), "bin"), port::program_name("u2import.exe")), "--shipped-id"}, 120000, join(join(g.root, "u2mp"), "bin"));
         g.u2_shipped = r.first == 0 ? strip(r.second) : "";
         g.u2_shipped_known = true;
     }
@@ -1386,7 +1444,7 @@ std::string u2_data_folder() {
 }
 
 // the Uncharted 2 import (u2mp/patcher/importer, C++): u2mp/bin/u2import.exe of the package
-std::string u2import_exe() { return join(join(join(g.root, "u2mp"), "bin"), "u2import.exe"); }
+std::string u2import_exe() { return join(join(join(g.root, "u2mp"), "bin"), port::program_name("u2import.exe")); }
 
 void u2_import(bool silent, const std::string &reason = "") {
     if (u2_running()) {
@@ -1640,22 +1698,92 @@ Value online_request(const Value &request, DWORD wait_ms = 15000) {
     return reply;
 }
 #else
-// Linux: the online program is started through port::spawn in phase 2 (and gets its BSD sockets and 0600 token
-// file in phase 5, docs/WINDOWS-DEPENDENCIES.md §13); until then the online section stays away
+// Linux: the same conversation over two pipes. g.online_process holds the port::Child (with both pipe ends);
+// online_in and online_out stay null. The online program itself (its BSD sockets and 0600 token file) is phase 5
+// (docs/WINDOWS-DEPENDENCIES.md §13): without it the online section stays away, as on Windows.
 void wipe(std::string &s) {
     if (!s.empty()) port::zero(&s[0], s.size());
     s.clear();
 }
+
+// Ending the conversation: closing its input tells the program to wind down; it is not waited for (it may stay a
+// while for a game still using its session). A process that has ended is reaped here.
 void online_stop() {
+    if (g.online_process) {
+        auto *child = (port::Child *)g.online_process;
+        port::running(*child);
+        port::close(*child);
+        delete child;
+    }
     g.online_process = g.online_in = g.online_out = nullptr;
     wipe(g.online_pending);
     g.online = false;
 }
+
 bool online_spawn(const std::string &exe) {
-    port::not_yet("the online program");
-    return false;
+    // a program that has ended must not take the launcher with it when a request is written to its pipe (SIGPIPE);
+    // the write fails instead, as WriteFile does on Windows
+    std::signal(SIGPIPE, SIG_IGN);
+    port::Spawn s;
+    s.argv = {exe};
+    s.cwd = join(g.u3mp_dir, "online");
+    s.in_pipe = true;
+    s.out = port::Spawn::pipe;
+    auto *child = new port::Child;
+    std::string error;
+    if (!port::spawn(s, *child, error)) {
+        delete child;
+        return false;
+    }
+    g.online_process = child;
+    return true;
 }
-Value online_request(const Value &request, unsigned long wait_ms = 15000) { return Value::null(); }
+
+// The next full line from the program, within wait_ms (see the Windows body)
+bool online_line(std::string &line, unsigned long wait_ms) {
+    auto *child = (port::Child *)g.online_process;
+    const long long start = port::now_ms();
+    for (;;) {
+        const size_t end = g.online_pending.find('\n');
+        if (end != std::string::npos) {
+            line.assign(g.online_pending, 0, end);
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            port::zero(&g.online_pending[0], end + 1);
+            g.online_pending.erase(0, end + 1);
+            return true;
+        }
+        const long long spent = port::now_ms() - start;
+        if (spent >= (long long)wait_ms) return false;
+        char chunk[4096];
+        const long got = port::read_some(child->out, chunk, sizeof chunk, (int)((long long)wait_ms - spent));
+        if (got < 0) {   // it has ended
+            port::zero(chunk, sizeof chunk);
+            return false;
+        }
+        g.online_pending.append(chunk, (size_t)got);
+        port::zero(chunk, sizeof chunk);
+    }
+}
+
+// One request and its reply (see the Windows body)
+Value online_request(const Value &request, unsigned long wait_ms = 15000) {
+    if (!g.online_process) return Value::null();
+    std::string out = json::dump(request);
+    for (char &c : out) if (c == '\n') c = ' ';
+    out += '\n';
+    const bool sent = port::write_all(((port::Child *)g.online_process)->in, out.data(), out.size());
+    wipe(out);
+    std::string line;
+    if (!sent || !online_line(line, wait_ms)) {
+        wipe(line);
+        online_stop();
+        return Value::null();
+    }
+    Value reply;
+    json::parse(line, reply);
+    wipe(line);
+    return reply;
+}
 #endif
 Value online_op(const char *op, const std::string &game = std::string()) {
     Value r = Value::object();
@@ -1670,7 +1798,7 @@ Value online_out(const Value &reply) {
 }
 
 void online_open() {
-    const std::string exe = join(join(g.u3mp_dir, "online"), "uncharted_online.exe");
+    const std::string exe = join(join(g.u3mp_dir, "online"), port::program_name("uncharted_online.exe"));
     if (!is_file(exe) || !online_spawn(exe)) return;
     if (num(online_request(online_op("hello"), 5000).get("abi")) < 1) { online_stop(); return; }
     Value open = online_op("open"), state = Value::object();
@@ -2000,7 +2128,7 @@ void u2_env(std::vector<std::pair<std::string, Value>> &env, const std::string &
     env.push_back({"UNCHARTED_U2MP_OVERLAY", Value::text(overlay + ";" + u2_files())});
     env.push_back({"UNCHARTED_U2MP", Value::text("1")});
     env.push_back({"UNCHARTED_U2MP_NAME", Value::text("Drake")});
-    const std::string online_exe = join(join(g.u3mp_dir, "online"), "u2_online.exe");   // Uncharted 2 online, a separate program
+    const std::string online_exe = join(join(g.u3mp_dir, "online"), port::program_name("u2_online.exe"));   // Uncharted 2 online, a separate program
     if (is_file(online_exe)) env.push_back({"UNCHARTED_U2MP_ONLINE_EXE", Value::text(online_exe)});
     online_env(env, "u2");
 }
@@ -2015,7 +2143,7 @@ bool u2_usable() {
 // the overlay folder for Uncharted 2's menu (u2import --overlay builds it from the player's game; "" when it can't)
 std::string build_u2_overlay(const std::string &game, const std::string &update) {
     const std::string bin = join(join(g.root, "u2mp"), "bin");
-    std::vector<std::string> cmd = {join(bin, "u2import.exe"), "--overlay", game, join(u2_dir(), "image")};
+    std::vector<std::string> cmd = {join(bin, port::program_name("u2import.exe")), "--overlay", game, join(u2_dir(), "image")};
     if (!update.empty()) cmd.insert(cmd.end(), {"--update", update});
     auto r = run(cmd, 600000, bin);
     if (r.first != 0) return "";
@@ -2027,7 +2155,7 @@ void finished_game(long long code, bool known);
 
 void start_game(std::function<void(bool)> done, const std::string &overlay) {
     const Value *entry = game_entry(game_key());
-    const std::string starter = join(join(join(g.root, "launcher"), "native"), "game_starter.exe");
+    const std::string starter = join(join(join(g.root, "launcher"), "native"), port::program_name("game_starter.exe"));
     std::vector<std::pair<std::string, Value>> env;
     env.push_back({"GOW3_TITLE_SUFFIX", Value::text(version_suffix(u3_imported_version()))});
     {   // the game window's title: the game's own name instead of the collection's
@@ -2087,8 +2215,8 @@ void start_game(std::function<void(bool)> done, const std::string &overlay) {
 // updates, then launch the starter with the built environment
 void play(std::function<void(bool)> done = nullptr) {
     auto fail = [done]() { if (done) done(false); };
-    if (!is_file(join(join(join(g.root, "launcher"), "native"), "game_starter.exe"))) {
-        tell("error", "The game starter is missing:\n" + join(join(join(g.root, "launcher"), "native"), "game_starter.exe"));
+    if (!is_file(join(join(join(g.root, "launcher"), "native"), port::program_name("game_starter.exe")))) {
+        tell("error", "The game starter is missing:\n" + join(join(join(g.root, "launcher"), "native"), port::program_name("game_starter.exe")));
         fail();
         return;
     }
