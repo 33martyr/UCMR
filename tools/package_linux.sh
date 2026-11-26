@@ -195,8 +195,14 @@ licenses() {
 distro_licenses() {
     (( ${#from_distro[@]} )) || return 0
     command -v dpkg > /dev/null || { echo "Note: no dpkg: licenses/ lacks the system libraries' copyright files" >&2; return 0; }
-    local packages p
-    mapfile -t packages < <(dpkg -S "${from_distro[@]}" 2>/dev/null | cut -d: -f1 | sort -u)
+    local packages p f
+    # dpkg knows each file under one name: /usr/lib/... or /lib/... (merged /usr), whichever ldd did not print
+    mapfile -t packages < <(for f in "${from_distro[@]}"; do
+        f=$(readlink -f -- "$f")
+        dpkg -S "$f" 2>/dev/null || dpkg -S "/usr$f" 2>/dev/null || dpkg -S "${f#/usr}" 2>/dev/null ||
+            echo "Note: no distribution package owns $f" >&2
+    done | cut -d: -f1 | sort -u)
+    (( ${#packages[@]} )) || { echo "No distribution package found for the bundled system libraries" >&2; exit 1; }
     mkdir -p "$lic/distro"
     for p in "${packages[@]}"; do
         [[ -f /usr/share/doc/$p/copyright ]] && { mkdir -p "$lic/distro/$p"; cp "/usr/share/doc/$p/copyright" "$lic/distro/$p/"; }
