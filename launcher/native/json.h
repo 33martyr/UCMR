@@ -69,7 +69,18 @@ struct Value {
         return false;
     }
     bool equals_text(const char *t) const { return kind == String && s == t; }
+
+    // The destructor is defined after the class: libstdc++'s std::pair checks it while `fields` is set up, and with
+    // clang in C++20 an implicit one would need std::pair<std::string, Value> complete at that point. Copy and move
+    // stay as the compiler makes them.
+    Value() = default;
+    Value(const Value &) = default;
+    Value(Value &&) noexcept = default;
+    Value &operator=(const Value &) = default;
+    Value &operator=(Value &&) noexcept = default;
+    ~Value();
 };
+inline Value::~Value() = default;
 
 // ------------------------------------------------------------------------------------------------ parse
 
