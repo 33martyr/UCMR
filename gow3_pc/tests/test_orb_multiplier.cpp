@@ -7,6 +7,7 @@
 #include <array>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>  // std::memcpy (libstdc++ does not bring it in through the others)
 #include <filesystem>
 #include <chrono>   // clock stamp that makes the temp ini name unique
 #include <fstream>  // writes the legacy-key ini
