@@ -1,0 +1,157 @@
+# The Linux build (docs/WINDOWS-DEPENDENCIES.md §7.4 and §13): what already builds and runs on Linux, from the same
+# sources as the Windows build. It grows phase by phase. Its own workflow, so it never holds up the Windows build or
+# its release (both stay in build-windows.yml); a red job here shows which part of the port broke.
+name: Build Linux
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # The launcher core (launcher/native/build.sh): libuncharted_native.so and game_starter. Features whose Linux body
+  # comes in a later phase answer "not on Linux yet" (§4.1).
+  launcher-core:
+    name: Launcher core (libuncharted_native.so)
+    runs-on: ubuntu-22.04   # glibc 2.35: the oldest system the Linux package is meant for
+    timeout-minutes: 30
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Tools
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends clang-15 libvulkan-dev
+
+      - name: Build
+        run: CXX=clang++-15 launcher/native/build.sh
+
+      - name: Check the library
+        run: |
+          echo "exported functions: $(nm -D --defined-only launcher/native/libuncharted_native.so | grep -c ' T un_')"
+          echo "libraries it needs:"; objdump -p launcher/native/libuncharted_native.so | grep NEEDED
+          clang++-15 -std=c++17 -O2 -Wall -Wextra -Wno-unused-parameter -Ilauncher/native launcher/native/core_smoke.cpp \
+            -o core_smoke -ldl
+          ./core_smoke launcher/native/libuncharted_native.so .
+
+      - name: Keep the build
+        uses: actions/upload-artifact@v4
+        with:
+          name: launcher-core-linux
+          path: |
+            launcher/native/libuncharted_native.so
+            launcher/native/game_starter
+
+  # The importers' own code and the package's build tools. The Uncharted 2 importer's 18 files and the converters
+  # it shares with Uncharted 3 compile; linking u2import needs the process runner (u3mp/patcher/importer/common.cpp,
+  # dctools/proc.cpp, fixlib.cpp), which is phase 2.
+  importers:
+    name: Importer core and build tools
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Tools
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends clang-15 zlib1g-dev unzip
+
+      - name: Uncharted 2 importer core
+        run: |
+          fx=u3mp/patcher/tools/fixes im=u3mp/patcher/importer u2=u2mp/patcher/importer
+          flags=(-std=c++20 -O2 -I"$u2" -I"$im" -I"$fx/dctools" -Ilauncher/native)
+          mkdir -p out/u2import
+          for s in "$u2"/*.cpp "$fx/dctools/psarc.cpp" "$fx/dctools/dc.cpp" "$fx/sound-banks/convert_banks.cpp" \
+              "$fx/dctools/ndpak.cpp" "$fx/dctools/ps4writer.cpp" "$fx/dctools/ps4ingame.cpp" "$fx/dctools/ps4stage.cpp" \
+              "$fx/dctools/stageplan.cpp" "$fx/dctools/ps3bg.cpp" "$fx/dctools/visinfo.cpp" "$fx/dctools/collision.cpp" \
+              "$fx/dctools/texcodec.cpp" "$fx/dctools/hkconvert.cpp" "$fx/dctools/ps3fp.cpp" "$fx/dctools/ps4mats.cpp" \
+              "$fx/dctools/ps4actor.cpp" "$fx/dctools/anim.cpp" "$fx/dctools/skel.cpp" "$fx/dctools/fgcoll.cpp" \
+              "$fx/dctools/dcconv.cpp" "$fx/dctools/normal_blend.cpp"; do
+            echo "$s"
+            clang++-15 "${flags[@]}" -c "$s" -o "out/u2import/$(echo "$s" | tr / _).o" &
+            while (( $(jobs -r | wc -l) >= $(nproc) )); do wait -n; done
+          done
+          failed=0
+          for j in $(jobs -p); do wait "$j" || failed=1; done
+          exit $failed
+
+      - name: mkzip and code_ids
+        run: |
+          clang++-15 -std=c++17 -O2 -Wall -Wextra -o out/mkzip tools/mkzip.cpp -lz
+          clang++-15 -std=c++20 -O2 -Wall -Wextra -o out/code_ids tools/code_ids.cpp
+          # a zip of the launcher core's sources, read back by unzip
+          out/mkzip out/test.zip launcher/native
+          unzip -tq out/test.zip
+
+  # The GPU library's unit tests that need no Vulkan device and no game (gow3_pc/gpu/CMakeLists.txt, the targets
+  # outside `if (WIN32)`). Ubuntu 24.04 for a C++23 compiler and library; SDL3 is built from source (no distro
+  # package yet). cheat-hook-test and actor-hook-test stay Windows-only until their memory helper has a Linux body
+  # (§4.6).
+  gpu-tests:
+    name: GPU unit tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      SDL3_VERSION: release-3.2.0
+    steps:
+      - name: Check out (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Tools
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends clang cmake ninja-build pkg-config glslang-tools \
+            libvulkan-dev libvma-dev libfmt-dev libboost-dev robin-map-dev libxxhash-dev libzydis-dev libx11-dev \
+            libxext-dev libavformat-dev libavcodec-dev libavutil-dev libswscale-dev libswresample-dev
+
+      - name: Reuse SDL3
+        id: sdl3
+        uses: actions/cache@v4
+        with:
+          path: ~/sdl3
+          key: sdl3-${{ env.SDL3_VERSION }}-ubuntu-24.04
+
+      - name: SDL3
+        if: steps.sdl3.outputs.cache-hit != 'true'
+        run: |
+          git clone -q --depth 1 -b "$SDL3_VERSION" https://github.com/libsdl-org/SDL.git "$RUNNER_TEMP/sdl"
+          cmake -S "$RUNNER_TEMP/sdl" -B "$RUNNER_TEMP/sdl/build" -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$HOME/sdl3" -DSDL_TESTS=OFF -DSDL_EXAMPLES=OFF
+          cmake --build "$RUNNER_TEMP/sdl/build"
+          cmake --install "$RUNNER_TEMP/sdl/build"
+
+      - name: Configure
+        run: |
+          export PKG_CONFIG_PATH="$HOME/sdl3/lib/pkgconfig:$HOME/sdl3/lib64/pkgconfig"
+          cmake -S gow3_pc/gpu -B out/gpu -G Ninja -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
+            -DCMAKE_BUILD_TYPE=Release -DGOW3_LTO=OFF -DCMAKE_PREFIX_PATH="$HOME/sdl3"
+
+      - name: Build and run the tests
+        run: |
+          tests=(motion-history-test ui-composition-test async-compiler-test warmup-inbox-test async-pipeline-cache-test
+                 depth-stencil-state-test blend-rewrite-test aliasing-test async-fetch-snapshot-test png-decode-test
+                 upscaler-support-test orb-multiplier-test stat-multipliers-test perf-overlay-test graphics-settings-test
+                 cheat-hooks-test signatures-test readback-queue-test
+                 readback-sources-test wait-diagnostics-test page-state-test)
+          failed=()
+          for t in "${tests[@]}"; do
+            echo "::group::$t"
+            if cmake --build out/gpu --target "$t" && (cd gow3_pc/gpu && "../../out/gpu/$t"); then
+              echo "::endgroup::"
+            else
+              echo "::endgroup::"
+              echo "::error::$t failed"
+              failed+=("$t")
+            fi
+          done
+          echo "${#tests[@]} tests, ${#failed[@]} failed ${failed[*]}"
+          (( ${#failed[@]} == 0 ))
