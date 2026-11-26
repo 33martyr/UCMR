@@ -44870,6 +44870,7 @@ extern "C" void u3x_fam_tick(uintptr_t base, Log log);   // v7.254 fam block (en
 extern "C" U3X_FN [[clang::minsize]] void u3x_ring_tick(uintptr_t base, Log log) {
     using namespace ring_tint;
     u3x_pinfo_pull_tick(base, log);   // v7.225: player infos asked for again (every frame, net game or not)
+    u3x_mm_play_tick(base);   // v7.263 (PR #50): the match loading page's 0x30 step when a guest skipped it, late kits
     u3x_cg_tick(base, log);   // v7.253 cg: DLC word held On (R9), the party's content mask line (R2)
     u3x_npc_spawn_report(base, log);   // v7.225: NPC spawn events on guests (boot.log counts)
     u3x_netanim_report(base, log);   // v7.236: remote characters posed when a snapshot cannot be decoded
@@ -45008,6 +45009,7 @@ extern "C" U3X_FN [[clang::minsize]] void u3x_pinfo_pull_tick(uintptr_t base, Lo
         if (a.tries >= TRIES || (a.wait && --a.wait)) continue;
         uint8_t zeros[0x10];
         for (uint8_t &z : zeros) z = 0;
+        u3x_pinfo_unlock(rec);   // v7.263 (PR #50): the start list's lock byte would drop the answer
         game_call<void>(base + MSG_SEND, rd<uint32_t>(rec, CONNECTION), ASK, static_cast<void *>(zeros), uint32_t{0x10});
         if (!a.tries && a.reused) st.reused_asked++;
         a.tries++;
