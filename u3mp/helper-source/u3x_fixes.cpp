@@ -3892,6 +3892,221 @@ extern "C" U3X_FN bool u3x_host_record_there(uintptr_t base, uint32_t host_id) {
     return false;
 }
 
+// ---- Matchmaking start: HUD, in-game sound, remote kits, player infos (TDM retest on v7.262, both PCs) ----
+// Seen in matchmaking only (custom games are fine): no HUD and no in-game sound on either PC, the other player drawn
+// only as a floating weapon (collision fine), and the guest never takes a player info of the host ("looks fresh for 0
+// of 1" with 10 PlayerInfo in).
+//
+// (1) u3x_mm_play_tick(base), once per frame, in or out of a net game:
+//  a) HUD / sound. The match loading page's 0x30 step (handler 0x6a7310, case 0x30 at 0x6a7a62; the late-join twin
+//     in 0x74bbb0 has the same block) is the only place where the menu goes into play mode. It sets the start gate
+//     NET +0x408 = 3, closes the menu's open overlay (MENU +0x898), runs the match setup stage 3 (0x72b570), sends
+//     0x9f2aeafb / 0xd3b86d60 to the object keyed 0x6e51b48f, puts the menu into mode 5 (MENU +8 = 5, +0xdb8 = 1.0)
+//     unless it is in mode 0, 5 or 6, and sends {150} to that object. A guest can also reach play through the host's
+//     StartGame (0x67e980 sets 0x1d without any of it). On the guest's log the state went 0x30 -> 0x1d right on
+//     StartGame, 1.3 s after its own countdown was over, so its step did not run. Here, on the first frame of 0x1d
+//     after 0x30 in a match room, with the gate still below 3 (not 3 = the step ran, not 4 = late join), that block
+//     runs as the game wrote it, minus the stage 3 call that the start already made.
+//  b) remote kits. A kit part is drawn only when its package was loaded when the part was put on (the lobby
+//     re-dress, G59 h01, even puts an empty name for an unloaded part). In matchmaking the remote player's kit packages
+//     are logged in at 0x30, about 1 s before play (custom games want them during the load screens, which wait for
+//     them), so a remote character built at the start shows its weapon only. Story skins stream in with their
+//     placeholder and were fine in the v7.261 run. Here, for every remote net player during play: when its Player
+//     character is new and one of its worn parts (+0x1b80, 11 names) is not loaded yet, the character is dressed again
+//     once all of them are loaded, with the same calls as the lobby re-dress (parts 0..9 0xbc8630, part 10 and the
+//     rebuild 0xbcb7c0, model-changed message 0x80e056d1 to its sub-object, look colours 0xbc9e50). Once per character.
+// boot.log lines "U3MP online: mm play: ...".
+//
+// (2) u3x_pinfo_unlock(rec): the host's start player list (process 0x712010, "event 23") writes the word 0x0101 at
+//     record +0x365 (info received + a lock byte at +0x366, 0x712659), and the PlayerInfo process 0x709a90 drops every
+//     later info for that record (cmp record +0x366 at 0x709b75). The list carries team and loadout but not the looks
+//     (+0x620). A guest's host record is made after the host's lobby info went by, so the guest's asks (0x106) all came
+//     back to a locked record. To be called right before each ask of the player-info pull (u3x_pinfo_pull_tick): the
+//     answer is then processed (looks, info), the PS3 rule "ask once the record exists".
+namespace mm_play {
+constexpr uintptr_t NET_STATE = 0x1b68810, NET = 0x17d5c58, MENU = 0x17bd080, MATCH = 0x17d6420, NGM = 0x17cb060;
+constexpr uintptr_t OBJECTS = 0x1b3ee70, LEVEL_MANAGER = 0x1afcf10, EMPTY_TEXT = 0x13ac250, NAME_ID_FN = 0x1702720;
+constexpr uintptr_t FN_651FA0 = 0x651fa0, FN_6531F0 = 0x6531f0, FN_6534E0 = 0x6534e0, FN_F23970 = 0xf23970,
+                    FN_125FDB0 = 0x125fdb0, FN_1266080 = 0x1266080;
+constexpr uintptr_t FN_FIND_PACKAGE = 0x10eb380, FN_SET_PART = 0xbc8630, FN_SET_PART_REBUILD = 0xbcb7c0,
+                    FN_LOOK_COLOURS = 0xbc9e50;
+constexpr uintptr_t GATE = 0x408, R_HANDLE = 0x10, R_HANDLE_ID = 0x18, R_IN_USE = 0xe1, R_GONE = 0x5e4;
+constexpr uintptr_t CH_TYPE = 0x30, CH_ID = 0x7c, CH_PARTS = 0x1b80;
+constexpr uint32_t KEY = 0x6e51b48fu, SID_NO_PART = 0xf114b39du, LOADED = 8, MODEL_CHANGED = 0x80e056d1u;
+constexpr int PARTS = 11;
+constexpr uint32_t LINES = 24;
+enum : uint8_t { K_NONE, K_WAIT, K_DONE };
+struct State {
+    uint32_t last_ns, player_sid, lines;
+    uint32_t pid[10];
+    uint8_t phase[10];
+};
+U3X_BSS State st;
+U3X_RO const char t_name_player[] = "Player";
+U3X_RO const char t_play[] = "mm play: the loading page's 0x30 step did not run (start gate ",
+                  t_play2[] = "): menu play mode and match sound set as that step does";
+U3X_RO const char t_kit[] = "mm play: remote character built with kit parts not loaded (mask ",
+                  t_kit2[] = "): dressed again once they are";
+U3X_RO const char t_kit_done[] = "mm play: remote character dressed again, parts ", t_close[] = "";
+U3X_RO const char t_kit_none[] = "mm play: remote character without part names at its start, slot ";
+
+template <typename R, typename... A> [[gnu::always_inline]] inline R vcall(void *object, uintptr_t offset, A... args) {
+    const uint8_t *table = rd<const uint8_t *>(object, 0);
+    return rd<R (*)(void *, A...)>(table, offset)(object, args...);
+}
+[[gnu::always_inline]] inline bool usable(const char *name) {
+    const uintptr_t v = reinterpret_cast<uintptr_t>(name);
+    return v >= 0x10000u && v < (1ull << 47) && *name != 0;
+}
+U3X_FN void note(const char *a, int32_t v, const char *b) {
+    if (st.lines >= LINES) return;
+    st.lines++;
+    u3h_so_note(a, nullptr, v, b);
+}
+// the object table entry the 0x30 step finds by key (FNV-1a of the key's four bytes, chained buckets)
+U3X_FN void *object_by_key(uintptr_t base, uint32_t key) {
+    uint32_t h = 0x811c9dc5u;
+    for (int i = 0; i < 4; i++) h = (h ^ ((key >> (8 * i)) & 0xffu)) * 0x1000193u;
+    const uint8_t *table = &at<const uint8_t>(base + OBJECTS);
+    const int32_t count = rd<int32_t>(table, 0x3c);
+    void *const *buckets = rd<void *const *>(table, 0);
+    if (count <= 0 || !ptr_ok(buckets)) return nullptr;
+    const uint8_t *node = static_cast<const uint8_t *>(buckets[h % static_cast<uint32_t>(count)]);
+    while (node && ptr_ok(node)) {
+        if (rd<uint32_t>(node, 0x10) == key) return node == buckets[count] ? nullptr : rd<void *>(node, 0x18);
+        node = rd<const uint8_t *>(node, 0);
+    }
+    return nullptr;
+}
+// the 0x30 step's play block (0x6a7ae0 .. 0x6a7cf4) without its 0x72b570 stage 3 call
+U3X_FN void enter_play(uintptr_t base) {
+    uint8_t *menu = &at<uint8_t>(base + MENU);
+    if (void *top = rd<void *>(menu, 0x898)) {
+        game_call<void>(base + FN_651FA0, int32_t{0xd});
+        vcall<void>(top, 0x30, int32_t{0});
+        top = rd<void *>(menu, 0x898);
+        if (top) game_call<void>(base + FN_6531F0, static_cast<void *>(menu), int32_t{3}, rd<uint32_t>(top, 0x10));
+        const int32_t index = rd<int32_t>(menu, 0xdb0);
+        void *page = index >= 0 && index < 64 ? rd<void *>(menu, 0x8b0 + 8u * static_cast<uint32_t>(index)) : nullptr;
+        if (page && ptr_ok(page)) vcall<void>(page, 0x30, int32_t{1});
+        *reinterpret_cast<void **>(menu + 0x8a0) = rd<void *>(menu, 0x898);
+        *reinterpret_cast<void **>(menu + 0x898) = nullptr;
+    }
+    void *target = game_call<void *>(base + FN_125FDB0, object_by_key(base, KEY), 0x9f2aeafbu, 0xd3b86d60u);
+    const uint32_t mode = rd<uint32_t>(menu, 8);
+    if (mode > 6 || !((0x61u >> mode) & 1u)) {
+        alignas(16) uint8_t arg[0x100];
+        game_call<void>(base + FN_F23970, static_cast<void *>(arg), int32_t{0}, int32_t{0});
+        game_call<void>(base + FN_6534E0, static_cast<void *>(menu), static_cast<void *>(arg), int32_t{3});
+        *reinterpret_cast<uint32_t *>(menu + 8) = 5;
+        *reinterpret_cast<uint32_t *>(menu + 0xdb4) = 0;
+        *reinterpret_cast<uint32_t *>(menu + 0xdb8) = 0x3f800000u;   // 1.0f
+        game_call<void>(base + FN_6534E0, static_cast<void *>(menu), static_cast<void *>(arg), int32_t{0});
+    }
+    if (target && ptr_ok(target)) {
+        int32_t value = 0x96;
+        game_call<void>(base + FN_1266080, target, int32_t{2}, &value, int32_t{0});
+    }
+}
+// the live character of a net player record (handle +0x10, its id +0x18 = the character's +0x7c), or null
+U3X_FN uint8_t *character(uint8_t *rec) {
+    uint8_t **handle = rd<uint8_t **>(rec, R_HANDLE);
+    const uint32_t id = rd<uint32_t>(rec, R_HANDLE_ID);
+    if (!handle || !id || !ptr_ok(handle)) return nullptr;
+    uint8_t *ch = *handle;
+    return ch && ptr_ok(ch) && rd<uint32_t>(ch, CH_ID) == id ? ch : nullptr;
+}
+// bit k = worn part k has a name whose package is not loaded; *named = parts with a name
+U3X_FN uint32_t unloaded_parts(uintptr_t base, const uint8_t *ch, int *named) {
+    uint32_t mask = 0;
+    *named = 0;
+    for (int k = 0; k < PARTS; k++) {
+        const char *name = rd<const char *>(ch, CH_PARTS + 8u * static_cast<uint32_t>(k));
+        if (!usable(name)) continue;
+        const uint32_t sid = u3h_crc_sid(name);
+        if (sid == SID_NO_PART) continue;
+        ++*named;
+        const uint8_t *package = game_call<const uint8_t *>(base + FN_FIND_PACKAGE,
+                                                            reinterpret_cast<void *>(base + LEVEL_MANAGER), sid);
+        if (!package || !ptr_ok(package) || rd<uint32_t>(package, 0x30) != LOADED) mask |= 1u << k;
+    }
+    return mask;
+}
+// puts the character's own parts on again (G59 h01's re-dress calls, with the worn names)
+U3X_FN void redress(uintptr_t base, uint8_t *ch) {
+    using NameId = uint32_t (*)(int32_t, const char *, int32_t);
+    const char *empty = reinterpret_cast<const char *>(base + EMPTY_TEXT);
+    const char *names[PARTS];
+    for (int k = 0; k < PARTS; k++) {
+        const char *name = rd<const char *>(ch, CH_PARTS + 8u * static_cast<uint32_t>(k));
+        names[k] = usable(name) ? name : empty;
+    }
+    for (int k = 0; k < PARTS - 1; k++) {
+        if (names[k][0]) at<NameId>(base + NAME_ID_FN)(0, names[k], 1);
+        game_call<void>(base + FN_SET_PART, static_cast<void *>(ch), names[k], static_cast<int32_t>(k));
+    }
+    game_call<void>(base + FN_SET_PART_REBUILD, static_cast<void *>(ch), names[PARTS - 1], int32_t{PARTS - 1});
+    void *sub = vcall<void *>(ch, 0x1f8);
+    if (sub && ptr_ok(sub)) vcall<void>(sub, 0x38, MODEL_CHANGED);
+    game_call<void>(base + FN_LOOK_COLOURS, static_cast<void *>(ch));
+}
+U3X_FN void kit_tick(uintptr_t base, uint32_t ns) {
+    if (ns != 0x1d) {
+        for (int i = 0; i < 10; i++) st.pid[i] = 0, st.phase[i] = K_NONE;
+        return;
+    }
+    if (!st.player_sid) st.player_sid = u3h_crc_sid(t_name_player);
+    uint8_t *ngm = &at<uint8_t>(base + NGM);
+    const uint8_t *local0 = rd<const uint8_t *>(ngm, 0x370), *local1 = rd<const uint8_t *>(ngm, 0x378);
+    for (int i = 0; i < 10; i++) {
+        uint8_t *rec = ngm + 0x390 + 0x9c0u * static_cast<uint32_t>(i);
+        if (!rec[R_IN_USE] || rec[R_GONE] || rec == local0 || rec == local1) {
+            st.pid[i] = 0;
+            st.phase[i] = K_NONE;
+            continue;
+        }
+        uint8_t *ch = character(rec);
+        if (!ch || rd<uint32_t>(ch, CH_TYPE) != st.player_sid) continue;
+        const uint32_t pid = rd<uint32_t>(ch, CH_ID);
+        int named = 0;
+        if (st.pid[i] != pid) {   // a new character: were its parts all in when it was built?
+            st.pid[i] = pid;
+            const uint32_t mask = unloaded_parts(base, ch, &named);
+            if (!named) note(t_kit_none, i, t_close);
+            st.phase[i] = mask ? K_WAIT : K_DONE;
+            if (mask) note(t_kit, static_cast<int32_t>(mask), t_kit2);
+            continue;
+        }
+        if (st.phase[i] != K_WAIT || unloaded_parts(base, ch, &named)) continue;
+        redress(base, ch);
+        st.phase[i] = K_DONE;
+        note(t_kit_done, named, t_close);
+    }
+}
+}  // namespace mm_play
+
+extern "C" U3X_FN void u3x_mm_play_tick(uintptr_t base) {
+    using namespace mm_play;
+    const uint32_t ns = at<uint32_t>(base + NET_STATE);
+    const uint32_t prev = st.last_ns;
+    st.last_ns = ns;
+    if (ns == 0x1d && prev == 0x30 && rd<uint64_t>(&at<uint8_t>(base + MATCH), 0x18)) {
+        uint8_t *net = &at<uint8_t>(base + NET);
+        const uint32_t gate = rd<uint32_t>(net, GATE);
+        if (gate != 3 && gate != 4) {
+            *reinterpret_cast<uint32_t *>(net + GATE) = 3;
+            enter_play(base);
+            note(t_play, static_cast<int32_t>(gate), t_play2);
+        }
+    }
+    if (ns == 0x11) st.lines = 0;   // a new match from the room: the lines again
+    kit_tick(base, ns);
+}
+
+extern "C" U3X_FN void u3x_pinfo_unlock(uint8_t *rec) {
+    if (rec) rec[0x366] = 0;
+}
+
 #pragma clang section text=".text.ext" rodata=".rodata.ext"   // v7.253: back to the file's default (region B), not ""
 // ===== end of contributor section =====
 // (keep these three lines unchanged: they separate the contributor section from the parts appended below)
