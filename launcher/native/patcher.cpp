@@ -17,7 +17,10 @@
 #include <cstdlib>
 #include <cmath>
 #include <cstring>
+#ifdef _WIN32
 #include <windows.h>
+#endif
+#include "port.h"
 
 #include <string>
 #include <vector>
@@ -168,7 +171,8 @@ bool apply(std::string &data, const Value &patches, std::string &log, std::strin
     return true;
 }
 
-bool read_file(const wchar_t *path, std::string &data) {
+bool read_file(const un_path_char *path, std::string &data) {
+#ifdef _WIN32
     HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) return false;
     LARGE_INTEGER size{};
@@ -184,9 +188,13 @@ bool read_file(const wchar_t *path, std::string &data) {
     }
     CloseHandle(h);
     return ok;
+#else
+    return port::read(path, data, UINT64_MAX);
+#endif
 }
 
-bool write_file(const wchar_t *path, const std::string &data) {
+bool write_file(const un_path_char *path, const std::string &data) {
+#ifdef _WIN32
     HANDLE h = CreateFileW(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) return false;
     size_t done = 0;
@@ -198,6 +206,9 @@ bool write_file(const wchar_t *path, const std::string &data) {
     }
     CloseHandle(h);
     return ok;
+#else
+    return port::write(path, data.data(), data.size());
+#endif
 }
 
 int give(const std::string &s, char *out, int cap) {
@@ -259,7 +270,11 @@ long long resolution(std::string &data, int width, int height, bool move, std::s
         {0x34, 1216, (uint32_t)(1216LL * height / 1080)}};
     // For troubleshooting, UNCHARTED_RES_KEEP=<hex field offsets> keeps the listed fields at their 1080p values.
     char keep_text[512] = "";
+#ifdef _WIN32
     GetEnvironmentVariableA("UNCHARTED_RES_KEEP", keep_text, sizeof keep_text);
+#else
+    if (const char *v = std::getenv("UNCHARTED_RES_KEEP")) std::snprintf(keep_text, sizeof keep_text, "%s", v);
+#endif
     std::vector<long> keep;
     for (char *t = keep_text; *t;) {
         while (*t == ',' || *t == ' ' || *t == '\t') ++t;
@@ -392,7 +407,7 @@ extern "C" {
 // replacement hex], ...]]. `out` receives the log lines. Returns 0 once the patched file is saved; 1 if the file was
 // left alone (the final line gives the reason); a negative number if `out` is too small, in which case nothing was
 // saved and its absolute value is the size to call again with.
-UN_API int un_apply_patches(const wchar_t *image, const char *patches_json, char *out, int cap) {
+UN_API int un_apply_patches(const un_path_char *image, const char *patches_json, char *out, int cap) {
     Value patches;
     std::string data, log, error;
     if (!json::parse(patches_json ? patches_json : "", patches)) error = "bad patch list";
@@ -408,7 +423,7 @@ UN_API int un_apply_patches(const wchar_t *image, const char *patches_json, char
 
 // Lists, one decimal number per line, the offsets in the file where the pattern starts to match (non-overlapping;
 // no more than `limit` of them when limit > 0).
-UN_API int un_pattern_find(const wchar_t *file, const char *pattern, int limit, char *out, int cap) {
+UN_API int un_pattern_find(const un_path_char *file, const char *pattern, int limit, char *out, int cap) {
     std::string data, text;
     Pattern p = parse_pattern(pattern ? pattern : "");
     if (!p.ok || !read_file(file, data)) return 1;
@@ -445,7 +460,7 @@ UN_API int un_resolution_patch(unsigned char *data, unsigned long long size, int
 // size in place instead of failing. `out` starts with "<width> <height> <extra MiB>" followed by the log lines.
 // Returns 0 on success; 1 when the game's code didn't match (the last line explains, the file is untouched); a
 // negative number when `out` is too small (nothing saved; retry with that size).
-UN_API int un_render_resolution(const wchar_t *image, const char *executable, int width, int height, int multiplayer,
+UN_API int un_render_resolution(const un_path_char *image, const char *executable, int width, int height, int multiplayer,
                                 char *out, int cap) {
     std::string exe = executable ? executable : "", data, log;
     if (width == 1920 && height == 1080) return give("1920 1080 0\n", out, cap);

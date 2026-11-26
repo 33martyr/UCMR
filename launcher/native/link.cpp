@@ -461,7 +461,7 @@ extern "C" {
 // Builds boot-linked.bin and link.json in out_dir, from the boot.bin already there plus the game folder's executable
 // and the modules it ships. `modules` lists file names inside sce_module, one per line; null or empty picks libc.prx
 // and libSceFios2.prx. Returns 0 with a one-line summary in `out`, or 1 with the reason it failed.
-UN_API int un_link_modules(const wchar_t *game, const wchar_t *out_dir, const char *executable, const char *modules,
+UN_API int un_link_modules(const un_path_char *game, const un_path_char *out_dir, const char *executable, const char *modules,
                            char *out, int cap) {
     try {
         std::vector<std::string> names;
@@ -474,7 +474,7 @@ UN_API int un_link_modules(const wchar_t *game, const wchar_t *out_dir, const ch
             at = end + 1;
         }
         if (!modules || !*modules) names = {"libc.prx", "libSceFios2.prx"};
-        return give(link(game ? game : L"", out_dir ? out_dir : L"", names, executable ? executable : "eboot.bin"), out, cap);
+        return give(link(port::wtext(game, L""), port::wtext(out_dir, L""), names, executable ? executable : "eboot.bin"), out, cap);
     } catch (const Failure &f) {
         int status = give(f.message, out, cap);
         return status < 0 ? status : 1;

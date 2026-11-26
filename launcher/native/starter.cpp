@@ -6,13 +6,14 @@
 
 #include "native.h"
 #include "json.h"
+#include "port.h"
+#include "sha256.h"
 
+#include <cerrno>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <windows.h>
-#include <bcrypt.h>
 
 #include <algorithm>
 #include <cmath>
@@ -22,6 +23,7 @@
 namespace {
 
 using json::Value;
+namespace fs = port::fs;
 
 int give(const std::string &s, char *out, int cap) {
     if ((int)s.size() + 1 > cap) return -(int)(s.size() + 1);
@@ -29,32 +31,10 @@ int give(const std::string &s, char *out, int cap) {
     return 0;
 }
 
-std::string utf8(const std::wstring &w) {
-    if (w.empty()) return std::string();
-    int n = WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(), nullptr, 0, nullptr, nullptr);
-    std::string s(n, '\0');
-    WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(), s.data(), n, nullptr, nullptr);
-    return s;
-}
-
-std::wstring widen(const std::string &s) {
-    if (s.empty()) return std::wstring();
-    int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), nullptr, 0);
-    std::wstring w(n, L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), w.data(), n);
-    return w;
-}
-
 // Reads an environment variable as UTF-8; returns `fallback` only if the variable is not defined at all.
 std::string env(const char *name, const char *fallback = "") {
-    std::wstring wname = widen(name);
-    SetLastError(0);
-    DWORD n = GetEnvironmentVariableW(wname.c_str(), nullptr, 0);
-    if (!n) return GetLastError() == ERROR_ENVVAR_NOT_FOUND ? fallback : "";
-    std::wstring v(n, L'\0');
-    n = GetEnvironmentVariableW(wname.c_str(), v.data(), n);
-    v.resize(n);
-    return utf8(v);
+    std::string value;
+    return port::env(name, value) ? value : fallback;
 }
 
 std::string strip(const std::string &s) {
@@ -105,16 +85,7 @@ bool python_float(const std::string &text, double &value) {
 }
 
 // Number of logical CPUs in this process's affinity mask. The game is started as a child, so it gets the same mask.
-int hardware_threads() {
-    DWORD_PTR process = 0, system = 0;
-    if (GetProcessAffinityMask(GetCurrentProcess(), &process, &system) && process) {
-        int n = 0;
-        for (DWORD_PTR m = process; m; m &= m - 1) ++n;
-        return n;
-    }
-    DWORD all = GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
-    return all ? (int)all : 8;
-}
+int hardware_threads() { return port::hardware_threads(); }
 
 const char *game_key(const std::string &executable) {
     if (executable == "eboot.bin") return "u1";
@@ -163,36 +134,34 @@ std::string instance_suffix() {
     return n >= 2 ? "-i" + std::to_string(n) : "";
 }
 
-bool sha256_file(const std::wstring &path, std::string &hex, std::string &error) {
-    HANDLE f = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN,
-                           nullptr);
-    if (f == INVALID_HANDLE_VALUE) {
-        wchar_t *text = nullptr;
-        DWORD code = GetLastError();
-        FormatMessageW(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, nullptr,
-                       code, 0, (LPWSTR)&text, 0, nullptr);
-        error = "[WinError " + std::to_string(code) + "] " + (text ? strip(utf8(text)) : std::string("error")) + ": '" +
-                utf8(path) + "'";
-        if (text) LocalFree(text);
+bool sha256_file(const fs::path &path, std::string &hex, std::string &error) {
+    std::FILE *f = nullptr;
+#ifdef _WIN32
+    f = _wfopen(path.c_str(), L"rb");
+#else
+    f = std::fopen(path.c_str(), "rb");
+#endif
+    if (!f) {
+#ifdef _WIN32
+        const unsigned long code = GetLastError();
+        error = "[WinError " + std::to_string(code) + "] ";
+#else
+        const unsigned long code = (unsigned long)errno;
+        error = "[Errno " + std::to_string(code) + "] ";
+#endif
+        error += port::error_text(code) + ": '" + port::utf8(path) + "'";
         return false;
     }
-    BCRYPT_ALG_HANDLE alg = nullptr;
-    BCRYPT_HASH_HANDLE hash = nullptr;
-    bool ok = BCryptOpenAlgorithmProvider(&alg, BCRYPT_SHA256_ALGORITHM, nullptr, 0) == 0 &&
-              BCryptCreateHash(alg, &hash, nullptr, 0, nullptr, 0, 0) == 0;
+    sha256::Hash hash;
     std::vector<unsigned char> buf(1 << 20);
-    DWORD got = 0;
-    while (ok && ReadFile(f, buf.data(), (DWORD)buf.size(), &got, nullptr) && got)
-        ok = BCryptHashData(hash, buf.data(), got, 0) == 0;
-    unsigned char digest[32];
-    ok = ok && BCryptFinishHash(hash, digest, 32, 0) == 0;
-    if (hash) BCryptDestroyHash(hash);
-    if (alg) BCryptCloseAlgorithmProvider(alg, 0);
-    CloseHandle(f);
-    if (!ok) { error = "reading failed: '" + utf8(path) + "'"; return false; }
-    static const char *digits = "0123456789abcdef";
-    hex.clear();
-    for (unsigned char b : digest) { hex += digits[b >> 4]; hex += digits[b & 15]; }
+    while (const size_t got = std::fread(buf.data(), 1, buf.size(), f)) hash.update(buf.data(), got);
+    const bool ok = std::ferror(f) == 0;
+    std::fclose(f);
+    if (!ok) {
+        error = "reading failed: '" + port::utf8(path) + "'";
+        return false;
+    }
+    hex = hash.hex();
     return true;
 }
 
@@ -205,7 +174,7 @@ std::string u3mp_image(const std::string &executable) {
     std::string image = env("UNCHARTED_U3MP_IMAGE", "");
     if (executable != "big3-ps4_Shipping.elf" || image.empty()) return "\n";
     std::string want = lower(env("UNCHARTED_U3MP_IMAGE_SHA256", "")), digest, error;
-    if (!sha256_file(widen(image), digest, error))
+    if (!sha256_file(port::path_utf8(image), digest, error))
         return "Uncharted 3 multiplayer image could not be read (" + error + "): Uncharted 3 starts without it\n";
     if (!want.empty() && digest != want)
         return "Uncharted 3 multiplayer image " + image + " no longer matches (sha256 " + digest.substr(0, 12) +
@@ -220,8 +189,8 @@ std::string u3mp_image(const std::string &executable) {
         std::string p = list.substr(start, cut == std::string::npos ? std::string::npos : cut - start);
         if (!p.empty()) {
             overlays.items.push_back(Value::text(p));
-            DWORD a = GetFileAttributesW(widen(p).c_str());
-            if (a == INVALID_FILE_ATTRIBUTES || !(a & FILE_ATTRIBUTE_DIRECTORY)) missing += (missing.empty() ? "" : ", ") + p;
+            std::error_code ec;
+            if (!fs::is_directory(port::path_utf8(p), ec)) missing += (missing.empty() ? "" : ", ") + p;
         }
         if (cut == std::string::npos) break;
         start = cut + 1;

@@ -11,6 +11,8 @@
 #include <cstdio>
 #include <cstring>
 #include <cwctype>
+#include "port.h"
+#ifdef _WIN32
 #include <windows.h>
 
 #include <algorithm>
@@ -510,11 +512,11 @@ extern "C" {
 // config_json is the launcher's in-memory launcher.json, user_dir the folder with the games' settings files. Writes
 // a JSON list of [name, value] pairs (null value = unset that name) in the old play() order. Returns 0, or 1 with
 // the reason in out when a game's block is missing from the settings.
-UN_API int un_play_env(const char *config_json, const wchar_t *user_dir, char *out, int cap) {
+UN_API int un_play_env(const char *config_json, const un_path_char *user_dir, char *out, int cap) {
     Value config;
     if (!json::parse(config_json ? config_json : "{}", config)) return give("invalid settings", out, cap) < 0 ? -1 : 1;
     try {
-        return give(json::dump(play_env(config, user_dir ? user_dir : L"")), out, cap);
+        return give(json::dump(play_env(config, port::wtext(user_dir, L""))), out, cap);
     } catch (const std::string &error) {
         int status = give(error, out, cap);
         return status < 0 ? status : 1;
@@ -588,9 +590,9 @@ UN_API int un_play_stop(void) {
 
 // root is the launcher folder, started_at the PLAY time in Unix seconds. Returns 0 with an explanation in out, or 2
 // if the newest boot.log gives no reason.
-UN_API int un_play_crash_reason(const wchar_t *root, double started_at, char *out, int cap) {
+UN_API int un_play_crash_reason(const un_path_char *root, double started_at, char *out, int cap) {
     bool found = false;
-    const std::string reason = crash_reason(root ? root : L"", started_at, found);
+    const std::string reason = crash_reason(port::wtext(root, L""), started_at, found);
     if (!found) return give("", out, cap) < 0 ? -1 : 2;
     return give(reason, out, cap);
 }
@@ -599,7 +601,7 @@ UN_API int un_play_crash_reason(const wchar_t *root, double started_at, char *ou
 
 // ------------------------------------------------------------------------------------------------ PLAY's questions
 
-extern "C" UN_API int un_game_update(const char *what, const wchar_t *root, const char *args_json, char *out, int cap);
+extern "C" UN_API int un_game_update(const char *what, const un_path_char *root, const char *args_json, char *out, int cap);
 
 namespace {
 
@@ -798,3 +800,34 @@ UN_API int un_play_end(const char *state_json, char *out, int cap) {
 }
 
 }  // extern "C"
+
+#else   // Linux: PLAY starts and watches the game through port::spawn (docs/WINDOWS-DEPENDENCIES.md §13 phase 2)
+
+extern "C" {
+
+UN_API int un_play_env(const char *config_json, const un_path_char *user_dir, char *out, int cap) {
+    return port::not_yet_answer("PLAY", 1, out, cap);
+}
+
+UN_API int un_play_start(const char *request_json, char *out, int cap) {
+    return port::not_yet_answer("PLAY", 1, out, cap);
+}
+
+UN_API int un_play_poll(char *out, int cap) { return port::give("{\"lines\":[],\"exit\":1}", out, cap); }
+
+UN_API int un_play_stop(void) { return 1; }   // nothing runs
+
+UN_API int un_play_crash_reason(const un_path_char *root, double started_at, char *out, int cap) {
+    return port::give("", out, cap) < 0 ? -1 : 2;   // no reason found
+}
+
+UN_API int un_play_questions(const char *state_json, char *out, int cap) { return port::give("[]", out, cap); }
+
+UN_API int un_play_end(const char *state_json, char *out, int cap) {
+    const std::string detail = std::string("PLAY: ") + port::not_yet("PLAY");
+    return port::give("{\"status\":\"" + detail + "\",\"detail\":\"\",\"ask\":\"\"}", out, cap);
+}
+
+}  // extern "C"
+
+#endif

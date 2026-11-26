@@ -25,6 +25,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <cwctype>
+#include "port.h"
+#ifdef _WIN32
 #include <windows.h>
 
 #include <algorithm>
@@ -33,9 +35,9 @@
 #include <vector>
 
 extern "C" {
-UN_API int un_link_modules(const wchar_t *game, const wchar_t *out_dir, const char *executable, const char *modules,
+UN_API int un_link_modules(const un_path_char *game, const un_path_char *out_dir, const char *executable, const char *modules,
                            char *out, int cap);
-UN_API int un_content_profile(const wchar_t *game, const wchar_t *out_dir, const char *sku, char *out, int cap);
+UN_API int un_content_profile(const un_path_char *game, const un_path_char *out_dir, const char *sku, char *out, int cap);
 }
 
 namespace {
@@ -1049,8 +1051,8 @@ extern "C" {
 //   args_json: JSON array of strings, the same arguments probe_uncharted.py used to take
 // Output goes to stdout/stderr in the Python starter's format. Return value: the game's exit code, or 124 if it was
 // stopped on timeout, 2 for an invalid command line, 1 if starting failed.
-UN_API long long un_start_game(const wchar_t *root, const char *args_json) {
-    g_root = path_str(root ? root : L".");
+UN_API long long un_start_game(const un_path_char *root, const char *args_json) {
+    g_root = path_str(port::wtext(root, L"."));
     Value args;
     std::vector<std::string> argv;
     if (json::parse(args_json ? args_json : "[]", args))
@@ -1064,3 +1066,16 @@ UN_API long long un_start_game(const wchar_t *root, const char *args_json) {
 }
 
 }  // extern "C"
+
+#else   // Linux: starting the runtime needs port::spawn (docs/WINDOWS-DEPENDENCIES.md §13 phase 2)
+
+extern "C" {
+
+UN_API long long un_start_game(const un_path_char *root, const char *args_json) {
+    port::not_yet("game start");
+    return 1;
+}
+
+}  // extern "C"
+
+#endif

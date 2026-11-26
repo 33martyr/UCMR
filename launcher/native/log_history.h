@@ -39,7 +39,11 @@ inline void keep_log_history(const std::filesystem::path &log) {
         const auto age = fs::file_time_type::clock::now() - fs::last_write_time(log, ec);
         std::time_t when = std::time(nullptr) - (ec ? 0 : (std::time_t)std::chrono::duration_cast<std::chrono::seconds>(age).count());
         std::tm tm{};
+#ifdef _WIN32
         localtime_s(&tm, &when);
+#else
+        localtime_r(&when, &tm);
+#endif
         wchar_t stamp[32];
         std::wcsftime(stamp, 32, L"%Y%m%d-%H%M%S", &tm);
         fs::path to = log.parent_path() / (stem + L"." + stamp + ext);

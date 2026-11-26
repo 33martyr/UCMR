@@ -17,6 +17,7 @@
 
 #include "native.h"
 #include "json.h"
+#include "port.h"
 
 #include <algorithm>
 #include <cctype>
@@ -35,13 +36,13 @@ UN_API int un_game_sizes(const char *resolution, const char *aspect, const char 
                          int cap);
 UN_API int un_upscaling_choice(const char *upscaler, const char *fsr1, char *out, int cap);
 UN_API int un_anti_aliasing_choice(const char *upscaler, const char *launcher_aa, char *out, int cap);
-UN_API int un_upscaling_options(const wchar_t *root, char *out, int cap);
+UN_API int un_upscaling_options(const un_path_char *root, char *out, int cap);
 UN_API int un_gpu_query(const char *what, const char *name, int integrated, char *out, int cap);
 }
 extern "C" {   // controls.cpp, gamepads.cpp
 UN_API int un_controls_tables(char *out, int cap);
 UN_API int un_controls(const char *what, const char *in_json, char *out, int cap);
-UN_API int un_pad_init(const wchar_t *root);
+UN_API int un_pad_init(const un_path_char *root);
 UN_API int un_pad_state(char *out, int cap);
 }
 
@@ -554,7 +555,7 @@ const Options ANTI_ALIASING = {{"off", "Off"}, {"taa", "TAA"}};
 
 Options upscaling_options(const State &state) {
     const std::wstring root = widen_utf8(state.root);
-    return rows_of(native_text([&](char *o, int c) { return un_upscaling_options(root.c_str(), o, c); }));
+    return rows_of(native_text([&](char *o, int c) { return un_upscaling_options(port::arg(root).c_str(), o, c); }));
 }
 
 Value page_display(const State &state) {
@@ -1016,7 +1017,7 @@ Options language_options(const State &state) {
     std::string voices;
     if (dir && !dir->s.empty()) {
         const std::wstring folder = widen_utf8(dir->s);
-        voices = "\n" + native_text([&](char *o, int c) { return un_system("voices", folder.c_str(), o, c); });
+        voices = "\n" + native_text([&](char *o, int c) { return un_system("voices", port::arg(folder).c_str(), o, c); });
     }
     if (const Value *langs = tables.get("LANGUAGES"))
         for (auto &l : langs->items)
@@ -1291,14 +1292,14 @@ bool act_tools(const std::string &id, const std::string &kind, Changes &changes)
 
 // ------------------------------------------------------------------------------------------------ launcher
 
-extern "C" UN_API int un_update_installed(const wchar_t *root, char *out, int cap);   // updater.cpp
+extern "C" UN_API int un_update_installed(const un_path_char *root, char *out, int cap);   // updater.cpp
 
 const Options UPDATE_MODES = {{"auto", "Automatic"}, {"manual", "Manual"}};
 
 // The installed version as the launcher shows it (updater.version_text: its numbers joined by dots), "" for none
 std::string installed_version(const State &state) {
     const std::wstring root = widen_utf8(state.root);
-    std::string text = native_text([&](char *o, int c) { return un_update_installed(root.c_str(), o, c); });
+    std::string text = native_text([&](char *o, int c) { return un_update_installed(port::arg(root).c_str(), o, c); });
     if (text.empty()) return "";
     std::string out;
     size_t at = 0;
@@ -1411,7 +1412,7 @@ Pads pad_state(const State &state) {
     Pads p;
     if (sdl < 0) {
         const std::wstring root = widen_utf8(state.root);
-        sdl = un_pad_init(root.c_str()) ? 1 : 0;
+        sdl = un_pad_init(port::arg(root).c_str()) ? 1 : 0;
     }
     if (!sdl) return p;
     const std::string text = native_text([&](char *o, int c) { return un_pad_state(o, c); });

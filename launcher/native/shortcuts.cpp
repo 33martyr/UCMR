@@ -9,7 +9,9 @@
 //     out: {"kind": "info" | "error", "text": what to tell the player}
 #include "native.h"
 #include "json.h"
+#include "port.h"
 
+#ifdef _WIN32
 #include <windows.h>
 #include <objbase.h>
 #include <shlobj.h>
@@ -161,10 +163,34 @@ Value shortcuts(const std::wstring &root, const Value &request) {
 
 extern "C" {
 
-UN_API int un_shortcuts(const wchar_t *root, const char *request_json, char *out, int cap) {
+UN_API int un_shortcuts(const un_path_char *root, const char *request_json, char *out, int cap) {
     Value request;
     if (!json::parse(request_json ? request_json : "{}", request) || !request.is_object()) return 3;
-    return give(json::dump(shortcuts(root ? root : L".", request), false), out, cap);
+    return give(json::dump(shortcuts(port::wtext(root, L"."), request), false), out, cap);
 }
 
 }  // extern "C"
+
+#else   // Linux: freedesktop .desktop files come in a later phase (docs/WINDOWS-DEPENDENCIES.md §13 phase 6)
+
+#include <cstring>
+#include <string>
+
+extern "C" {
+
+UN_API int un_shortcuts(const un_path_char *root, const char *request_json, char *out, int cap) {
+    json::Value request;
+    if (!json::parse(request_json ? request_json : "{}", request) || !request.is_object()) return 3;
+    json::Value answer;
+    answer.kind = json::Value::Object;
+    answer.set("kind", json::Value::text("error"));
+    answer.set("text", json::Value::text(std::string("Desktop shortcuts: ") + port::not_yet("desktop shortcuts") + "."));
+    const std::string s = json::dump(answer, false);
+    if ((int)s.size() + 1 > cap) return -(int)(s.size() + 1);
+    std::memcpy(out, s.c_str(), s.size() + 1);
+    return 0;
+}
+
+}  // extern "C"
+
+#endif

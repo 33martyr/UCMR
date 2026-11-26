@@ -8,6 +8,8 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include "port.h"
+#ifdef _WIN32
 #include <windows.h>
 #include <wincodec.h>
 
@@ -524,3 +526,15 @@ UN_API int un_starter_files(const char *what, const char *args_json, char *out, 
 }
 
 }  // extern "C"
+
+#else   // Linux: the game starter's file chores come with the game start (docs/WINDOWS-DEPENDENCIES.md §13 phase 2)
+
+extern "C" {
+
+UN_API int un_starter_files(const char *what, const char *args_json, char *out, int cap) {
+    return port::not_yet_answer("game starter files", 1, out, cap);
+}
+
+}  // extern "C"
+
+#endif

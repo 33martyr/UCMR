@@ -4,28 +4,34 @@
 // even though the launcher never creates an SDL window.
 
 #include "native.h"
+#include "port.h"
 
 #include <cstdint>
 #include <cstdlib>
-#include <windows.h>
 
 #include <cstring>
 #include <map>
 #include <string>
 #include <vector>
 
+#ifdef _WIN32
+#define UN_CDECL __cdecl
+#else
+#define UN_CDECL
+#endif
+
 namespace {
 
-typedef bool(__cdecl *SetHint)(const char *, const char *);
-typedef bool(__cdecl *Init)(uint32_t);
-typedef uint32_t *(__cdecl *GetGamepads)(int *);
-typedef void *(__cdecl *OpenGamepad)(uint32_t);
-typedef void(__cdecl *CloseGamepad)(void *);
-typedef bool(__cdecl *GetButton)(void *, int);
-typedef int16_t(__cdecl *GetAxis)(void *, int);
-typedef int(__cdecl *GetType)(void *);
-typedef void(__cdecl *Free)(void *);
-typedef void(__cdecl *Void)(void);
+typedef bool(UN_CDECL *SetHint)(const char *, const char *);
+typedef bool(UN_CDECL *Init)(uint32_t);
+typedef uint32_t *(UN_CDECL *GetGamepads)(int *);
+typedef void *(UN_CDECL *OpenGamepad)(uint32_t);
+typedef void(UN_CDECL *CloseGamepad)(void *);
+typedef bool(UN_CDECL *GetButton)(void *, int);
+typedef int16_t(UN_CDECL *GetAxis)(void *, int);
+typedef int(UN_CDECL *GetType)(void *);
+typedef void(UN_CDECL *Free)(void *);
+typedef void(UN_CDECL *Void)(void);
 
 struct Sdl {
     bool ready = false;
@@ -47,53 +53,57 @@ const char *const BUTTONS[] = {"a", "b", "x", "y", "back", "guide", "start", "le
                                "rightshoulder", "dpup", "dpdown", "dpleft", "dpright", "misc1", "paddle1", "paddle2",
                                "paddle3", "paddle4", "touchpad"};
 
-bool is_file(const std::wstring &p) {
-    DWORD a = GetFileAttributesW(p.c_str());
-    return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
+// The SDL3 build the game uses, in the order it is searched: its own copy in a release package, then the MSYS2 copy
+// when running from source. On Linux the system's own SDL3 is the last try (libSDL3.so.0).
+std::vector<port::fs::path> sdl_paths(const port::fs::path &root) {
+    std::vector<port::fs::path> out;
+#ifdef _WIN32
+    out.push_back(root / "gow3_pc" / "out" / "SDL3.dll");
+    std::string msys;
+    if (!port::env("MSYS2_ROOT", msys)) msys = "C:/msys64";
+    const port::fs::path msys_dir = port::path_utf8(msys);
+    out.push_back(msys_dir / "clang64" / "bin" / "SDL3.dll");
+    out.push_back(root.parent_path() / "msys64" / "clang64" / "bin" / "SDL3.dll");
+#else
+    out.push_back(root / "gow3_pc" / "out" / "libSDL3.so.0");
+#endif
+    return out;
 }
 
-std::wstring env(const wchar_t *name) {
-    wchar_t buf[2048];
-    DWORD n = GetEnvironmentVariableW(name, buf, 2048);
-    return (n && n < 2048) ? std::wstring(buf, n) : std::wstring();
-}
+template <class F> F proc(void *m, const char *name) { return (F)port::symbol(m, name); }
 
-std::wstring parent(std::wstring p) {
-    while (p.size() > 3 && (p.back() == L'\\' || p.back() == L'/')) p.pop_back();
-    size_t cut = p.find_last_of(L"\\/");
-    if (cut == std::wstring::npos) return L".";
-    return cut <= 2 ? p.substr(0, cut + 1) : p.substr(0, cut);
-}
-
-template <class F> F proc(HMODULE m, const char *name) { return (F)(void *)GetProcAddress(m, name); }
-
-void load(const std::wstring &root) {
-    std::wstring msys = env(L"MSYS2_ROOT");
-    if (msys.empty()) msys = L"C:/msys64";
-    for (const std::wstring &path : {root + L"\\gow3_pc\\out\\SDL3.dll", msys + L"\\clang64\\bin\\SDL3.dll",
-                                     parent(root) + L"\\msys64\\clang64\\bin\\SDL3.dll"}) {
-        if (!is_file(path)) continue;
-        HMODULE m = LoadLibraryExW(path.c_str(), nullptr, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
-        if (!m) continue;
-        SetHint hint = proc<SetHint>(m, "SDL_SetHint");
-        Init init = proc<Init>(m, "SDL_Init");
-        sdl.get_gamepads = proc<GetGamepads>(m, "SDL_GetGamepads");
-        sdl.open = proc<OpenGamepad>(m, "SDL_OpenGamepad");
-        sdl.close = proc<CloseGamepad>(m, "SDL_CloseGamepad");
-        sdl.button = proc<GetButton>(m, "SDL_GetGamepadButton");
-        sdl.axis = proc<GetAxis>(m, "SDL_GetGamepadAxis");
-        sdl.type = proc<GetType>(m, "SDL_GetGamepadType");
-        sdl.free = proc<Free>(m, "SDL_free");
-        sdl.pump = proc<Void>(m, "SDL_PumpEvents");
-        sdl.update = proc<Void>(m, "SDL_UpdateGamepads");
-        bool all = hint && init && sdl.get_gamepads && sdl.open && sdl.close && sdl.button && sdl.axis && sdl.type &&
-                   sdl.free && sdl.pump && sdl.update;
-        if (all) {
-            hint("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "1");
-            sdl.ready = init(0x2000);   // SDL_INIT_GAMEPAD
-        }
-        break;
+// takes every SDL function the launcher reads from one loaded SDL3
+void use(void *m) {
+    SetHint hint = proc<SetHint>(m, "SDL_SetHint");
+    Init init = proc<Init>(m, "SDL_Init");
+    sdl.get_gamepads = proc<GetGamepads>(m, "SDL_GetGamepads");
+    sdl.open = proc<OpenGamepad>(m, "SDL_OpenGamepad");
+    sdl.close = proc<CloseGamepad>(m, "SDL_CloseGamepad");
+    sdl.button = proc<GetButton>(m, "SDL_GetGamepadButton");
+    sdl.axis = proc<GetAxis>(m, "SDL_GetGamepadAxis");
+    sdl.type = proc<GetType>(m, "SDL_GetGamepadType");
+    sdl.free = proc<Free>(m, "SDL_free");
+    sdl.pump = proc<Void>(m, "SDL_PumpEvents");
+    sdl.update = proc<Void>(m, "SDL_UpdateGamepads");
+    bool all = hint && init && sdl.get_gamepads && sdl.open && sdl.close && sdl.button && sdl.axis && sdl.type &&
+               sdl.free && sdl.pump && sdl.update;
+    if (all) {
+        hint("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "1");
+        sdl.ready = init(0x2000);   // SDL_INIT_GAMEPAD
     }
+}
+
+void load(const port::fs::path &root) {
+    for (const port::fs::path &path : sdl_paths(root)) {
+        if (!port::fs::is_regular_file(path)) continue;
+        void *m = port::load_library(path);
+        if (!m) continue;
+        use(m);
+        return;
+    }
+#ifndef _WIN32
+    if (void *m = port::load_library_name("libSDL3.so.0")) use(m);
+#endif
 }
 
 // opens newly connected pads, closes vanished ones, and returns the open handles in first-seen order
@@ -135,10 +145,10 @@ int give(const std::string &s, char *out, int cap) {
 extern "C" {
 
 // one-time SDL3 load, searching relative to `root` (the launcher folder); returns 1 if gamepad input is available
-UN_API int un_pad_init(const wchar_t *root) {
+UN_API int un_pad_init(const un_path_char *root) {
     if (!tried) {
         tried = true;
-        load(root ? root : L".");
+        load(root && *root ? port::path(root) : port::fs::path("."));
     }
     return sdl.ready ? 1 : 0;
 }

@@ -12,6 +12,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include "port.h"
+#ifdef _WIN32
 #include <windows.h>
 
 #include <algorithm>
@@ -731,3 +733,15 @@ UN_API int un_runtime_env(const char *inputs_json, char *out, int cap) {
 }
 
 }  // extern "C"
+
+#else   // Linux: the runtime's environment comes with the game start (docs/WINDOWS-DEPENDENCIES.md §13 phase 2)
+
+extern "C" {
+
+UN_API int un_runtime_env(const char *inputs_json, char *out, int cap) {
+    return port::not_yet_answer("runtime environment", 1, out, cap);
+}
+
+}  // extern "C"
+
+#endif

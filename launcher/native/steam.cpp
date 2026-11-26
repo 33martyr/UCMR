@@ -16,10 +16,12 @@
 // The exported functions exchange UTF-8 text: one record per line, tab-separated fields (documented in native.h).
 
 #include "native.h"
+#include "port.h"
 
 #include <cctype>
 #include <cstdlib>
 #include <cwctype>
+#ifdef _WIN32
 #include <windows.h>
 #include <tlhelp32.h>
 #include <wincodec.h>
@@ -868,9 +870,13 @@ std::vector<std::vector<std::string>> records(const char *text) {
 
 }  // namespace
 
+#endif   // _WIN32 (the Steam code above)
+
 extern "C" {
 
 UN_API int un_version(void) { return UN_VERSION; }
+
+#ifdef _WIN32
 
 UN_API int un_steam_running(void) {
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
@@ -989,4 +995,37 @@ UN_API int un_steam_roundtrip(const char *path) {
     return write_file(file + L".roundtrip", data) ? 0 : 1;
 }
 
+#endif   // _WIN32
+
 }  // extern "C"
+
+#ifndef _WIN32   // Linux: Steam's folders (~/.steam, Flatpak) and process list come in a later phase (§13 phase 6)
+
+#include <cstring>
+
+extern "C" {
+
+UN_API int un_steam_running(void) { return 0; }
+
+UN_API int un_steam_targets(const char *request, char *out, int cap) {
+    port::not_yet("Add to Steam");
+    if (cap < 1) return -1;
+    out[0] = '\0';
+    return 0;
+}
+
+UN_API int un_steam_add(const char *request, char *out, int cap) {
+    port::not_yet("Add to Steam");
+    if (cap < 1) return -1;
+    out[0] = '\0';
+    return UN_ERR_NO_STEAM;
+}
+
+UN_API int un_steam_roundtrip(const char *path) {
+    port::not_yet("shortcuts.vdf round trip");
+    return 1;
+}
+
+}  // extern "C"
+
+#endif

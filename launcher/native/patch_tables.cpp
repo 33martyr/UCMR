@@ -10,12 +10,12 @@
 
 #include "native.h"
 #include "json.h"
+#include "port.h"
 
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <windows.h>
 
 #include <algorithm>
 #include <map>
@@ -92,11 +92,8 @@ Variant several(const std::string &pattern, std::vector<Edit> edits) {
 Patch patch(const std::string &description, std::vector<Variant> variants) { return Patch{description, std::move(variants)}; }
 
 std::string env(const char *name, const char *fallback) {
-    char buf[4096];
-    SetLastError(0);
-    DWORD n = GetEnvironmentVariableA(name, buf, sizeof buf);
-    if (!n) return GetLastError() == ERROR_ENVVAR_NOT_FOUND ? fallback : "";
-    return n < sizeof buf ? std::string(buf, n) : fallback;
+    std::string value;
+    return port::env(name, value) ? value : fallback;
 }
 std::string strip(const std::string &s) {
     const char *ws = " \t\r\n\v\f";
@@ -908,7 +905,7 @@ UN_API int un_image_patches(const char *executable, char *out, int cap) {
 // Writes this executable's patches, chosen by the current settings, into the linked image; out receives the log lines.
 // Returns 0 when applied, 1 when not (the last line gives the reason), or a negative size when out is too small
 // (nothing is written; call again with that size).
-UN_API int un_apply_image_patches(const wchar_t *image, const char *executable, char *out, int cap) {
+UN_API int un_apply_image_patches(const un_path_char *image, const char *executable, char *out, int cap) {
     std::string list;
     try {
         list = json::dump(spec(image_patches(executable ? executable : "")));

@@ -13,10 +13,13 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#ifdef _WIN32
 #include <windows.h>
 #include <bcrypt.h>
+#endif
 
 #include <algorithm>
+#include <filesystem>
 #include <map>
 #include <string>
 #include <vector>
@@ -31,7 +34,7 @@ using namespace selfread;
 // the digest in reverse order and write them in Base64, dropping the '=' padding and turning '/' into '-'.
 std::string nid(const std::string &name) {
     std::string salt = std::string("\x51\x8d\x64\xa6\x35\xde\xd8\xc1\xe6\xb0\x39\xb1\xc3\xe5\x52\x30", 16);
-    std::string h = digest(BCRYPT_SHA1_ALGORITHM, name + salt, 20).substr(0, 8);
+    std::string h = sha1_bytes(name + salt).substr(0, 8);
     std::reverse(h.begin(), h.end());
     static const char *b64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     std::string out;
@@ -107,6 +110,19 @@ Value inspect_libc(const std::wstring &path) {
 // Collects every file below `folder` (sub-folders after the files of each level) with its size; each one is filed under
 // the top-level folder it sits in (a file lying directly in `folder` under its own name).
 void walk(const std::wstring &folder, const std::wstring &top, std::vector<std::pair<std::wstring, uint64_t>> &files) {
+#ifndef _WIN32
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    std::vector<std::wstring> names, dirs;
+    for (fs::directory_iterator it(port::path(folder), ec), end; !ec && it != end; it.increment(ec))
+        names.push_back(port::wide(it->path().filename().string()));
+    std::sort(names.begin(), names.end());   // NTFS lists names sorted; Linux in no order
+    for (const std::wstring &name : names) {
+        const fs::path p = port::path(join(folder, name));
+        if (fs::is_directory(p, ec)) dirs.push_back(name);
+        else files.push_back({top.empty() ? name : top, (uint64_t)fs::file_size(p, ec)});
+    }
+#else
     WIN32_FIND_DATAW fd;
     HANDLE h = FindFirstFileW(join(folder, L"*").c_str(), &fd);
     if (h == INVALID_HANDLE_VALUE) return;
@@ -118,6 +134,7 @@ void walk(const std::wstring &folder, const std::wstring &top, std::vector<std::
         else files.push_back({top.empty() ? name : top, ((uint64_t)fd.nFileSizeHigh << 32) | fd.nFileSizeLow});
     } while (FindNextFileW(h, &fd));
     FindClose(h);
+#endif
     for (const std::wstring &d : dirs) walk(join(folder, d), top.empty() ? d : top, files);
 }
 
@@ -260,7 +277,7 @@ std::string prepare(const std::wstring &game, const std::wstring &out, const std
     }
     // analysis.json
     char sfo_buf[1 << 16];
-    if (un_system("sfo", game.c_str(), sfo_buf, sizeof sfo_buf) != 0)   // system.cpp reads sce_sys\param.sfo for us
+    if (un_system("sfo", port::arg(game).c_str(), sfo_buf, sizeof sfo_buf) != 0)   // system.cpp reads sce_sys\param.sfo for us
         throw Failure{"param.sfo could not be read as an SFO file"};
     Value sfo;
     json::parse(sfo_buf, sfo);
@@ -315,6 +332,7 @@ std::string prepare(const std::wstring &game, const std::wstring &out, const std
     report.set("libc_evidence", libc_evidence);
     std::vector<std::string> modules;
     {
+#ifdef _WIN32
         WIN32_FIND_DATAW fd;
         HANDLE h = FindFirstFileW(join(game, L"sce_module\\*").c_str(), &fd);
         if (h == INVALID_HANDLE_VALUE) throw Failure{"[WinError 3] The system cannot find the path specified"};
@@ -323,6 +341,12 @@ std::string prepare(const std::wstring &game, const std::wstring &out, const std
             if (n != L"." && n != L"..") modules.push_back(utf8(n));
         } while (FindNextFileW(h, &fd));
         FindClose(h);
+#else
+        std::error_code ec;
+        std::filesystem::directory_iterator it(port::path(join(game, L"sce_module")), ec), end;
+        if (ec) throw Failure{"[Errno 2] No such file or directory: '" + shown(join(game, L"sce_module")) + "'"};
+        for (; !ec && it != end; it.increment(ec)) modules.push_back(it->path().filename().string());
+#endif
         std::sort(modules.begin(), modules.end());   // sorting UTF-8 bytes gives code point order, as Python sorts
     }
     Value modules_v;
@@ -340,10 +364,16 @@ std::string prepare(const std::wstring &game, const std::wstring &out, const std
     std::string missing_text = "[";
     for (size_t i = 0; i < s.missing.size(); ++i) missing_text += (i ? ", " : "") + std::to_string(s.missing[i]);
     missing_text += "]";
+#ifdef _WIN32
     wchar_t full[MAX_PATH * 4];
     DWORD n = GetFullPathNameW(out.c_str(), MAX_PATH * 4, full, nullptr);
     std::wstring resolved = n && n < MAX_PATH * 4 ? std::wstring(full, n) : out;
     while (resolved.size() > 3 && resolved.back() == L'\\') resolved.pop_back();
+#else
+    std::error_code ec;
+    std::wstring resolved = port::wide(std::filesystem::absolute(port::path(out), ec).lexically_normal().string());
+    while (resolved.size() > 1 && resolved.back() == L'/') resolved.pop_back();
+#endif
     return (title ? (title->kind == Value::String ? title->s : std::to_string(title->i)) : std::string("None")) +
            ": entry point " + hex0x(s.header.entry) + ", image size " + grouped(size) + " bytes\n" +
            std::to_string(names.size()) + " symbols imported, " + grouped((unsigned long long)total_relocs) +
@@ -359,7 +389,7 @@ std::string prepare(const std::wstring &game, const std::wstring &out, const std
 std::string content_profile(const std::wstring &game, const std::wstring &out, const std::string &sku) {
     if (sku != "full" && sku != "trial") throw Failure{"'" + sku + "'"};
     char sfo_buf[1 << 16];
-    if (un_system("sfo", game.c_str(), sfo_buf, sizeof sfo_buf) != 0)
+    if (un_system("sfo", port::arg(game).c_str(), sfo_buf, sizeof sfo_buf) != 0)
         throw Failure{"[Errno 2] No such file or directory: '" + shown(join(game, L"sce_sys\\param.sfo")) + "'"};
     Value sfo;
     json::parse(sfo_buf, sfo);
@@ -404,9 +434,9 @@ extern "C" {
 
 // Prepares the game folder: writes boot.bin, eboot.elf, entry.bin and analysis.json into out_dir. On success (0) `out`
 // gets the console summary; on failure (1) it gets the reason only, without any prefix.
-UN_API int un_prepare(const wchar_t *game, const wchar_t *out_dir, const char *executable, char *out, int cap) {
+UN_API int un_prepare(const un_path_char *game, const un_path_char *out_dir, const char *executable, char *out, int cap) {
     try {
-        return give(prepare(game ? game : L"", out_dir ? out_dir : L"", executable ? executable : "eboot.bin"), out, cap);
+        return give(prepare(port::wtext(game, L""), port::wtext(out_dir, L""), executable ? executable : "eboot.bin"), out, cap);
     } catch (const Failure &f) {
         int status = give(f.message, out, cap);
         return status < 0 ? status : 1;
@@ -415,9 +445,9 @@ UN_API int un_prepare(const wchar_t *game, const wchar_t *out_dir, const char *e
 
 // Writes content.bin and content-profile.json into out_dir. sku is "full" or "trial" (null or empty means "full").
 // Returns 0 with a one-line summary in `out`, or 1 with the reason it failed.
-UN_API int un_content_profile(const wchar_t *game, const wchar_t *out_dir, const char *sku, char *out, int cap) {
+UN_API int un_content_profile(const un_path_char *game, const un_path_char *out_dir, const char *sku, char *out, int cap) {
     try {
-        return give(content_profile(game ? game : L"", out_dir ? out_dir : L"", sku && *sku ? sku : "full"), out, cap);
+        return give(content_profile(port::wtext(game, L""), port::wtext(out_dir, L""), sku && *sku ? sku : "full"), out, cap);
     } catch (const Failure &f) {
         int status = give(f.message, out, cap);
         return status < 0 ? status : 1;

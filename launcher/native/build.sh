@@ -1,8 +1,30 @@
 #!/usr/bin/env bash
 # build.sh - builds uncharted_native.dll (the launcher's native code) with MSYS2 CLANG64, statically linked: it needs
 # only Windows system DLLs. Output: launcher/native/uncharted_native.dll (tools/package_windows.sh runs this).
+# On Linux it builds libuncharted_native.so and game_starter instead (docs/WINDOWS-DEPENDENCIES.md §4.1, §7.4).
 set -euo pipefail
 cd -- "$(dirname -- "$0")"
+SOURCES=(session_value steam hang memstat config display controls system gamepads patcher starter runtime_env starter_files
+         patch_tables prepare link start play updater gamefiles gameupdate pages shortcuts actions updates core)
+if [[ $(uname -s) == Linux ]]; then
+    # CXX picks the compiler (clang++ by default, as on Windows); CXXFLAGS adds flags (an include folder, for example)
+    CXX=(${CXX:-clang++})
+    command -v ccache >/dev/null && CXX=(ccache "${CXX[@]}")
+    FLAGS=(-O2 -DNDEBUG -fPIC -fvisibility=hidden -ffunction-sections -fdata-sections -std=c++17 -Wall -Wextra
+           -Wno-unused-parameter ${CXXFLAGS:-})
+    mkdir -p build
+    OBJECTS=()
+    for s in "${SOURCES[@]}"; do
+        "${CXX[@]}" "${FLAGS[@]}" -c "$s.cpp" -o "build/$s.o"
+        OBJECTS+=("build/$s.o")
+    done
+    # every symbol resolved at link time; the C++ runtime linked in, so the library needs only the system's C library
+    "${CXX[@]}" -shared -s -Wl,--gc-sections -Wl,--no-undefined -static-libstdc++ -static-libgcc \
+        -o libuncharted_native.so "${OBJECTS[@]}" -ldl -lpthread
+    sha256sum libuncharted_native.so
+    "${CXX[@]}" "${FLAGS[@]}" -s -static-libstdc++ -static-libgcc -o game_starter game_starter.cpp -ldl
+    exit 0
+fi
 CLANG64=${CLANG64:-/c/msys64/clang64}
 export PATH="$CLANG64/bin:$PATH"
 # ccache is optional (the CI installs it and restores .ccache); without it this compiles as before.
@@ -12,7 +34,7 @@ mkdir -p build
 source ../../tools/winres/winres.sh   # winres: version information and manifest of each file built here
 FLAGS=(-O2 -DNDEBUG -fno-ident -ffunction-sections -fdata-sections -std=c++17 -Wall -Wextra -Wno-unused-parameter -municode)
 OBJECTS=()
-for s in session_value steam hang memstat config display controls system gamepads patcher starter runtime_env starter_files patch_tables prepare link start play updater gamefiles gameupdate pages shortcuts actions updates core; do
+for s in "${SOURCES[@]}"; do
     "${CXX[@]}" "${FLAGS[@]}" -c "$s.cpp" -o "build/$s.o"
     OBJECTS+=("build/$s.o")
 done

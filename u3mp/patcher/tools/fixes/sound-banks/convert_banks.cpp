@@ -27,7 +27,9 @@
 #include <set>
 #include <thread>
 
-#include <windows.h>
+#ifdef _WIN32
+#include <windows.h>   // nothing of it is used: kept so the Windows build stays as it was
+#endif
 
 #if defined(__clang__)
 #pragma clang fp contract(off)

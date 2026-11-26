@@ -8,8 +8,14 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#ifdef _WIN32
 #include <windows.h>
 #include <bcrypt.h>
+#else
+#include "sha1.h"
+#include "sha256.h"
+#endif
+#include "port.h"
 
 #include <algorithm>
 #include <string>
@@ -25,17 +31,11 @@ inline int give(const std::string &s, char *out, int cap) {
     return 0;
 }
 
-inline std::string utf8(const std::wstring &w) {
-    if (w.empty()) return std::string();
-    int n = WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(), nullptr, 0, nullptr, nullptr);
-    std::string s(n, '\0');
-    WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(), s.data(), n, nullptr, nullptr);
-    return s;
-}
+inline std::string utf8(const std::wstring &w) { return port::utf8(w); }
 
 inline std::wstring join(const std::wstring &a, const std::wstring &b) {
     if (a.empty()) return b;
-    return (a.back() == L'\\' || a.back() == L'/') ? a + b : a + L"\\" + b;
+    return (a.back() == L'\\' || a.back() == L'/') ? a + b : a + std::wstring(1, port::sep) + b;
 }
 
 // the path written the way Python's repr() puts it inside an error message, i.e. with every backslash doubled
@@ -69,6 +69,7 @@ inline std::string grouped(unsigned long long v) {   // thousands separated by c
 }
 
 inline bool read_file(const std::wstring &path, std::string &data) {
+#ifdef _WIN32
     HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN,
                            nullptr);
     if (h == INVALID_HANDLE_VALUE) return false;
@@ -85,9 +86,13 @@ inline bool read_file(const std::wstring &path, std::string &data) {
     }
     CloseHandle(h);
     return ok;
+#else
+    return port::read(port::path(path), data, UINT64_MAX);
+#endif
 }
 
 inline void write_file(const std::wstring &path, const std::string &data) {
+#ifdef _WIN32
     HANDLE h = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) throw Failure{"cannot write " + utf8(path)};
     size_t done = 0;
@@ -99,18 +104,26 @@ inline void write_file(const std::wstring &path, const std::string &data) {
     }
     CloseHandle(h);
     if (!ok) throw Failure{"cannot write " + utf8(path)};
+#else
+    if (!port::write(port::path(path), data.data(), data.size())) throw Failure{"cannot write " + utf8(path)};
+#endif
 }
 
 // Creates the folder plus whichever parent folders don't exist yet; an existing folder is fine (the same as
 // Python's mkdir(parents=True, exist_ok=True)).
 inline void make_dirs(const std::wstring &path) {
+#ifdef _WIN32
     for (size_t at = 0; (at = path.find_first_of(L"\\/", at + 1)) != std::wstring::npos;) {
         const std::wstring part = path.substr(0, at);
         if (!part.empty() && part.back() != L':') CreateDirectoryW(part.c_str(), nullptr);
     }
     CreateDirectoryW(path.c_str(), nullptr);
+#else
+    port::ensure_dir(port::path(path));
+#endif
 }
 
+#ifdef _WIN32
 inline std::string digest(const wchar_t *algorithm, const std::string &data, size_t size) {
     BCRYPT_ALG_HANDLE alg = nullptr;
     BCRYPT_HASH_HANDLE hash = nullptr;
@@ -126,6 +139,19 @@ inline std::string digest(const wchar_t *algorithm, const std::string &data, siz
     return out;
 }
 inline std::string sha256_hex(const std::string &data) { return hexbytes(digest(BCRYPT_SHA256_ALGORITHM, data, 32)); }
+inline std::string sha1_bytes(const std::string &data) { return digest(BCRYPT_SHA1_ALGORITHM, data, 20); }
+#else
+inline std::string sha256_hex(const std::string &data) {
+    sha256::Hash h;
+    h.update(data.data(), data.size());
+    return h.hex();
+}
+inline std::string sha1_bytes(const std::string &data) {
+    sha1::Hash h;
+    h.update(data.data(), data.size());
+    return h.bytes();
+}
+#endif
 
 // ---------------------------------------------------------------------------------------------- range-checked reading
 

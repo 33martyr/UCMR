@@ -10,9 +10,17 @@
 #include <cctype>
 #include <cstdint>
 #include <cstdlib>
+#ifdef _WIN32
 #include <windows.h>
 #include <shlobj.h>
 #include <winioctl.h>
+#else
+#include <cerrno>
+#include <csignal>
+#include <cwctype>
+#include <filesystem>
+#endif
+#include "port.h"
 
 #include <algorithm>
 #include <cstring>
@@ -31,6 +39,7 @@ int give(const std::string &s, char *out, int cap) {
     return 0;
 }
 
+#ifdef _WIN32
 std::string utf8(const std::wstring &w) {
     if (w.empty()) return std::string();
     int n = WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(), nullptr, 0, nullptr, nullptr);
@@ -54,13 +63,75 @@ bool is_dir(const std::wstring &p) {
     return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
 }
 
+bool utf8_ok(const char *d, int size) { return MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, d, size, nullptr, 0) != 0; }
+#else
+namespace fs = std::filesystem;
+
+std::string utf8(const std::wstring &w) { return port::utf8(w); }
+
+std::wstring lower(std::wstring s) {
+    for (wchar_t &c : s) c = (wchar_t)std::towlower((wint_t)c);
+    return s;
+}
+
+bool is_file(const std::wstring &p) {
+    std::error_code ec;
+    return fs::exists(port::path(p), ec) && !fs::is_directory(port::path(p), ec);
+}
+
+[[maybe_unused]] bool is_dir(const std::wstring &p) {   // the Windows build uses it (desktop)
+    std::error_code ec;
+    return fs::is_directory(port::path(p), ec);
+}
+
+// what MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS) accepts: well-formed UTF-8, no surrogates, no overlong
+// forms; like it, an empty text is "not converted"
+bool utf8_ok(const char *d, int size) {
+    if (size <= 0) return false;
+    const size_t total = (size_t)size;
+    for (size_t i = 0; i < total;) {
+        const unsigned char c = (unsigned char)d[i];
+        const size_t n = c < 0x80 ? 1 : (c & 0xe0) == 0xc0 ? 2 : (c & 0xf0) == 0xe0 ? 3 : (c & 0xf8) == 0xf0 ? 4 : 0;
+        if (!n || i + n > total) return false;
+        uint32_t cp = n == 1 ? c : n == 2 ? (c & 0x1fu) : n == 3 ? (c & 0x0fu) : (c & 0x07u);
+        for (size_t k = 1; k < n; ++k) {
+            const unsigned char x = (unsigned char)d[i + k];
+            if ((x & 0xc0) != 0x80) return false;
+            cp = cp << 6 | (x & 0x3fu);
+        }
+        if ((n == 2 && cp < 0x80) || (n == 3 && cp < 0x800) || (n == 4 && (cp < 0x10000 || cp > 0x10ffff)) ||
+            (cp >= 0xd800 && cp <= 0xdfff))
+            return false;
+        i += n;
+    }
+    return true;
+}
+
+// a FindFirstFile pattern ("*", "v*", "*_ps4.psarc"): '*' and '?', case folded as on Windows
+bool matches(const std::wstring &pattern, const std::wstring &name) {
+    const std::wstring p = lower(pattern), n = lower(name);
+    size_t pi = 0, ni = 0, star = std::wstring::npos, mark = 0;
+    while (ni < n.size()) {
+        if (pi < p.size() && (p[pi] == L'?' || p[pi] == n[ni])) { ++pi; ++ni; }
+        else if (pi < p.size() && p[pi] == L'*') { star = pi++; mark = ni; }
+        else if (star != std::wstring::npos) { pi = star + 1; ni = ++mark; }
+        else return false;
+    }
+    while (pi < p.size() && p[pi] == L'*') ++pi;
+    return pi == p.size();
+}
+#endif
+
 std::wstring join(const std::wstring &a, const std::wstring &b) {
     if (a.empty()) return b;
     wchar_t last = a.back();
-    return (last == L'\\' || last == L'/') ? a + b : a + L"\\" + b;
+    return (last == L'\\' || last == L'/') ? a + b : a + std::wstring(1, port::sep) + b;
 }
 
 bool read_all(const std::wstring &path, std::string &data, size_t limit = (size_t)1 << 31) {
+#ifndef _WIN32
+    return port::read(port::path(path), data, limit);
+#else
     HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
                            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) return false;
@@ -78,10 +149,22 @@ bool read_all(const std::wstring &path, std::string &data, size_t limit = (size_
     }
     CloseHandle(h);
     return ok;
+#endif
 }
 
 std::vector<std::wstring> entries(const std::wstring &folder, const std::wstring &pattern, int dirs) {
     std::vector<std::wstring> out;
+#ifndef _WIN32
+    std::error_code ec;
+    for (fs::directory_iterator it(port::path(folder), ec), end; !ec && it != end; it.increment(ec)) {
+        const std::wstring name = port::wide(it->path().filename().string());
+        std::error_code dec;
+        const bool d = it->is_directory(dec);
+        if (matches(pattern, name) && (dirs < 0 || d == (dirs != 0))) out.push_back(name);
+    }
+    std::sort(out.begin(), out.end());   // NTFS lists names sorted; Linux in no order
+    return out;
+#else
     WIN32_FIND_DATAW fd;
     HANDLE h = FindFirstFileW(join(folder, pattern).c_str(), &fd);
     if (h == INVALID_HANDLE_VALUE) return out;
@@ -92,6 +175,7 @@ std::vector<std::wstring> entries(const std::wstring &folder, const std::wstring
     } while (FindNextFileW(h, &fd));
     FindClose(h);
     return out;
+#endif
 }
 
 // ------------------------------------------------------------------------------------------------ tables
@@ -216,10 +300,17 @@ const std::string &code_100() {
 std::pair<bool, bool> executable_codes(const std::wstring &folder) {
     static std::map<std::wstring, std::pair<bool, bool>> cache;
     std::wstring path = join(folder, L"big2-ps4_Shipping.elf");
+#ifdef _WIN32
     WIN32_FILE_ATTRIBUTE_DATA a;
     if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &a)) return {false, false};
     std::wstring key = path + L"|" + std::to_wstring(((unsigned long long)a.ftLastWriteTime.dwHighDateTime << 32) |
                                                      a.ftLastWriteTime.dwLowDateTime);
+#else
+    std::error_code ec;
+    const auto written = fs::last_write_time(port::path(path), ec);
+    if (ec) return {false, false};
+    std::wstring key = path + L"|" + std::to_wstring((long long)written.time_since_epoch().count());
+#endif
     auto it = cache.find(key);
     if (it != cache.end()) return it->second;
     std::string data;
@@ -251,7 +342,7 @@ std::string version_of(const std::wstring &folder, bool &found) {
         size_t v = (size_t)values + value_at;
         std::string version = v >= d.size() ? "" : d.substr(v, std::min<size_t>(length, d.size() - v));
         while (!version.empty() && version.back() == '\0') version.pop_back();
-        if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, version.data(), (int)version.size(), nullptr, 0) == 0 &&
+        if (!utf8_ok(version.data(), (int)version.size()) &&
             !version.empty())
             return "";
         found = true;
@@ -280,6 +371,21 @@ std::vector<std::string> voices(const std::wstring &game_dir) {
 
 // ------------------------------------------------------------------------------------------------ system
 
+#ifndef _WIN32
+// a native Linux build never runs under Wine: the Wine helpers answer "no" and the drive check is still to come
+bool under_wine() { return false; }
+std::string wine_unix(const std::wstring &path) { return ""; }
+std::wstring wine_windows(const std::string &path) { return L""; }
+std::wstring env(const wchar_t *name) {
+    std::string v;
+    return port::env(utf8(name).c_str(), v) ? port::wide(v) : std::wstring();
+}
+std::wstring shared_config() { return L""; }
+std::string slow_drive(const std::wstring &path) {
+    port::not_yet("slow drive check");   // /sys/block/<dev>/queue/rotational and removable, later
+    return "";
+}
+#else
 bool under_wine() {
     HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
     return ntdll && GetProcAddress(ntdll, "wine_get_version");
@@ -378,11 +484,12 @@ std::string slow_drive(const std::wstring &path) {
         }
     return "drive " + utf8(drive) + " (" + text + ")";
 }
+#endif
 
 std::string first_line_text(const std::wstring &path) {
     std::string d;
     if (!read_all(path, d, 1 << 16)) return "";
-    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, d.data(), (int)d.size(), nullptr, 0) == 0 && !d.empty()) return "";
+    if (!utf8_ok(d.data(), (int)d.size()) && !d.empty()) return "";
     const char *ws = " \t\r\n\v\f";
     size_t a = d.find_first_not_of(ws);
     if (a == std::string::npos) return "";
@@ -390,6 +497,11 @@ std::string first_line_text(const std::wstring &path) {
 }
 
 std::wstring desktop() {
+#ifndef _WIN32
+    // XDG_DESKTOP_DIR from user-dirs.dirs comes with the .desktop shortcuts (later); ~/Desktop until then
+    std::wstring home = env(L"HOME");
+    return join(home.empty() ? L"." : home, L"Desktop");
+#else
     PWSTR p = nullptr;
     if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Desktop, 0, nullptr, &p)) && p) {
         std::wstring s = p;
@@ -400,6 +512,7 @@ std::wstring desktop() {
     }
     std::wstring profile = env(L"USERPROFILE");
     return join(profile.empty() ? L"." : profile, L"Desktop");
+#endif
 }
 
 // JSON of the highest-versioned multiplayer build found as u3mp/patcher/build/v<version>/build.json; "" if there is none
@@ -448,7 +561,7 @@ std::string utf8_replace(const std::string &t) {
         bool ok = n > 0 && i + n <= t.size();
         for (int k = 1; ok && k < n; ++k) ok = ((unsigned char)t[i + k] >> 6) == 2;
         if (ok && n > 1 &&
-            MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, t.data() + i, n, nullptr, 0) == 0)
+            !utf8_ok(t.data() + i, n))
             ok = false;
         if (ok) { out.append(t, i, n); i += n; }
         else { out += "\xEF\xBF\xBD"; ++i; }
@@ -474,7 +587,7 @@ bool sfo_values(const std::wstring &folder, Value &out) {
         size_t end = d.find('\0', k);
         if (end == std::string::npos) return false;
         std::string key = d.substr(k, end - k);
-        if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, key.data(), (int)key.size(), nullptr, 0) == 0 && !key.empty())
+        if (!utf8_ok(key.data(), (int)key.size()) && !key.empty())
             return false;
         size_t v = (size_t)values + at;
         if (v + size > d.size()) return false;
@@ -510,6 +623,12 @@ std::string starter_version(const std::wstring &folder, bool &found) {
 // canonical path of an existing file or directory after following links and SUBST drives (the \\?\ prefix is
 // stripped); the absolute input path if it cannot be opened
 std::wstring final_path(const std::wstring &path) {
+#ifndef _WIN32
+    std::error_code ec;
+    const fs::path p = fs::absolute(port::path(path), ec);
+    const fs::path f = fs::canonical(p, ec);
+    return port::wide((ec ? p.lexically_normal() : f).string());
+#else
     wchar_t full[MAX_PATH * 4];
     DWORD n = GetFullPathNameW(path.c_str(), MAX_PATH * 4, full, nullptr);
     std::wstring p = (n && n < MAX_PATH * 4) ? std::wstring(full, n) : path;
@@ -524,6 +643,7 @@ std::wstring final_path(const std::wstring &path) {
     if (f.rfind(L"\\\\?\\UNC\\", 0) == 0) return L"\\\\" + f.substr(8);
     if (f.rfind(L"\\\\?\\", 0) == 0) return f.substr(4);
     return f;
+#endif
 }
 
 // Locates the update for a game folder. UNCHARTED_UPDATE wins if set ("0" disables updates); otherwise a sibling
@@ -574,10 +694,10 @@ UN_API int un_wine(void) { return under_wine() ? 1 : 0; }
 // recipe_version (arg = u3mp dir), u3mp_release (arg = u3mp dir; build.json text or ""), desktop, sfo,
 // starter_version, find_update, u3mp_default_data and u2mp_default_data (arg = launcher folder). An empty answer
 // means "nothing".
-UN_API int un_system(const char *what, const wchar_t *arg, char *out, int cap) {
+UN_API int un_system(const char *what, const un_path_char *arg, char *out, int cap) {
     std::string w = what ? what : "", r;
     bool found = true;
-    std::wstring a = arg ? arg : L"";
+    std::wstring a = port::wtext(arg, L"");
     if (w == "unix_path") r = under_wine() ? wine_unix(a) : "";
     else if (w == "windows_path") r = under_wine() ? utf8(wine_windows(utf8(a))) : "";
     else if (w == "shared_config") r = under_wine() ? utf8(shared_config()) : "";
@@ -609,8 +729,14 @@ UN_API int un_system(const char *what, const wchar_t *arg, char *out, int cap) {
         const std::wstring name = w[1] == L'3' ? L"U3 Multiplayer" : L"U2 Multiplayer";
         std::wstring old = env(L"LOCALAPPDATA");
         if (!old.empty()) old = join(join(old, L"Uncharted Launcher"), name);
+#ifdef _WIN32
         const DWORD at = old.empty() ? INVALID_FILE_ATTRIBUTES : GetFileAttributesW(join(old, L"state.json").c_str());
         r = utf8(at != INVALID_FILE_ATTRIBUTES ? old : join(a, name));
+#else
+        std::error_code ec;
+        const bool there = !old.empty() && fs::exists(port::path(join(old, L"state.json")), ec);
+        r = utf8(there ? old : join(a, name));
+#endif
     }
     else return 1;
     if (!found) return 2;
@@ -619,12 +745,18 @@ UN_API int un_system(const char *what, const wchar_t *arg, char *out, int cap) {
 
 UN_API int un_pid_alive(unsigned long pid) {
     if (!pid) return 0;
+#ifdef _WIN32
     HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
     if (!h) return 0;
     DWORD code = 0;
     BOOL ok = GetExitCodeProcess(h, &code);
     CloseHandle(h);
     return ok && code == STILL_ACTIVE ? 1 : 0;
+#else
+    // signal 0 only checks; EPERM means it runs under another user. A finished child that was not waited for (a
+    // zombie) still counts, as it does until the handle closes on Windows
+    return (::kill((pid_t)pid, 0) == 0 || errno == EPERM) ? 1 : 0;
+#endif
 }
 
 }  // extern "C"

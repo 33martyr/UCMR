@@ -19,10 +19,17 @@
 #include "native.h"
 #include "json.h"
 #include "log_history.h"
+#include "port.h"
 
+#ifdef _WIN32
 #include <windows.h>
 #include <shellapi.h>
 #include <shlobj.h>
+#else
+#include <cwctype>
+#include <filesystem>
+extern char **environ;
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -40,10 +47,10 @@
 
 extern "C" {
 UN_API int un_controls(const char *what, const char *in_json, char *out, int cap);
-UN_API int un_gpu_recommendation(const wchar_t *logs, char *out, int cap);
+UN_API int un_gpu_recommendation(const un_path_char *logs, char *out, int cap);
 UN_API int un_gpu_query(const char *what, const char *name, int integrated, char *out, int cap);
-UN_API int un_play_env(const char *config_json, const wchar_t *user_dir, char *out, int cap);
-UN_API int un_u3_session_value(const wchar_t *data_dir, const wchar_t *eboots, const wchar_t *image);
+UN_API int un_play_env(const char *config_json, const un_path_char *user_dir, char *out, int cap);
+UN_API int un_u3_session_value(const un_path_char *data_dir, const un_path_char *eboots, const un_path_char *image);
 UN_API int un_play_start(const char *request_json, char *out, int cap);
 UN_API int un_play_poll(char *out, int cap);
 UN_API int un_play_stop(void);
@@ -52,8 +59,8 @@ UN_API int un_play_end(const char *state_json, char *out, int cap);
 UN_API int un_action(const char *request_json, char *out, int cap);
 UN_API int un_action_poll(char *out, int cap);
 UN_API int un_updates(const char *request_json, char *out, int cap);
-UN_API void un_update_cleanup(const wchar_t *root);
-UN_API int un_shortcuts(const wchar_t *root, const char *request_json, char *out, int cap);
+UN_API void un_update_cleanup(const un_path_char *root);
+UN_API int un_shortcuts(const un_path_char *root, const char *request_json, char *out, int cap);
 }
 
 namespace {
@@ -71,6 +78,14 @@ int give(const std::string &s, char *out, int cap) {
     return 0;
 }
 
+#ifdef _WIN32
+// a started program (the imports, the online program); Linux: none until port::spawn (§13 phase 2)
+using ProcessHandle = HANDLE;
+#else
+using ProcessHandle = void *;
+#endif
+
+#ifdef _WIN32
 std::wstring wide(const std::string &s) {
     if (s.empty()) return L"";
     const int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), nullptr, 0);
@@ -127,9 +142,51 @@ std::string read_file(const std::string &p, long long from = 0) {
     CloseHandle(h);
     return data;
 }
+const char *const SEP = "\\";
+#else
+namespace fs = std::filesystem;
+std::wstring wide(const std::string &s) { return port::wide(s); }
+std::string utf8(const std::wstring &w) { return port::utf8(w); }
+
+long long now_ms() { return port::now_ms(); }
+double unix_now() {
+    using namespace std::chrono;
+    return (double)duration_cast<microseconds>(system_clock::now().time_since_epoch()).count() / 1e6;
+}
+
+bool exists(const std::string &p) {
+    std::error_code ec;
+    return fs::exists(port::path_utf8(p), ec);
+}
+bool is_file(const std::string &p) {
+    std::error_code ec;
+    return fs::exists(port::path_utf8(p), ec) && !fs::is_directory(port::path_utf8(p), ec);
+}
+bool is_dir(const std::string &p) {
+    std::error_code ec;
+    return fs::is_directory(port::path_utf8(p), ec);
+}
+long long mtime_of(const std::string &p) {   // -1: none; only compared with itself
+    std::error_code ec;
+    const auto t = fs::last_write_time(port::path_utf8(p), ec);
+    return ec ? -1 : (long long)t.time_since_epoch().count();
+}
+long long size_of_file(const std::string &p) {
+    std::error_code ec;
+    const auto n = fs::file_size(port::path_utf8(p), ec);
+    return ec ? -1 : (long long)n;
+}
+std::string read_file(const std::string &p, long long from = 0) {
+    std::string data;
+    std::vector<uint8_t> part;
+    if (!port::read_part(port::path_utf8(p), from, (long long)1 << 40, part)) return "";
+    return std::string(part.begin(), part.end());
+}
+const char *const SEP = "/";
+#endif
 std::string join(const std::string &a, const std::string &b) {
     if (a.empty()) return b;
-    return a + (a.back() == '\\' || a.back() == '/' ? "" : "\\") + b;
+    return a + (a.back() == '\\' || a.back() == '/' ? "" : SEP) + b;
 }
 std::string parent_of(std::string p) {
     while (p.size() > 3 && (p.back() == '\\' || p.back() == '/')) p.pop_back();
@@ -191,7 +248,7 @@ Value json_call(int (*fn)(const char *, char *, int), const Value &request) {
 }
 
 std::string sys(const char *what, const std::string &arg = "") {
-    const std::wstring a = wide(arg);
+    const port::arg_string a = port::arg(arg);
     auto t = text_call([&](char *o, int c) { return un_system(what, a.c_str(), o, c); }, 1 << 12);
     return t.first == 0 ? t.second : "";
 }
@@ -213,6 +270,7 @@ std::string fixed(double v, int digits) {
 
 // ------------------------------------------------------------------------------------------------ processes
 
+#ifdef _WIN32
 std::wstring quote_arg(const std::wstring &a) {   // the C runtime's command line rules
     if (!a.empty() && a.find_first_of(L" \t\"") == std::wstring::npos) return a;
     std::wstring q = L"\"";
@@ -345,6 +403,54 @@ HANDLE spawn_logged(const std::vector<std::string> &args, const std::string &cwd
 }
 
 bool process_running(HANDLE h) { return h && WaitForSingleObject(h, 0) == WAIT_TIMEOUT; }
+void close_process(HANDLE h) { CloseHandle(h); }
+long long process_id(HANDLE h) { return (long long)GetProcessId(h); }
+int exit_code_of(HANDLE h) {   // 0 when unknown
+    DWORD code = 0;
+    GetExitCodeProcess(h, &code);
+    return (int)code;
+}
+#else
+// the process's environment with these changes (value null: removed), in the Windows body's layout; names are
+// case-sensitive here
+std::vector<wchar_t> environment(const std::vector<std::pair<std::string, Value>> &changes) {
+    std::map<std::string, std::string> vars;
+    for (char **p = environ; p && *p; ++p) {
+        const std::string entry = *p;
+        const size_t eq = entry.find('=', 1);
+        if (eq != std::string::npos) vars[entry.substr(0, eq)] = entry.substr(eq + 1);
+    }
+    for (auto &c : changes) {
+        if (c.second.kind == Value::Null) vars.erase(c.first);
+        else vars[c.first] = c.second.kind == Value::String ? c.second.s : json::dump(c.second, false);
+    }
+    std::vector<wchar_t> out;
+    for (auto &v : vars) {
+        const std::wstring e = port::wide(v.first + "=" + v.second);
+        out.insert(out.end(), e.begin(), e.end());
+        out.push_back(0);
+    }
+    out.push_back(0);
+    return out;
+}
+
+// programs are started through port::spawn in phase 2 (docs/WINDOWS-DEPENDENCIES.md §13): until then nothing starts
+std::pair<int, std::string> run(const std::vector<std::string> &args, int timeout_ms, const std::string &cwd = "",
+                                const std::vector<std::pair<std::string, Value>> &env_changes = {}) {
+    port::not_yet(("starting " + (args.empty() ? std::string("a program") : args[0])).c_str());
+    return {-1, ""};
+}
+ProcessHandle spawn_logged(const std::vector<std::string> &args, const std::string &cwd, const std::string &log, bool append,
+                           std::string &error) {
+    error = std::string("could not start ") + (args.empty() ? std::string("the program") : args[0]) + ": " +
+            port::not_yet("starting the imports");
+    return nullptr;
+}
+bool process_running(ProcessHandle h) { return false; }
+void close_process(ProcessHandle h) {}
+long long process_id(ProcessHandle h) { return 0; }
+int exit_code_of(ProcessHandle h) { return 0; }
+#endif
 bool pid_alive(const Value *pid) {
     if (!pid) return false;
     long long n = pid->kind == Value::Int ? pid->i : pid->kind == Value::String ? std::atoll(pid->s.c_str()) : 0;
@@ -361,7 +467,7 @@ namespace {
 // ------------------------------------------------------------------------------------------------ the launcher's state
 
 struct Import {                       // one multiplayer import (Uncharted 3's or 2's)
-    HANDLE proc = nullptr;            // started here
+    ProcessHandle proc = nullptr;     // started here
     std::string automatic;            // why the launcher started it (an update), else ""
     long long log_pos = 0;
     double n = 0, total = 0;          // the progress bar
@@ -405,7 +511,7 @@ struct Core {
     // the online program (online\uncharted_online.exe, when the package has it): a separate process, started hidden,
     // that the launcher talks to over its stdin/stdout, one JSON object per line each way
     bool online = false;
-    HANDLE online_process = nullptr, online_in = nullptr, online_out = nullptr;
+    ProcessHandle online_process = nullptr, online_in = nullptr, online_out = nullptr;
     std::string online_pending;   // what the program wrote past the last full line
     long long online_next = 0;
     // dialogs, timers, background work
@@ -475,6 +581,15 @@ void set_status(const std::string &text, const std::string &detail) { set_status
 
 // the settings file all installs shared before GitHub #47; only read once, to seed an install's own file
 std::string appdata_file() {
+#ifndef _WIN32
+    // no install before GitHub #47 ran on Linux: a path that is never there
+    std::string base;
+    if (!port::env("XDG_CONFIG_HOME", base) || base.empty()) {
+        port::env("HOME", base);
+        base = join(base.empty() ? "." : base, ".config");
+    }
+    return join(join(base, "Uncharted Launcher"), "launcher.json");
+#else
     wchar_t buf[32768];
     DWORD n = GetEnvironmentVariableW(L"APPDATA", buf, 32768);
     std::string base = n && n < 32768 ? utf8(std::wstring(buf, n)) : "";
@@ -483,15 +598,16 @@ std::string appdata_file() {
         base = n && n < 32768 ? utf8(std::wstring(buf, n)) : ".";
     }
     return join(join(base, "Uncharted Launcher"), "launcher.json");
+#endif
 }
 
 void write_config() {
     const std::string j = json::dump(g.config, false);
-    un_config_write(wide(g.config_file).c_str(), j.c_str());
+    un_config_write(port::arg(g.config_file).c_str(), j.c_str());
 }
 
 Value read_ini(const std::string &game) {
-    const std::wstring u = wide(g.user_dir);
+    const port::arg_string u = port::arg(g.user_dir);
     auto t = text_call([&](char *o, int c) { return un_ini_read(u.c_str(), game.c_str(), o, c); });
     Value v = Value::object();
     for (auto &line : lines_of(t.second)) {
@@ -505,7 +621,7 @@ void write_ini(const std::string &game, const Value &updates) {
     std::string lines;
     for (auto &f : updates.fields)
         lines += f.first + "\t" + (f.second.kind == Value::String ? f.second.s : json::dump(f.second, false)) + "\n";
-    un_ini_write(wide(g.user_dir).c_str(), game.c_str(), lines.c_str());
+    un_ini_write(port::arg(g.user_dir).c_str(), game.c_str(), lines.c_str());
 }
 
 std::string game_key() { return text(g.config, "game"); }
@@ -669,8 +785,10 @@ namespace {
 std::string python_exe() {
     const std::string own = join(join(g.root, "python"), "python.exe");
     if (is_file(own)) return own;
+#ifdef _WIN32
     wchar_t found[MAX_PATH];
     if (SearchPathW(nullptr, L"python.exe", nullptr, MAX_PATH, found, nullptr)) return utf8(found);
+#endif
     return "python.exe";
 }
 
@@ -851,6 +969,22 @@ bool ps3_has(const std::string &dir, std::initializer_list<const char *> rels) {
 void ps3_scan(const std::string &dir, int depth, std::vector<std::string> &out) {
     out.push_back(dir);
     if (depth >= 4) return;
+#ifndef _WIN32
+    std::vector<std::string> names;
+    std::error_code ec;
+    for (fs::directory_iterator it(port::path_utf8(dir), ec), end; !ec && it != end; it.increment(ec)) {
+        std::error_code e;
+        if (it->is_directory(e) && !it->is_symlink(e)) names.push_back(it->path().filename().string());
+    }
+    std::sort(names.begin(), names.end());   // NTFS lists names sorted; Linux in no order
+    for (const std::string &n : names) {
+        std::string l = n;
+        for (auto &c : l) c = (char)tolower((unsigned char)c);
+        if (l == "movie1" || l == "gallery1" || l == "cinema23" || l == "cinema5" || l == "users" || l == "http-cache")
+            continue;
+        ps3_scan(join(dir, n), depth + 1, out);
+    }
+#else
     WIN32_FIND_DATAW fd;
     HANDLE h = FindFirstFileW(wide(join(dir, "*")).c_str(), &fd);
     if (h == INVALID_HANDLE_VALUE) return;
@@ -865,6 +999,7 @@ void ps3_scan(const std::string &dir, int depth, std::vector<std::string> &out) 
         ps3_scan(join(dir, n), depth + 1, out);
     } while (FindNextFileW(h, &fd));
     FindClose(h);
+#endif
 }
 }  // namespace
 
@@ -909,12 +1044,26 @@ void u3_import(bool silent, bool image_only, const std::string &reason, const st
         return;
     }
     const std::string data = u3_data();
+#ifdef _WIN32
     SHCreateDirectoryExW(nullptr, wide(data).c_str(), nullptr);
     ULARGE_INTEGER free_bytes{};
     if (!GetDiskFreeSpaceExW(wide(data).c_str(), &free_bytes, nullptr, nullptr)) {
         if (!silent) tell("error", "The multiplayer data folder can't be used:\n" + data);
         return;
     }
+#else
+    struct { unsigned long long QuadPart; } free_bytes{};   // the field of the Windows body's ULARGE_INTEGER
+    {
+        std::error_code ec;
+        fs::create_directories(port::path_utf8(data), ec);
+        const fs::space_info room = fs::space(port::path_utf8(data), ec);
+        if (ec) {
+            if (!silent) tell("error", "The multiplayer data folder can't be used:\n" + data);
+            return;
+        }
+        free_bytes.QuadPart = (unsigned long long)room.available;
+    }
+#endif
     auto start = [silent, image_only, reason, keep, game, folders, data]() {
         std::vector<std::string> cmd = {u3import_exe(), "--ps4", game, "--data", data, "--port", g.root};
         const std::string update = update_dir();
@@ -929,12 +1078,12 @@ void u3_import(bool silent, bool image_only, const std::string &reason, const st
         const std::string log = join(data, "import.log");
         const long long log_start = !keep.empty() && is_file(log) ? size_of_file(log) : 0;
         std::string error;
-        HANDLE proc = spawn_logged(cmd, g.u3mp_dir, log, !keep.empty(), error);
+        ProcessHandle proc = spawn_logged(cmd, g.u3mp_dir, log, !keep.empty(), error);
         if (!proc) {
             if (!silent) tell("error", "Could not start the import:\n" + error);
             return;
         }
-        if (g.u3.proc) CloseHandle(g.u3.proc);
+        if (g.u3.proc) close_process(g.u3.proc);
         g.u3.proc = proc;
         g.u3.automatic = silent ? reason : "";
         g.u3.log_pos = log_start;   // a keep run appends to the import log: only its lines
@@ -965,8 +1114,16 @@ bool move_import(const std::string &from, const std::string &to) {
                          " is not used any more: delete it there when you no longer need it.");
         return true;
     }
+#ifdef _WIN32
     RemoveDirectoryW(wide(to).c_str());   // an empty folder of that name is in the way of the rename (others are kept)
-    if (MoveFileExW(wide(from).c_str(), wide(to).c_str(), 0)) {
+    const bool moved = MoveFileExW(wide(from).c_str(), wide(to).c_str(), 0) != 0;
+#else
+    std::error_code moving;
+    fs::remove(port::path_utf8(to), moving);   // only an empty folder goes
+    fs::rename(port::path_utf8(from), port::path_utf8(to), moving);
+    const bool moved = !moving;
+#endif
+    if (moved) {
         // state.json names its files by full path (the image, the overlays): they now start with the new folder
         const std::string state = join(to, "state.json"), old_low = lower(as_path(from));
         Value s;
@@ -983,21 +1140,36 @@ bool move_import(const std::string &from, const std::string &to) {
             };
             rebase(s);
             const std::string body = json::dump(s, false), tmp = state + ".tmp";
+#ifdef _WIN32
             HANDLE f = CreateFileW(wide(tmp).c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
             DWORD n = 0;
             const bool ok = f != INVALID_HANDLE_VALUE && WriteFile(f, body.data(), (DWORD)body.size(), &n, nullptr) && n == body.size();
             if (f != INVALID_HANDLE_VALUE) CloseHandle(f);
             if (!ok || !MoveFileExW(wide(tmp).c_str(), wide(state).c_str(), MOVEFILE_REPLACE_EXISTING)) DeleteFileW(wide(tmp).c_str());
+#else
+            port::write_atomic(port::path_utf8(state), body.data(), body.size());
+#endif
         }
         return true;
     }
+#ifdef _WIN32
     const DWORD code = GetLastError();
-    if (code == ERROR_NOT_SAME_DEVICE) {
+    const bool other_drive = code == ERROR_NOT_SAME_DEVICE;
+#else
+    const int code = moving.value();
+    const bool other_drive = moving == std::errc::cross_device_link;
+#endif
+    if (other_drive) {
         tell("info", "The new folder is on another drive, so the import is made there again. The old files stay in " +
                          from + ": delete them there when the new import has finished.");
         return true;
     }
-    tell("info", "The multiplayer files could not be moved from " + from + " (Windows error " + std::to_string(code) +
+#ifdef _WIN32
+    const char *const error_kind = " (Windows error ";
+#else
+    const char *const error_kind = " (error ";
+#endif
+    tell("info", "The multiplayer files could not be moved from " + from + error_kind + std::to_string(code) +
                      "). Close the game and anything that has the folder open, then pick the folder again.");
     return false;
 }
@@ -1006,6 +1178,7 @@ bool move_import(const std::string &from, const std::string &to) {
 static void u3_mark_next_stopped(const char *why) {
     const std::string next = join(u3_data(), "recipe-next");
     if (!is_dir(next)) return;
+#ifdef _WIN32
     HANDLE f = CreateFileW(wide(join(next, ".stopped")).c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
                            FILE_ATTRIBUTE_NORMAL, nullptr);
     if (f != INVALID_HANDLE_VALUE) {
@@ -1013,6 +1186,9 @@ static void u3_mark_next_stopped(const char *why) {
         WriteFile(f, why, (DWORD)strlen(why), &n, nullptr);
         CloseHandle(f);
     }
+#else
+    port::write(port::path_utf8(join(next, ".stopped")), why, std::strlen(why));
+#endif
 }
 
 // Automatic updates: a newer launcher goes first (updates.cpp asks with "stop_staged_imports"). An Uncharted 3 import
@@ -1024,7 +1200,7 @@ void u3_stop_staged() {
     const Value s = u3_state();
     if (!truthy(s.get("staging"))) return;
     long long pid = 0;
-    if (process_running(g.u3.proc)) pid = (long long)GetProcessId(g.u3.proc);
+    if (process_running(g.u3.proc)) pid = process_id(g.u3.proc);
     else if (const Value *p = s.get("pid")) pid = p->kind == Value::Int ? p->i : 0;
     if (!pid) return;
     kill_tree(pid);
@@ -1034,7 +1210,7 @@ void u3_stop_staged() {
 
 void u3_cancel() {
     long long pid = 0;
-    if (process_running(g.u3.proc)) pid = (long long)GetProcessId(g.u3.proc);
+    if (process_running(g.u3.proc)) pid = process_id(g.u3.proc);
     else if (const Value *p = u3_state().get("pid")) pid = p->kind == Value::Int ? p->i : 0;
     if (!pid) return;
     ask("yesno", "Stop the import? Finished steps are kept; Import continues it.", [pid](const Value &yes) {
@@ -1111,7 +1287,7 @@ void u3_poll() {
         }
     });
     if (g.u3.proc && !process_running(g.u3.proc)) {
-        CloseHandle(g.u3.proc);
+        close_process(g.u3.proc);
         g.u3.proc = nullptr;
         g.u3.automatic.clear();
     }
@@ -1179,9 +1355,17 @@ std::string u2_data_folder() {
         std::string q = as_path(folder);
         for (int up = 0; up <= 5; ++up) {
             if (is_dir(q)) {
+                bool found = false;
+#ifndef _WIN32
+                std::error_code ec;
+                for (fs::directory_iterator it(port::path_utf8(q), ec), end; !found && !ec && it != end; it.increment(ec)) {
+                    const std::string n = it->path().filename().string();
+                    std::error_code e;
+                    if (it->is_directory(e) && n.size() >= 5 && lower(n.substr(n.size() - 5)) == "data2") found = true;
+                }
+#else
                 WIN32_FIND_DATAW fd;
                 HANDLE h = FindFirstFileW(wide(join(q, "*")).c_str(), &fd);
-                bool found = false;
                 if (h != INVALID_HANDLE_VALUE) {
                     do {
                         const std::string n = utf8(fd.cFileName);
@@ -1190,6 +1374,7 @@ std::string u2_data_folder() {
                     } while (!found && FindNextFileW(h, &fd));
                     FindClose(h);
                 }
+#endif
                 if (found) return q;
             }
             const std::string p = parent_of(q);
@@ -1220,7 +1405,11 @@ void u2_import(bool silent, const std::string &reason = "") {
         return;
     }
     const std::string out = u2_dir();
+#ifdef _WIN32
     SHCreateDirectoryExW(nullptr, wide(out).c_str(), nullptr);
+#else
+    port::ensure_dir(port::path_utf8(out));
+#endif
     std::vector<std::string> cmd = {exe, "--ps4", game_dir(), "--ps3", ps3, "--out", out};
     const std::string data = u2_data_folder();   // GOTY data only: the game data folder, no map pack folder
     if (!data.empty()) { cmd.push_back("--ps3-data"); cmd.push_back(data); }
@@ -1231,12 +1420,12 @@ void u2_import(bool silent, const std::string &reason = "") {
     if (!elf.empty()) { cmd.push_back("--ps3-elf"); cmd.push_back(elf); }
     if (silent) cmd.push_back("--update");
     std::string error;
-    HANDLE proc = spawn_logged(cmd, join(join(g.root, "u2mp"), "bin"), join(out, "launcher-run.log"), false, error);
+    ProcessHandle proc = spawn_logged(cmd, join(join(g.root, "u2mp"), "bin"), join(out, "launcher-run.log"), false, error);
     if (!proc) {
         if (!silent) tell("error", "Could not start the import:\n" + error);
         return;
     }
-    if (g.u2.proc) CloseHandle(g.u2.proc);
+    if (g.u2.proc) close_process(g.u2.proc);
     g.u2.proc = proc;
     g.u2.automatic = silent ? reason : "";
     g.u2.log_pos = 0;
@@ -1246,7 +1435,7 @@ void u2_import(bool silent, const std::string &reason = "") {
 
 void u2_cancel() {
     long long pid = 0;
-    if (process_running(g.u2.proc)) pid = (long long)GetProcessId(g.u2.proc);
+    if (process_running(g.u2.proc)) pid = process_id(g.u2.proc);
     else if (const Value *p = u2_state().get("pid")) pid = p->kind == Value::Int ? p->i : 0;
     if (!pid) return;
     ask("yesno", "Stop the import? Finished files are kept; Import continues it.", [pid](const Value &yes) {
@@ -1285,9 +1474,8 @@ void u2_poll() {
         }
     });
     if (g.u2.proc && !process_running(g.u2.proc)) {
-        DWORD code = 0;
-        GetExitCodeProcess(g.u2.proc, &code);
-        CloseHandle(g.u2.proc);
+        const int code = exit_code_of(g.u2.proc);
+        close_process(g.u2.proc);
         g.u2.proc = nullptr;
         g.u2.automatic.clear();
         if (code != 0 && g.u2.step.compare(0, 14, "Import stopped") != 0 && g.u2.step.compare(0, 13, "Import failed") != 0)
@@ -1337,6 +1525,7 @@ void online_apply(const Value &r) {
 // a JSON object written as one line (json.h lays objects out over several lines, but strings never hold a raw line
 // break, so turning the layout's breaks into spaces keeps it valid). Replies to a hand-off carry secrets, so every
 // buffer that held a line is wiped.
+#ifdef _WIN32
 void wipe(std::string &s) {
     if (!s.empty()) SecureZeroMemory(&s[0], s.size());
     s.clear();
@@ -1450,6 +1639,24 @@ Value online_request(const Value &request, DWORD wait_ms = 15000) {
     wipe(line);
     return reply;
 }
+#else
+// Linux: the online program is started through port::spawn in phase 2 (and gets its BSD sockets and 0600 token
+// file in phase 5, docs/WINDOWS-DEPENDENCIES.md §13); until then the online section stays away
+void wipe(std::string &s) {
+    if (!s.empty()) port::zero(&s[0], s.size());
+    s.clear();
+}
+void online_stop() {
+    g.online_process = g.online_in = g.online_out = nullptr;
+    wipe(g.online_pending);
+    g.online = false;
+}
+bool online_spawn(const std::string &exe) {
+    port::not_yet("the online program");
+    return false;
+}
+Value online_request(const Value &request, unsigned long wait_ms = 15000) { return Value::null(); }
+#endif
 Value online_op(const char *op, const std::string &game = std::string()) {
     Value r = Value::object();
     r.set("op", Value::text(op));
@@ -1675,7 +1882,7 @@ void make_shortcuts(const char *which) {
     request.set("python", Value::text(python_exe()));
     request.set("script", Value::text(launcher_script()));
     const std::string r = json::dump(request, false);
-    auto t = text_call([&](char *o, int c) { return un_shortcuts(wide(g.root).c_str(), r.c_str(), o, c); });
+    auto t = text_call([&](char *o, int c) { return un_shortcuts(port::arg(g.root).c_str(), r.c_str(), o, c); });
     Value reply;
     json::parse(t.second, reply);
     tell(text(reply, "kind") == "error" ? "error" : "info", text(reply, "text"));
@@ -1735,8 +1942,8 @@ void u3_session_value() {
     const std::string eboots = text(g.config, "u3mp_ps3_elf") + "\n" + text(s, "ps3_elf") + "\n" +
                                join(join(join(u3_data(), "ps3-kept"), "elf"), "EBOOT.elf");
     const Value *image = s.get("image");
-    un_u3_session_value(wide(join(g.user_dir, "data")).c_str(), wide(eboots).c_str(),
-                        wide(image && image->is_object() ? text(*image, "path") : "").c_str());
+    un_u3_session_value(port::arg(join(g.user_dir, "data")).c_str(), port::arg(eboots).c_str(),
+                        port::arg(image && image->is_object() ? text(*image, "path") : "").c_str());
 }
 
 // The helper's PS3-only values (the import's recipe step ps3-values, u3mp/patcher/importer/ps3values.cpp): the file
@@ -1749,7 +1956,12 @@ void u3_ps3_values() {
     if (from.empty()) return;
     const std::string dir = join(g.user_dir, "data"), to = join(dir, "u3-ps3-values.bin");
     if (read_file(to) == from) return;
+#ifdef _WIN32
     CreateDirectoryW(wide(dir).c_str(), nullptr);   // a player who never started the multiplayer has no data folder yet
+#else
+    std::error_code made;
+    fs::create_directory(port::path_utf8(dir), made);
+#endif
     write_text_file(to, from);
 }
 
@@ -1827,7 +2039,7 @@ void start_game(std::function<void(bool)> done, const std::string &overlay) {
     }
     {
         const std::string c = json::dump(g.config, false);
-        auto t = text_call([&](char *o, int cap) { return un_play_env(c.c_str(), wide(g.user_dir).c_str(), o, cap); });
+        auto t = text_call([&](char *o, int cap) { return un_play_env(c.c_str(), port::arg(g.user_dir).c_str(), o, cap); });
         Value list;
         if (t.first == 0 && json::parse(t.second, list))
             for (auto &p : list.items)
@@ -2333,6 +2545,9 @@ std::string online_settings_file() { return join(g.user_dir, "u3-online.json"); 
 long long g_record_seen = -2;   // the sum of the recorded files' times when they were last recorded
 
 bool write_text_file(const std::string &path, const std::string &text) {   // through a temporary file
+#ifndef _WIN32
+    return port::write_atomic(port::path_utf8(path), text.data(), text.size());
+#else
     const std::wstring tmp = wide(path + ".tmp");
     HANDLE h = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) return false;
@@ -2340,6 +2555,7 @@ bool write_text_file(const std::string &path, const std::string &text) {   // th
     const bool ok = WriteFile(h, text.data(), (DWORD)text.size(), &put, nullptr) && put == text.size();
     CloseHandle(h);
     return ok && MoveFileExW(tmp.c_str(), wide(path).c_str(), MOVEFILE_REPLACE_EXISTING);
+#endif
 }
 
 long long recorded_times() {
@@ -2378,7 +2594,12 @@ void record_settings() {   // only writes launcher.json when something changed
 void restore_settings() {   // before the online program and the game read them: a missing file comes back
     const Value *online = g.config.get("online");
     if (online && online->is_object() && !online->fields.empty() && !is_file(online_settings_file())) {
+#ifdef _WIN32
         CreateDirectoryW(wide(g.user_dir).c_str(), nullptr);
+#else
+        std::error_code made;
+        fs::create_directory(port::path_utf8(g.user_dir), made);
+#endif
         write_text_file(online_settings_file(), json::dump(*online, true));
     }
     const Value *games = g.config.get("games");
@@ -2394,13 +2615,13 @@ void restore_settings() {   // before the online program and the game read them:
 // dumps and memory records
 void prune_logs() {
     namespace fs = std::filesystem;
-    const fs::path u3 = wide(u3_data()), u2 = wide(u2_dir());
+    const fs::path u3 = port::path(wide(u3_data())), u2 = port::path(wide(u2_dir()));
     prune_old_logs(u3, L"import.", L".log");
     prune_old_logs(u3 / L"recipe" / L"_recipe", L"log.", L".txt");
     prune_old_logs(u2, L"import.", L".log");
     prune_old_logs(u2, L"launcher-run.", L".log");
     for (const wchar_t *game : {L"uncharted", L"big2-ps4_Shipping", L"big3-ps4_Shipping"}) {
-        const fs::path dir = fs::path(wide(g.root)) / L"analysis" / game;
+        const fs::path dir = port::path(wide(g.root)) / L"analysis" / game;
         prune_old_logs(dir / L"attempts", L"", L"");
         prune_old_logs(dir, L"hang-", L".txt");
         prune_old_logs(dir, L"memory-", L".csv");
@@ -2438,7 +2659,7 @@ void start(const std::string &root, const Value &args) {
         }
     }
     {
-        const std::wstring cf = wide(g.config_file), pf = wide(g.prefix_file), ud = wide(g.user_dir);
+        const port::arg_string cf = port::arg(g.config_file), pf = port::arg(g.prefix_file), ud = port::arg(g.user_dir);
         auto t = text_call([&](char *o, int c) { return un_config_read(cf.c_str(), pf.c_str(), ud.c_str(), g.wine ? 1 : 0, o, c); });
         Value cfg;
         if (json::parse(t.second, cfg) && cfg.is_object()) g.config = cfg;
@@ -2478,7 +2699,7 @@ void start(const std::string &root, const Value &args) {
     every(1000, []() { u3_poll(); u2_poll(); });
     every(2000, record_settings);   // the game's in-game menu and the online section change their own files
     after(4000, auto_updates_after_launcher);
-    after(3000, []() { un_update_cleanup(wide(g.root).c_str()); });
+    after(3000, []() { un_update_cleanup(port::arg(g.root).c_str()); });
     after(5000, prune_logs);
     if (truthy(g.config.get("check_updates")) || !g.config.get("check_updates"))
         if (g.direct.empty()) after(1500, []() { update_op("check"); });
@@ -2488,7 +2709,7 @@ void start(const std::string &root, const Value &args) {
             std::wstring logs;
             for (const char *folder : {"uncharted", "big2-ps4_Shipping", "big3-ps4_Shipping"})
                 logs += (logs.empty() ? L"" : L"\n") + wide(join(join(join(g.root, "analysis"), folder), "boot.log"));
-            *found = text_call([&](char *o, int c) { return un_gpu_recommendation(logs.c_str(), o, c); }).second;
+            *found = text_call([&](char *o, int c) { return un_gpu_recommendation(port::arg(logs).c_str(), o, c); }).second;
         }, [found]() {
             std::vector<std::string> f;
             size_t at = 0;
@@ -2523,11 +2744,11 @@ std::string take_out() {
 
 extern "C" {
 
-UN_API int un_core_open(const wchar_t *root, const char *args_json) {
+UN_API int un_core_open(const un_path_char *root, const char *args_json) {
     if (g.open) return 0;
     Value args;
     json::parse(args_json ? args_json : "{}", args);
-    start(utf8(root ? root : L"."), args);
+    start(utf8(port::wtext(root, L".")), args);
     return 0;
 }
 
