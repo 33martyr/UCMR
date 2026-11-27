@@ -530,6 +530,12 @@ const GameCodeFix GAME_CODE_FIXES[] = {
     // Cash popup colour: the PS4 HUD draw maps colour byte 0 to green and byte 1 to blue, so the PS3 green 0x55ff55 came
     // out blue. Use 0x0055ff (the immediate of the HUD popup draw's colour load).
     {0xc3655d, "55ff55", "ff5500", "cash popup: green colour"},
+    // Sniper scope kept through a grenade throw (PS3 multiplayer behaviour): the three throw starts of the fast-grenade
+    // code (player-fast-grenade.cpp) look up the player's CameraControlZoom and end it (camera vtable +0x238) right
+    // before the throw animation (0xa14540), so a scoped sniper dropped out of the scope. The end call becomes a 6-byte nop.
+    {0xa1380b, "ff9138020000", "660f1f440000", "grenade throw keeps the zoom camera (1/3)"},
+    {0xa1396c, "ff9138020000", "660f1f440000", "grenade throw keeps the zoom camera (2/3)"},
+    {0xa170af, "ff9138020000", "660f1f440000", "grenade throw keeps the zoom camera (3/3)"},
 };
 
 // returns how many fixes were applied
