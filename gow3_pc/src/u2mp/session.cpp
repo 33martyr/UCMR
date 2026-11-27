@@ -52,6 +52,7 @@ constexpr uint64_t kMatchSession = 0x1065b08;
 constexpr uint64_t kNetInfo = 0x104f1c8;
 constexpr uint64_t kNgm = 0x113b760;
 constexpr uint64_t kNpd = 0x11474f8;
+constexpr uint64_t kNpdMatchmaking = 0x1b0;   // u32 bit 0: Profile "Matchmaking" 0 Default / 1 DLC (saved)
 constexpr uint64_t kPackageTable = 0x1130390;
 constexpr uint64_t kNetImageTable = 0x1130078;
 constexpr uint64_t kGameFrame = 0x11162c4;
@@ -2504,7 +2505,7 @@ void pick_matchmaking_game() {
     int32_t type = chosen >= 0 ? chosen : get<int32_t>(games.records + (game < 0 ? 0 : game) * 0x90 + 0x0c);
     std::vector<int32_t> candidates;
     for (int32_t i = 0; i < games.count; ++i)
-        if (get<int32_t>(games.records + i * 0x90 + 0x0c) == type && dlc_net_game_available(i)) candidates.push_back(i);
+        if (get<int32_t>(games.records + i * 0x90 + 0x0c) == type && session::net_game_same_map(i)) candidates.push_back(i);
     if (candidates.empty()) return;
     int32_t pick = candidates[size_t(std::rand()) % candidates.size()];
     guest<void(U2MP_GUEST *)(void *, int16_t, void *, int32_t)>(kSetNetGame)(ngm(), int16_t(pick), nullptr, 10);
@@ -2910,11 +2911,14 @@ bool custom_start_ok() {
     const int32_t pack = dlc_net_game_pack(game, local_ok);
     if (!local_ok)
         return refuse("this PC lacks the map's map pack", pack == 1 ? kNoMapPack1 : kNoMapPack2, kCustomInfo);
-    // Only when this PC plays the map pack version (Ruins falls back to the base map without map pack 1).
-    if ((pack == 1 || pack == 2) && (dlc_packs() & (1u << pack)))
-        for (const Member &m : members)
-            if (m.used && m.net_id != my_id && !(m.packs & (1u << pack)))
-                return refuse("a party member lacks the map's map pack", kMemberNoMapPack, kCustomInfo);
+    // Every PC must load the same map (session::net_game_same_map): a map pack map needs the pack on every PC. The
+    // Ruins, which this PC plays as the base map without map pack 1, is refused too when a member has the pack (it
+    // would load the map pack Ruins): then this PC is the one lacking it, as on PS3, where the Ruins needed it.
+    if (!session::net_game_same_map(game)) {
+        if (dlc_packs() & (1u << pack)) return refuse("a party member lacks the map's map pack", kMemberNoMapPack, kCustomInfo);
+        return refuse("this PC lacks the map's map pack (a party member plays its map pack version)",
+                      pack == 1 ? kNoMapPack1 : kNoMapPack2, kCustomInfo);
+    }
     if (players > type_max_players(type)) return refuse("too many players for the game type", kTooManyPlayers, kCustomInfo);
     if (!start::may_start(start::kCustom, type, players))
         return refuse("too few players for the game type", kTooFewPlayers, kTooFewInfo);
@@ -3039,6 +3043,19 @@ int member_count() {
     int n = 0;
     for (const Member &m : members) n += m.used;
     return n;
+}
+
+bool net_game_same_map(int32_t index) {
+    bool local_ok = true;
+    const int32_t pack = dlc_net_game_pack(index, local_ok);
+    if (!local_ok) return false;
+    uint32_t all = dlc_packs(), any = all;
+    for (const Member &m : members)
+        if (m.used && m.net_id != my_id && m.packs != 0xff) {   // 0xff: an older PC that did not say
+            all &= m.packs;
+            any |= m.packs;
+        }
+    return start::pack_map_same_for_all(pack, dlc_net_game_has_base(index), all, any);
 }
 
 void note_leaving() {
@@ -3306,6 +3323,9 @@ int playlist_room_slots() {
 }
 
 uint32_t mm_pack_mask() {
+    // The Profile's Matchmaking setting (NetPlayerData +0x1b0 bit 0, PS3 +0x16c, menus.cpp cond 135): only "DLC" (1)
+    // puts the map packs into the room key; "Default" (0, a new career) searches and makes the rooms every PC shares.
+    if (!(get<uint32_t>(g(kNpd) + kNpdMatchmaking) & 1u)) return 0;
     std::vector<int32_t> types;
     Table games = table_of(lookup(kNetGamesId));
     if (!playlist_game_types(types) || !games.records) return 0;

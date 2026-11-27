@@ -601,7 +601,7 @@ void query_friends_online(uint8_t *q) {
             put<float>(q + 0x30, 1.0f);
         };
         if (element == kElementStatusDot) image(0x20, v.party_member ? 2 : v.online ? 1 : 0);
-        else if (element == 0 && v.multiplayer) image(0x21, uint32_t(std::max(v.level, 1)));
+        else if (element == 0 && v.multiplayer) image(0x21, uint32_t(std::max(v.mode, 1)));
         else if (element == 0 && v.this_game) image(0x21, 0);
         break;   // the avatar (0x2138a9b2): RPCN has none
     }
@@ -737,6 +737,23 @@ U2MP_GUEST void query_golden_guns(uint8_t *q) {
     put<uint32_t>(licences, kept | kGoldenGunsBit);
     call(original_golden_guns, q);
     put<uint32_t>(licences, kept);
+}
+
+// ---- Matchmaking: Default / DLC (cond 135) -----------------------------------------------------------------
+// The Profile's Other Settings row between Taunt and Golden Guns (query 0x65a790, PS3 0x4c09a8): label "Matchmaking",
+// values "Default" (0) and "DLC" (1), the setting NetPlayerData +0x1b0 bit 0 (PS3 data block +0x16c), saved with the
+// career. The game gives the row its label only while the owned-DLC word [0x1115a30 + 0xa0] is not 0; on PS3 the map
+// pack entitlements set it, on PS4 nothing does, so the row stayed hidden and left the gap. The query runs with the
+// imported map packs' bits (dlc_packs, bits 1 and 2) in that word and the word put back after; no pack imported: the
+// row stays hidden as on a PS3 without map packs. What the value does: session.cpp mm_pack_mask.
+constexpr uint64_t kOwnedDlcWord = 0x1115a30 + 0xa0;
+uint64_t original_matchmaking = 0;
+U2MP_GUEST void query_matchmaking(uint8_t *q) {
+    uint8_t *owned = abs_at(kOwnedDlcWord);
+    const uint32_t kept = get<uint32_t>(owned);
+    put<uint32_t>(owned, kept | (dlc_packs() & 0x6u));
+    call(original_matchmaking, q);
+    put<uint32_t>(owned, kept);
 }
 
 // ---- diagnostic trace of the Profile page queries ---------------------------------------------------------
@@ -945,6 +962,7 @@ void install_menus(int &installed) {
         {77, 0x659bd0, "LIST_BOOSTERS0", query_boosters, &original_boosters},
         {78, 0x659bd0, "LIST_BOOSTERS1", query_boosters, &original_boosters},
         {108, 0x65c610, "Golden Guns", query_golden_guns, &original_golden_guns},
+        {135, 0x65a790, "Matchmaking", query_matchmaking, &original_matchmaking},
     };
     for (const Wrap &w : wraps) {
         uint8_t *e = find_entry(w.cond);
