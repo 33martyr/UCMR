@@ -52400,6 +52400,7 @@ MM_RO const char t_103[] = "0x103 in for room 0x", t_103f[] = " (forwarded to th
 MM_RO const char t_107[] = "0x107 in: matchmaking page, waiting for the leader's 0x113", t_118[] = "0x118 out to the party: searching again from room 0x";
 MM_RO const char t_res_in[] = "0x100 in from ", t_res_in2[] = ": ids ", t_out101[] = ", 0x101 out ";
 MM_RO const char t_late[] = "late join of a match in progress (0x27): status 5, 25 s", t_wd[] = "start watchdog: 60 s at 0x2e / 0x2f (log only, PS3 has no limit)";
+MM_RO const char t_late_nv[] = "late join: no vote, 0x27";
 MM_RO const char t_left_room[] = "the match room is gone: 0x26";
 // v7.264 (not PS3 rules: PS3 had many players, two lone PCs could not stay in step; PS3 guests have no time limit)
 constexpr uint32_t STAGGER_T = 8 * TPS, GUEST_T = 90 * TPS;
@@ -53126,6 +53127,20 @@ MM_FN void owner_wait(uintptr_t base, void *s) {
 // s = the menu state, for the loading page the fallback has to show itself (u3x_guest_load_pages)
 MM_FN void guest_start(uintptr_t base, void *s) {
     uint8_t *ms = sess(base, MS);
+    // A search guest alone at 0x12 whose owner's start-load (its settings event) comes before any vote: the match is
+    // already being played. The search result showed the room without the in-progress flag, so joined() took the lobby,
+    // and the forced load below then waited at 0x2f for a start that never comes. Take the late join instead (0x27),
+    // as joined() does for the flag; the LoadLevel is already in, so the flag goes up again for the wait to take.
+    if (mm.st == 0x12 && !mm.member && ps4_state(base) == 0x12 && ms[S_START_LOAD] && party_size(base) == 1) {
+        say(t_late_nv);
+        show(base, 5, LATE_WAIT);
+        mm.in_progress = 1;
+        u3x_jip_wait(base, room_of(base), 1, nullptr);
+        ms[S_START_LOAD] = 1;
+        mm.late_first = 0;
+        go(base, 0x27);
+        return;
+    }
     const uint32_t t = now(base);
     if (ps4_state(base) != 0x12 || !ms[S_START_LOAD]) {
         mm.lobby_t = 0;
