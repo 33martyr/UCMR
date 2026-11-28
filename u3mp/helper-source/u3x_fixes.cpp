@@ -55486,8 +55486,11 @@ FAM_FN void u3x_mm_focus(uintptr_t base, int32_t *ev, void *s) {
     if ((ev[0] != 6 && ev[0] != 21) || (ext_eb()[1] & 0x20000u)) return;   // the keeper's own switch
     const uint8_t *source = rd<const uint8_t *>(ev, 0x98);
     if (!source || rd<uint32_t>(source, 0x1c) != 0x4c414eadu) return;   // the party box
-    const uint8_t *top = u3h_active_page_object(base);
-    if (!top || rd<uint32_t>(top, 0x10) != 0xe35f0f1au) return;     // PAGE_MULTIPLAYER_MATCHMAKING
+    // While the search runs (net status > 0, the rule of the matchmaking player lists), on every page, not
+    // only PAGE_MULTIPLAYER_MATCHMAKING: the PROFILE page opened from its Profile row (Customization / Records) shows
+    // the same list, op 21 stayed unanswered there, so the game put the focus on the own row and took it back after
+    // each Left. The keeper reads the active page itself.
+    if (at<int32_t>(base + 0x17d5c58 + 0x40) <= 0) return;
     // v7.260: op 21 "may the box take the focus": the helper's party list answers yes only while the player is in the
     // box; the matchmaking player list left it unanswered (the game's default: yes), so the game kept moving the
     // focus into the box and the keeper kept moving it back (the highlight jumped left and right without input)
