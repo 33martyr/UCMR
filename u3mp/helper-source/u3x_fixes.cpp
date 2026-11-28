@@ -52361,6 +52361,10 @@ constexpr uint32_t PAGE_MM = 0xe35f0f1a, SYM_PLAYLISTS = 0xc1b0be0d, SYM_NET_GAM
 constexpr uint32_t CAP2 = 0x2b, OFF_BIT = 0x400, CONNECT_T = 10 * TPS, RESERVE_T = 10 * TPS, RESV_LIFE = 10 * TPS,
                    JOIN_T = 30 * TPS, SEARCH_T = 30 * TPS, LINES = 400;
 constexpr uint8_t CAP2_MARK = 0xa0, CAP2_MM = 0x01;
+// member data +0x24 (not set in the game's own block): the room owner's playlist, a 16-bit fold of the playlist id
+// (low half) under the mark 0x5aa5 (high half), sent in every outgoing block (u3x_mm_md_mark)
+constexpr uintptr_t MD_PLAYLIST = 0x24;
+constexpr uint32_t PLAYLIST_MARK = 0x5aa5;
 enum : int { E_CREATE = 4, E_SEARCH = 5, E_JOIN = 6, E_LEAVE = 7, E_ATTR = 8, E_KICK = 9 };
 
 MM_RO const char t_pre[] = "mm: ", t_state[] = "state ", t_arrow[] = " -> ", t_after[] = " after ms ";
@@ -52400,6 +52404,7 @@ MM_RO const char t_103[] = "0x103 in for room 0x", t_103f[] = " (forwarded to th
 MM_RO const char t_107[] = "0x107 in: matchmaking page, waiting for the leader's 0x113", t_118[] = "0x118 out to the party: searching again from room 0x";
 MM_RO const char t_res_in[] = "0x100 in from ", t_res_in2[] = ": ids ", t_out101[] = ", 0x101 out ";
 MM_RO const char t_late[] = "late join of a match in progress (0x27): status 5, 25 s", t_wd[] = "start watchdog: 60 s at 0x2e / 0x2f (log only, PS3 has no limit)";
+MM_RO const char t_other_pl[] = "mode check: owner on another playlist, leaving";
 MM_RO const char t_late_nv[] = "late join: no vote, 0x27";
 MM_RO const char t_left_room[] = "the match room is gone: 0x26";
 // v7.264 (not PS3 rules: PS3 had many players, two lone PCs could not stay in step; PS3 guests have no time limit)
@@ -52509,6 +52514,8 @@ MM_FN bool v2(const uint8_t *m) {
     const uint8_t c = m[M_DATA + CAP2];
     return rd<uint32_t>(m, M_DLEN) == 0x40 && !m[M_DATA + 0x19] && (c & 0xf0) == CAP2_MARK && (c & CAP2_MM);
 }
+// the 16-bit fold of a playlist id that the playlist tag carries (member data +0x24)
+MM_FN uint32_t playlist_fold(uint32_t id) { return (id ^ (id >> 16)) & 0xffffu; }
 // own member slot: the party session's, else the match session's
 MM_FN const uint8_t *own_in(uint8_t *ss) {
     if (!rd<uint64_t>(ss, S_ROOM)) return nullptr;
@@ -53054,8 +53061,26 @@ MM_FN void begin(uintptr_t base, void *s, bool member) {
     show(base, 1, 0);
 }
 
+MM_FN void join_failed(uintptr_t base);
+// The search result does not tell the modes apart (a Co-op Adventure search got a Team Deathmatch room): true when the
+// owner of the joined room carries the playlist tag of another playlist. No tag (an older helper, a PS3 owner): false.
+MM_FN bool other_playlist(uintptr_t base) {
+    uint8_t *ms = sess(base, MS);
+    const uint8_t *o = u3x_find_member(ms, rd<uint32_t>(ms, S_OWNER));
+    if (!o || rd<uint32_t>(o, M_DLEN) != 0x40) return false;
+    const uint32_t tag = rd<uint32_t>(o, M_DATA + MD_PLAYLIST);
+    return (tag >> 16) == PLAYLIST_MARK && (tag & 0xffffu) != playlist_fold(mm.playlist);
+}
+
 // a joined room: 0x113 from a leader, then the lobby or the late join
 MM_FN void joined(uintptr_t base) {
+    // a search guest in a room of another playlist leaves it as a failed join (kept 30 s on the failed list, 0x103,
+    // state 0x26: leave, then decide again)
+    if (!mm.member && mm.playlist && other_playlist(base)) {
+        say(t_other_pl);
+        join_failed(base);
+        return;
+    }
     Line l;
     put(l.s(t_joined).x(mm.target, 8));
     if (!mm.member) tell_party(base, false);
@@ -53550,10 +53575,13 @@ MM_FN int u3x_mm_msg(uintptr_t base, uint32_t type) {
     return type == 0x118 ? 1 : 0;   // 0x118 has no PS3 reader
 }
 
-// u3x_xp_md_out: the matchmaking v2 bit into an outgoing member data block (capability byte 2, the other bits kept)
+// u3x_xp_md_out: the matchmaking v2 bit into an outgoing member data block (capability byte 2, the other bits kept),
+// and the playlist tag of this PC's matchmaking playlist (none before the first matchmaking start)
 MM_FN void u3x_mm_md_mark(uint8_t *md) {
     const uint8_t old = md[mm254::CAP2];
     md[mm254::CAP2] = static_cast<uint8_t>(mm254::CAP2_MARK | ((old & 0xf0) == mm254::CAP2_MARK ? old & 0x0e : 0) | mm254::CAP2_MM);
+    if (const uint32_t pl = mm254::mm.playlist)
+        *reinterpret_cast<uint32_t *>(md + mm254::MD_PLAYLIST) = mm254::PLAYLIST_MARK << 16 | mm254::playlist_fold(pl);
 }
 
 // u3x_hs_frame: 1 = this driver runs the lobby of the match room (its migration is its own, not 0x12 -> 0x11)
