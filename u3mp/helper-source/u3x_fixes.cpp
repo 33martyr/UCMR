@@ -52405,6 +52405,7 @@ MM_RO const char t_107[] = "0x107 in: matchmaking page, waiting for the leader's
 MM_RO const char t_res_in[] = "0x100 in from ", t_res_in2[] = ": ids ", t_out101[] = ", 0x101 out ";
 MM_RO const char t_late[] = "late join of a match in progress (0x27): status 5, 25 s", t_wd[] = "start watchdog: 60 s at 0x2e / 0x2f (log only, PS3 has no limit)";
 MM_RO const char t_other_pl[] = "mode check: owner on another playlist, leaving";
+MM_RO const char t_late_nv[] = "late join: no vote, 0x27";
 MM_RO const char t_left_room[] = "the match room is gone: 0x26";
 // v7.264 (not PS3 rules: PS3 had many players, two lone PCs could not stay in step; PS3 guests have no time limit)
 constexpr uint32_t STAGGER_T = 8 * TPS, GUEST_T = 90 * TPS;
@@ -53151,6 +53152,20 @@ MM_FN void owner_wait(uintptr_t base, void *s) {
 // s = the menu state, for the loading page the fallback has to show itself (u3x_guest_load_pages)
 MM_FN void guest_start(uintptr_t base, void *s) {
     uint8_t *ms = sess(base, MS);
+    // A search guest alone at 0x12 whose owner's start-load (its settings event) comes before any vote: the match is
+    // already being played. The search result showed the room without the in-progress flag, so joined() took the lobby,
+    // and the forced load below then waited at 0x2f for a start that never comes. Take the late join instead (0x27),
+    // as joined() does for the flag; the LoadLevel is already in, so the flag goes up again for the wait to take.
+    if (mm.st == 0x12 && !mm.member && ps4_state(base) == 0x12 && ms[S_START_LOAD] && party_size(base) == 1) {
+        say(t_late_nv);
+        show(base, 5, LATE_WAIT);
+        mm.in_progress = 1;
+        u3x_jip_wait(base, room_of(base), 1, nullptr);
+        ms[S_START_LOAD] = 1;
+        mm.late_first = 0;
+        go(base, 0x27);
+        return;
+    }
     const uint32_t t = now(base);
     if (ps4_state(base) != 0x12 || !ms[S_START_LOAD]) {
         mm.lobby_t = 0;
@@ -55514,8 +55529,11 @@ FAM_FN void u3x_mm_focus(uintptr_t base, int32_t *ev, void *s) {
     if ((ev[0] != 6 && ev[0] != 21) || (ext_eb()[1] & 0x20000u)) return;   // the keeper's own switch
     const uint8_t *source = rd<const uint8_t *>(ev, 0x98);
     if (!source || rd<uint32_t>(source, 0x1c) != 0x4c414eadu) return;   // the party box
-    const uint8_t *top = u3h_active_page_object(base);
-    if (!top || rd<uint32_t>(top, 0x10) != 0xe35f0f1au) return;     // PAGE_MULTIPLAYER_MATCHMAKING
+    // While the search runs (net status > 0, the rule of the matchmaking player lists), on every page, not
+    // only PAGE_MULTIPLAYER_MATCHMAKING: the PROFILE page opened from its Profile row (Customization / Records) shows
+    // the same list, op 21 stayed unanswered there, so the game put the focus on the own row and took it back after
+    // each Left. The keeper reads the active page itself.
+    if (at<int32_t>(base + 0x17d5c58 + 0x40) <= 0) return;
     // v7.260: op 21 "may the box take the focus": the helper's party list answers yes only while the player is in the
     // box; the matchmaking player list left it unanswered (the game's default: yes), so the game kept moving the
     // focus into the box and the keeper kept moving it back (the highlight jumped left and right without input)
@@ -55555,3 +55573,31 @@ FAM_FN void u3x_fam_tick(uintptr_t base, Log) {
 }  // extern "C"
 #pragma clang section text=".text.ext" rodata=".rodata.ext"   // back to the file default (region B)
 // ===== v7.254 fam end =====
+// ===== v7.267 host table (docs/WINDOWS-DEPENDENCIES.md §4.10, phase 5) =====
+// The runtime's host function table (gow3_pc/src/uncharted_host.h) for the PC platform layer (plat_pc.inc), the same on
+// Windows and Linux. Its address is read at kind 44 (PLAT_BIND in plat.h) through the runtime's own sceKernelOpen /
+// sceKernelRead / sceKernelClose of /dev/uncharted_host: 8 bytes. Version 1, at least 208 bytes; an older runtime has no
+// such file, and the PC layer then finds no host functions (no network, as without Winsock).
+namespace {
+U3X_RO const char host_path[] = "/dev/uncharted_host";
+constexpr uint32_t HOST_VERSION = 1, HOST_SIZE = 208;
+U3X_BSS const void *g_host;
+}  // namespace
+extern "C" {
+U3X_FN int u3x_host_bind(uintptr_t open, uintptr_t read, uintptr_t close) {
+    if (g_host) return 1;
+    if (!open || !read || !close) return 0;
+    const int64_t fd = reinterpret_cast<int64_t (*)(const char *, int, int)>(open)(host_path, 0, 0);
+    if (fd < 0) return 0;
+    uint64_t address = 0;
+    const int64_t n = reinterpret_cast<int64_t (*)(int, void *, uint64_t)>(read)(static_cast<int>(fd), &address, 8);
+    reinterpret_cast<int64_t (*)(int)>(close)(static_cast<int>(fd));
+    if (n != 8 || !ptr_ok(reinterpret_cast<const void *>(address))) return 0;
+    const uint32_t *table = reinterpret_cast<const uint32_t *>(address);
+    if (table[0] != HOST_VERSION || table[1] < HOST_SIZE) return 0;
+    g_host = table;
+    return 1;
+}
+U3X_FN const void *u3x_host(void) { return g_host; }
+}  // extern "C"
+// ===== v7.267 host table end =====
