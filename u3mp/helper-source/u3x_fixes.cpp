@@ -53093,7 +53093,11 @@ MM_FN void owner_wait(uintptr_t base, void *s) {
         return;
     }
     if (static_cast<int32_t>(t - mm.kick_t) < static_cast<int32_t>(2 * TPS)) return;   // kicks under way
-    const int b = balance_now(base, s, count);
+    // No team-balance kick: a match starts with uneven teams (3 players in TDM: 2 v 1). The kicked player
+    // found the room again in its next search and rejoined within a second, so it flickered in and out of the lobby
+    // list until the countdown let it stay; three friends could not play together otherwise.
+    (void)balance_now;
+    const int b = 0;
     if (b > 0) {
         mm.kick_t = t;
         return;
